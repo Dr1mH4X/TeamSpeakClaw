@@ -70,6 +70,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Update version in Cargo.toml
+        if: needs.meta.outputs.is-release == 'true'
+        run: |
+          VERSION="${{ needs.meta.outputs.version }}"
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

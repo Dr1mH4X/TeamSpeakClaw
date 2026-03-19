@@ -1,6 +1,6 @@
 [package]
 name = "teamspeakclaw"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 authors = ["Dr1mH4X"]
 repository = "https://github.com/Dr1mH4X/TeamSpeakClaw"
