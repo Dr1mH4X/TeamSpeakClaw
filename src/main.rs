@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     // TS adapter (connects, registers events, keeps alive)
-    let adapter = Arc::new(TsAdapter::connect(config.clone()).await?);
+    let adapter = TsAdapter::connect(config.clone()).await?;
     adapter
         .set_nickname(&config.load().teamspeak.bot_nickname)
         .await?;

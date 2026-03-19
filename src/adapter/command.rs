@@ -1,1 +1,88 @@
-// Command definitions
+use crate::error::{AppError, Result};
+
+/// All ServerQuery response errors have an id= field.
+pub fn check_ts_error(response: &str) -> Result<()> {
+    let id: u32 = response
+        .split_whitespace()
+        .find(|s| s.starts_with("error id="))
+        .or_else(|| response.split_whitespace().find(|s| s.starts_with("id=")))
+        .and_then(|s| {
+            let val = if s.starts_with("error id=") { &s[9..] } else { &s[3..] };
+            val.parse().ok()
+        })
+        .unwrap_or(0);
+        
+    if id == 0 {
+        return Ok(());
+    }
+    let msg = response
+        .split_whitespace()
+        .find(|s| s.starts_with("msg="))
+        .map(|s| ts_unescape(&s[4..]))
+        .unwrap_or_else(|| "unknown error".into());
+    Err(AppError::TsError { code: id, message: msg })
+}
+
+fn ts_unescape(s: &str) -> String {
+    s.replace("\\s", " ")
+        .replace("\\p", "|")
+        .replace("\\\\", "\\")
+}
+
+pub fn ts_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace(' ', "\\s")
+        .replace('|', "\\p")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+        .replace('/', "\\/")
+}
+
+/// High-level command builders — return the raw query string to send.
+pub fn cmd_login(name: &str, pass: &str) -> String {
+    format!("login {} {}", ts_escape(name), ts_escape(pass))
+}
+pub fn cmd_use(server_id: u32) -> String { format!("use {server_id}") }
+pub fn cmd_whoami() -> String { "whoami".into() }
+pub fn cmd_version() -> String { "version".into() }
+pub fn cmd_clientupdate_nick(nick: &str) -> String {
+    format!("clientupdate client_nickname={}", ts_escape(nick))
+}
+pub fn cmd_register_event(event: &str) -> String {
+    format!("servernotifyregister event={event}")
+}
+pub fn cmd_clientlist() -> String {
+    "clientlist -groups".into()
+}
+pub fn cmd_clientfind(pattern: &str) -> String {
+    format!("clientfind pattern={}", ts_escape(pattern))
+}
+pub fn cmd_clientinfo(clid: u32) -> String {
+    format!("clientinfo clid={clid}")
+}
+pub fn cmd_clientdbinfo(cldbid: u32) -> String {
+    format!("clientdbinfo cldbid={cldbid}")
+}
+pub fn cmd_poke(clid: u32, msg: &str) -> String {
+    format!("clientpoke clid={clid} msg={}", ts_escape(msg))
+}
+pub fn cmd_send_text(target_mode: u8, target: u32, msg: &str) -> String {
+    format!(
+        "sendtextmessage targetmode={target_mode} target={target} msg={}",
+        ts_escape(msg)
+    )
+}
+pub fn cmd_kick(clid: u32, reason: &str) -> String {
+    format!("clientkick clid={clid} reasonid=5 reasonmsg={}", ts_escape(reason))
+}
+pub fn cmd_ban(clid: u32, time_secs: u64, reason: &str) -> String {
+    format!(
+        "banclient clid={clid} time={time_secs} banreason={}",
+        ts_escape(reason)
+    )
+}
+pub fn cmd_move(clid: u32, channel_id: u32) -> String {
+    format!("clientmove clid={clid} cid={channel_id}")
+}
+pub fn cmd_serverinfo() -> String { "serverinfo".into() }
+pub fn cmd_channellist() -> String { "channellist".into() }

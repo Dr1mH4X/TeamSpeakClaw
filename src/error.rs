@@ -19,4 +19,15 @@ pub enum AppError {
 
     #[error("LLM error: {0}")]
     LlmError(#[from] anyhow::Error),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
 }
+
+pub type Result<T> = std::result::Result<T, AppError>;

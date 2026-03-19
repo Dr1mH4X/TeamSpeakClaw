@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    pub teamspeak: TeamSpeakConfig,
+    pub teamspeak: TsConfig,
     pub llm: LlmConfig,
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
@@ -13,7 +13,7 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct TeamSpeakConfig {
+pub struct TsConfig {
     pub host: String,
     pub port: u16,
     pub ssh_port: u16,
