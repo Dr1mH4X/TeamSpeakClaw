@@ -1,55 +1,38 @@
-# Project Implementation Plan: TeamSpeakClaw
+# TeamSpeakClaw Implementation Plan
 
-This plan outlines the steps to build the LLM-powered TeamSpeak ServerQuery bot.
+## Overview
+TeamSpeakClaw 是一个基于 Rust 编写的 LLM 驱动的 TeamSpeak 3 ServerQuery 机器人。它使用 OpenAI（或兼容提供商）来解释用户指令并执行服务器操作（踢出、封禁、戳一戳、私信等）。
 
-## Phase 1: Adapter & Network Layer (Current Priority)
-Focus: Establish reliable communication with the TeamSpeak server.
-- [ ] Implement `TsConnection`: TCP stream management with `tokio`.
-- [ ] Implement SSH support (optional/future) or plain TCP initially.
-- [ ] Implement `Command` trait and serialization for TS3 protocol.
-- [ ] Implement `Response` parsing (parsing key-value pairs from TS3).
-- [ ] Implement `Event` parsing (parsing `notify*` events).
-- [ ] Implement Keepalive/Heartbeat loop.
-- [ ] Implement Reconnection logic with backoff.
+## Completed Tasks
+- [x] 项目结构与配置 (`settings.toml`, `acl.toml`, `prompts.toml`)
+- [x] TS3 适配器 (`src/adapter/`)
+    - [x] TCP 连接与心跳保活
+    - [x] 协议编码/解码
+    - [x] 事件解析 (文本消息, 用户进入, 用户离开, 用户列表)
+- [x] 核心基础设施
+    - [x] 基于服务器组的权限系统 (`src/permission/`)
+    - [x] 客户端缓存 (`src/cache/`) 与自动刷新
+    - [x] 审计日志 (`src/audit/`)
+- [x] LLM 集成 (`src/llm/`)
+    - [x] OpenAI 提供商
+    - [x] 带工具调用的对话补全
+- [x] 技能系统 (`src/skills/`)
+    - [x] 技能注册表与 Trait 定义
+    - [x] 通讯技能: 戳一戳 (Poke), 发送私信
+    - [x] 管理技能: 踢出 (Kick), 封禁 (Ban)
+    - [x] 信息技能: 获取用户列表
+- [x] 事件路由器 (`src/router.rs`)
+    - [x] 消息处理循环
+    - [x] 上下文构建
+    - [x] LLM 工具执行循环 (双轮对话)
 
-## Phase 2: Permission System
-Focus: Security and access control.
-- [ ] Implement `AclConfig` loading (already started in config module).
-- [ ] Implement `PermissionGate::check_permission(client_db_id, skill_name)`.
-- [ ] Implement Server Group ID caching/lookup if needed.
+## Next Steps
+- [ ] 添加更多技能 (频道管理, 服务器信息)
+- [ ] 实现速率限制 (`RateLimitConfig` 已定义但未实装)
+- [ ] 增强审计日志 (记录具体操作结果)
+- [ ] 为关键组件添加测试
+- [ ] 支持 SSH 连接 (配置项已存在但仅实现了 TCP)
 
-## Phase 3: Core Logic (Router & Cache)
-Focus: State management and event dispatch.
-- [ ] Implement `ClientCache`: Store `client_id` -> `client_info` mapping.
-- [ ] Implement `ClientCache` background refresh task (`clientlist`).
-- [ ] Implement `EventRouter`: Handle `notifytextmessage` and dispatch to LLM.
-- [ ] Implement Rate Limiting using `governor`.
-
-## Phase 4: LLM Integration
-Focus: AI logic and tool calling.
-- [ ] Implement `LlmProvider` trait.
-- [ ] Implement `OpenAiProvider` (and others if needed).
-- [ ] Implement `LlmEngine::chat_completion` with tool definitions.
-- [ ] Implement JSON Schema generation for Skills.
-
-## Phase 5: Skills Implementation
-Focus: The actual capabilities of the bot.
-- [ ] **Communication**: `poke_client`, `send_private_msg`, `send_channel_msg`.
-- [ ] **Moderation**: `kick_client`, `ban_client`, `move_client`.
-- [ ] **Information**: `get_client_info`, `get_server_info`, `list_clients`.
-- [ ] Implement `SkillRegistry` to manage and lookup skills.
-
-## Phase 6: Audit & Logging
-Focus: Observability.
-- [ ] Implement `AuditLog`: Write structured logs (JSONL) for every action.
-- [ ] specific event logging.
-
-## Phase 7: Final Polish
-- [ ] Configuration hot-reloading.
-- [ ] Dockerfile / Deployment scripts.
-- [ ] Final integration testing.
-
-## Notes
-- Use `anyhow` for error handling in app logic, `thiserror` for library-level errors.
-- Ensure all IO is async.
-- Strict type safety for TS3 commands to avoid injection.
+## Usage
+1. 配置 `config/settings.toml`, `config/acl.toml`, 和 `config/prompts.toml`。
+2. 运行 `cargo run`。

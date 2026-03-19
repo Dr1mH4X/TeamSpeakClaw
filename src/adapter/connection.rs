@@ -1,7 +1,7 @@
 use crate::{
     adapter::{
         command::{cmd_login, cmd_register_event, cmd_use, cmd_clientupdate_nick},
-        event::{parse_event, TsEvent},
+        event::{parse_events, TsEvent},
     },
     config::{AppConfig, TsConfig},
     error::{AppError, Result},
@@ -93,6 +93,9 @@ impl TsAdapter {
         self.send_raw(&cmd_register_event("textserver")).await?;
         self.send_raw(&cmd_register_event("server")).await?;
         
+        // Populate initial client list
+        self.send_raw("clientlist -uid -groups").await?;
+
         info!("ServerQuery session initialized");
         Ok(())
     }
@@ -131,8 +134,7 @@ impl TsAdapter {
                         error!("TS3 Error: {trimmed}");
                     }
 
-                    let event = parse_event(trimmed);
-                    if !matches!(event, TsEvent::Unknown) {
+                    for event in parse_events(trimmed) {
                         if let Err(e) = self.event_tx.send(event) {
                             debug!("No active subscribers for event: {e}");
                         }
