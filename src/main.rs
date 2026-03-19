@@ -17,6 +17,7 @@ use crate::skills::{
     communication::{PokeClient, SendPrivateMsg},
     information::GetClientList,
     moderation::{BanClient, KickClient},
+    music::MusicControl,
     SkillRegistry,
 };
 use crate::{
@@ -51,6 +52,7 @@ async fn main() -> Result<()> {
     registry.register(Box::new(KickClient));
     registry.register(Box::new(BanClient));
     registry.register(Box::new(GetClientList));
+    registry.register(Box::new(MusicControl));
 
     // LLM 引擎
     let llm = Arc::new(LlmEngine::new(config.clone()));
