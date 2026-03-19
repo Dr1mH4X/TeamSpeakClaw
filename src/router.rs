@@ -72,8 +72,8 @@ impl EventRouter {
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
-        // Ignore self
-        if event.invoker_name == self.config.load().teamspeak.bot_nickname {
+        // Ignore self by client ID
+        if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
 
