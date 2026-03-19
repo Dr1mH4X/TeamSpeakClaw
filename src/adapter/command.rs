@@ -70,7 +70,11 @@ pub fn cmd_clientupdate_nick(nick: &str) -> String {
     format!("clientupdate client_nickname={}", ts_escape(nick))
 }
 pub fn cmd_register_event(event: &str) -> String {
-    format!("servernotifyregister event={event}")
+    if event == "textchannel" {
+        format!("servernotifyregister event={event} id=0")
+    } else {
+        format!("servernotifyregister event={event}")
+    }
 }
 pub fn cmd_clientlist() -> String {
     "clientlist -groups".into()

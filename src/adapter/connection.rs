@@ -7,6 +7,7 @@ use crate::{
     error::{AppError, Result},
 };
 use arc_swap::ArcSwap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -20,6 +21,7 @@ pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     config: Arc<ArcSwap<AppConfig>>,
+    bot_clid: AtomicU32,
 }
 
 impl TsAdapter {
@@ -36,6 +38,7 @@ impl TsAdapter {
             writer: Mutex::new(writer),
             event_tx: tx,
             config: config.clone(),
+            bot_clid: AtomicU32::new(0),
         });
 
         // 启动读取任务
@@ -97,8 +100,18 @@ impl TsAdapter {
         // 拉取初始客户端列表
         self.send_raw("clientlist -uid -groups").await?;
 
+        // 获取自身 ID
+        self.send_raw("whoami").await?;
+        
+        // 等待一下以确保 bot_clid 被更新 (虽然不是强一致性，但足够)
+        sleep(Duration::from_millis(200)).await;
+
         info!("ServerQuery session initialized");
         Ok(())
+    }
+
+    pub fn get_bot_clid(&self) -> u32 {
+        self.bot_clid.load(Ordering::Relaxed)
     }
 
     pub async fn set_nickname(&self, nick: &str) -> Result<()> {
@@ -147,6 +160,16 @@ impl TsAdapter {
 
                     if trimmed.starts_with("error id=") && !trimmed.contains("id=0") {
                         error!("TS3 Error: {trimmed}");
+                    }
+
+                    // Parse whoami response to get our own client_id
+                    if trimmed.contains("client_id=") && trimmed.contains("virtualserver_status=") {
+                        if let Some(part) = trimmed.split_whitespace().find(|s| s.starts_with("client_id=")) {
+                             if let Ok(clid) = part[10..].parse::<u32>() {
+                                 self.bot_clid.store(clid, Ordering::Relaxed);
+                                 debug!("Updated bot_clid to {}", clid);
+                             }
+                        }
                     }
 
                     for event in parse_events(trimmed) {

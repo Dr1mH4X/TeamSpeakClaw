@@ -2,7 +2,7 @@
 
 use crate::config::AuditConfig;
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Local, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs::OpenOptions;
@@ -25,15 +25,15 @@ struct LogEntry {
 impl AuditLog {
     pub fn new(config: &AuditConfig) -> Result<Self> {
         let writer = if config.enabled {
-            if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
-                // 如果目录已存在则忽略该错误；否则向上返回错误。
-                // 注意：当目录已存在时，create_dir_all 会返回成功。
-                return Err(e.into());
-            }
+            std::fs::create_dir_all(&config.log_dir)?;
+            
+            let filename = Local::now().format("tsclaw-%y-%m-%d.log").to_string();
+            let path = format!("{}/{}", config.log_dir, filename);
+            
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(format!("{}/{}", config.log_dir, config.log_file))?;
+                .open(path)?;
             Some(Mutex::new(file))
         } else {
             None
