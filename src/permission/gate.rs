@@ -19,7 +19,9 @@ impl PermissionGate {
             let match_group = if rule.server_group_ids.is_empty() {
                 true // Empty group list matches everyone (default rule)
             } else {
-                rule.server_group_ids.iter().any(|gid| caller_groups.contains(gid))
+                rule.server_group_ids
+                    .iter()
+                    .any(|gid| caller_groups.contains(gid))
             };
 
             if match_group {
@@ -28,10 +30,16 @@ impl PermissionGate {
                     || rule.allowed_skills.iter().any(|s| s == skill_name);
 
                 if allowed {
-                    debug!("Access granted: Rule '{}' allows skill '{}'", rule.name, skill_name);
+                    debug!(
+                        "Access granted: Rule '{}' allows skill '{}'",
+                        rule.name, skill_name
+                    );
                     return Ok(());
                 } else {
-                    debug!("Access denied: Rule '{}' does not allow skill '{}'", rule.name, skill_name);
+                    debug!(
+                        "Access denied: Rule '{}' does not allow skill '{}'",
+                        rule.name, skill_name
+                    );
                     return Err(AppError::PermissionDenied {
                         reason: format!("Rule '{}' does not allow this skill", rule.name),
                     });
@@ -44,14 +52,16 @@ impl PermissionGate {
             reason: "No matching permission rule found".into(),
         })
     }
-    
+
     pub fn get_allowed_skills(&self, caller_groups: &[u32]) -> Vec<String> {
         let mut skills = Vec::new();
         for rule in &self.config.rules {
             let match_group = if rule.server_group_ids.is_empty() {
                 true
             } else {
-                rule.server_group_ids.iter().any(|gid| caller_groups.contains(gid))
+                rule.server_group_ids
+                    .iter()
+                    .any(|gid| caller_groups.contains(gid))
             };
 
             if match_group {
@@ -69,7 +79,9 @@ impl PermissionGate {
 
     pub fn can_target(&self, caller_groups: &[u32], target_groups: &[u32]) -> bool {
         // Check if target is protected
-        let is_protected = target_groups.iter().any(|gid| self.config.acl.protected_group_ids.contains(gid));
+        let is_protected = target_groups
+            .iter()
+            .any(|gid| self.config.acl.protected_group_ids.contains(gid));
         if !is_protected {
             return true;
         }
@@ -79,14 +91,16 @@ impl PermissionGate {
             let match_group = if rule.server_group_ids.is_empty() {
                 true
             } else {
-                rule.server_group_ids.iter().any(|gid| caller_groups.contains(gid))
+                rule.server_group_ids
+                    .iter()
+                    .any(|gid| caller_groups.contains(gid))
             };
 
             if match_group {
                 return rule.can_target_admins;
             }
         }
-        
+
         false
     }
 }

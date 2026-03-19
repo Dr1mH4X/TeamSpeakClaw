@@ -27,42 +27,48 @@ impl ClientCache {
             clients: DashMap::new(),
         }
     }
-    
+
     pub fn get_client(&self, clid: u32) -> Option<ClientInfo> {
         self.clients.get(&clid).map(|r| r.clone())
     }
 
     pub async fn run_refresh_loop(&self, adapter: Arc<TsAdapter>) {
         loop {
-             let interval = self.config.load().cache.refresh_interval_secs;
-             if interval == 0 {
-                 sleep(Duration::from_secs(60)).await;
-                 continue;
-             }
-             sleep(Duration::from_secs(interval)).await;
-             
-             // Refresh client list
-             if let Err(e) = adapter.send_raw("clientlist -uid -groups").await {
-                 tracing::error!("Failed to refresh client cache: {e}");
-             }
+            let interval = self.config.load().cache.refresh_interval_secs;
+            if interval == 0 {
+                sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+            sleep(Duration::from_secs(interval)).await;
+
+            // Refresh client list
+            if let Err(e) = adapter.send_raw("clientlist -uid -groups").await {
+                tracing::error!("Failed to refresh client cache: {e}");
+            }
         }
     }
-    
+
     pub fn update_client(&self, clid: u32, cldbid: u32, nickname: String, server_groups: Vec<u32>) {
-        self.clients.insert(clid, ClientInfo {
+        self.clients.insert(
             clid,
-            cldbid,
-            nickname,
-            server_groups,
-            last_seen: Instant::now(),
-        });
+            ClientInfo {
+                clid,
+                cldbid,
+                nickname,
+                server_groups,
+                last_seen: Instant::now(),
+            },
+        );
     }
-    
+
     pub fn remove_client(&self, clid: u32) {
         self.clients.remove(&clid);
     }
-    
+
     pub fn list_clients(&self) -> Vec<ClientInfo> {
-        self.clients.iter().map(|entry| entry.value().clone()).collect()
+        self.clients
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 }

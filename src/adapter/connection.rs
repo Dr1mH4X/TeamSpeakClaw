@@ -1,6 +1,6 @@
 use crate::{
     adapter::{
-        command::{cmd_login, cmd_register_event, cmd_use, cmd_clientupdate_nick},
+        command::{cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
         event::{parse_events, TsEvent},
     },
     config::{AppConfig, TsConfig},
@@ -38,19 +38,19 @@ impl TsAdapter {
             config: config.clone(),
         });
 
-        // Spawn reader task
+        // 启动读取任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.reader_loop(BufReader::new(reader)).await;
         });
 
-        // Init: login, use, register events
+        // 初始化：登录、选择虚拟服务器、注册事件
         if let Err(e) = adapter.init(&cfg.teamspeak).await {
             error!("Failed to initialize TeamSpeak session: {e}");
             return Err(e);
         }
 
-        // Spawn keepalive task
+        // 启动保活任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.keepalive_loop().await;
@@ -65,8 +65,8 @@ impl TsAdapter {
         for attempt in 0..cfg.reconnect_max_retries {
             match TcpStream::connect(&addr).await {
                 Ok(s) => {
-                    // Skip TS welcome banner (2 lines)
-                    // We let the reader loop handle it
+                    // 跳过 TS 欢迎横幅（2 行）
+                    // 交由读取循环处理
                     return Ok(s);
                 }
                 Err(e) => {
@@ -83,17 +83,18 @@ impl TsAdapter {
     }
 
     async fn init(&self, cfg: &TsConfig) -> Result<()> {
-        // Wait a bit for banner to be processed
+        // 等待一小段时间，让欢迎横幅先被处理
         sleep(Duration::from_millis(500)).await;
-        
-        self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass)).await?;
+
+        self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass))
+            .await?;
         self.send_raw(&cmd_use(cfg.server_id)).await?;
         self.send_raw(&cmd_register_event("textprivate")).await?;
         self.send_raw(&cmd_register_event("textchannel")).await?;
         self.send_raw(&cmd_register_event("textserver")).await?;
         self.send_raw(&cmd_register_event("server")).await?;
-        
-        // Populate initial client list
+
+        // 拉取初始客户端列表
         self.send_raw("clientlist -uid -groups").await?;
 
         info!("ServerQuery session initialized");
@@ -127,9 +128,11 @@ impl TsAdapter {
                 }
                 Ok(_) => {
                     let trimmed = line.trim();
-                    if trimmed.is_empty() { continue; }
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                     debug!("<< {trimmed}");
-                    
+
                     if trimmed.starts_with("error id=") && !trimmed.contains("id=0") {
                         error!("TS3 Error: {trimmed}");
                     }

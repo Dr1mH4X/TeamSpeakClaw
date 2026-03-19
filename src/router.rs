@@ -1,5 +1,5 @@
 use crate::adapter::command::cmd_send_text;
-use crate::adapter::{TsAdapter, TsEvent, TextMessageEvent, TextMessageTarget};
+use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 use crate::audit::AuditLog;
 use crate::cache::ClientCache;
 use crate::config::{AppConfig, PromptsConfig};
@@ -10,7 +10,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
 pub struct EventRouter {
     config: Arc<ArcSwap<AppConfig>>,
@@ -48,14 +48,19 @@ impl EventRouter {
 
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
-        
+
         while let Ok(event) = rx.recv().await {
             match event {
                 TsEvent::TextMessage(msg) => {
                     self.handle_message(msg).await;
                 }
                 TsEvent::ClientEnterView(e) => {
-                    self.cache.update_client(e.clid, e.cldbid, e.client_nickname, e.client_server_groups);
+                    self.cache.update_client(
+                        e.clid,
+                        e.cldbid,
+                        e.client_nickname,
+                        e.client_server_groups,
+                    );
                 }
                 TsEvent::ClientLeftView(e) => {
                     self.cache.remove_client(e.clid);
@@ -65,38 +70,49 @@ impl EventRouter {
         }
         Ok(())
     }
-    
+
     async fn handle_message(&self, event: TextMessageEvent) {
         // Ignore self
         if event.invoker_name == self.config.load().teamspeak.bot_nickname {
             return;
         }
-        
+
         // Only respond to private messages or if triggered by prefix
         let is_private = event.target_mode == TextMessageTarget::Private;
         let msg_content = event.message.trim();
         let triggers = &self.config.load().bot.trigger_prefixes;
-        
+
         let should_respond = is_private && self.config.load().bot.respond_to_private
-            || triggers.iter().any(|prefix| msg_content.starts_with(prefix));
-            
+            || triggers
+                .iter()
+                .any(|prefix| msg_content.starts_with(prefix));
+
         if !should_respond {
             return;
         }
 
-        info!("Handling message from {}: {}", event.invoker_name, msg_content);
-        
+        info!(
+            "Handling message from {}: {}",
+            event.invoker_name, msg_content
+        );
+
         let groups = if let Some(client) = self.cache.get_client(event.invoker_id) {
             client.server_groups
         } else {
-            debug!("Client {} not in cache, assuming default permissions", event.invoker_id);
+            debug!(
+                "Client {} not in cache, assuming default permissions",
+                event.invoker_id
+            );
             vec![]
         };
 
         // 1. Prepare context
         let system_prompt = &self.prompts.system_prompt;
-        let user_ctx = format!("User: {} (clid: {}, groups: {:?})", event.invoker_name, event.invoker_id, groups);
-        
+        let user_ctx = format!(
+            "User: {} (clid: {}, groups: {:?})",
+            event.invoker_name, event.invoker_id, groups
+        );
+
         let mut messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "system", "content": user_ctx}),
@@ -113,22 +129,29 @@ impl EventRouter {
                 // 4. Handle response
                 if response.tool_calls.is_empty() {
                     if let Some(content) = response.content {
-                        let _ = self.adapter.send_raw(&cmd_send_text(1, event.invoker_id, &content)).await;
+                        let _ = self
+                            .adapter
+                            .send_raw(&cmd_send_text(1, event.invoker_id, &content))
+                            .await;
                     }
                     return;
                 }
 
                 // Prepare tool calls for history
-                let assistant_tool_calls: Vec<_> = response.tool_calls.iter().map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string()
-                        }
+                let assistant_tool_calls: Vec<_> = response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| {
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments.to_string()
+                            }
+                        })
                     })
-                }).collect();
+                    .collect();
 
                 messages.push(json!({
                     "role": "assistant",
@@ -164,7 +187,10 @@ impl EventRouter {
                 match self.llm.chat(messages, tools).await {
                     Ok(final_response) => {
                         if let Some(content) = final_response.content {
-                            let _ = self.adapter.send_raw(&cmd_send_text(1, event.invoker_id, &content)).await;
+                            let _ = self
+                                .adapter
+                                .send_raw(&cmd_send_text(1, event.invoker_id, &content))
+                                .await;
                         }
                     }
                     Err(e) => error!("LLM error (2nd turn): {e}"),
@@ -172,7 +198,14 @@ impl EventRouter {
             }
             Err(e) => {
                 error!("LLM error: {e}");
-                let _ = self.adapter.send_raw(&cmd_send_text(1, event.invoker_id, "Sorry, I encountered an error processing your request.")).await;
+                let _ = self
+                    .adapter
+                    .send_raw(&cmd_send_text(
+                        1,
+                        event.invoker_id,
+                        "Sorry, I encountered an error processing your request.",
+                    ))
+                    .await;
             }
         }
     }

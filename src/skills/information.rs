@@ -7,8 +7,12 @@ pub struct GetClientList;
 
 #[async_trait]
 impl Skill for GetClientList {
-    fn name(&self) -> &'static str { "get_client_list" }
-    fn description(&self) -> &'static str { "Get the list of online clients." }
+    fn name(&self) -> &'static str {
+        "get_client_list"
+    }
+    fn description(&self) -> &'static str {
+        "Get the list of online clients."
+    }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -18,15 +22,18 @@ impl Skill for GetClientList {
     }
     async fn execute(&self, _args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clients: Vec<_> = ctx.cache.list_clients();
-        let json_clients: Vec<_> = clients.iter().map(|c| {
-            json!({
-                "clid": c.clid,
-                "nickname": c.nickname,
-                "dbid": c.cldbid,
-                "groups": c.server_groups
+        let json_clients: Vec<_> = clients
+            .iter()
+            .map(|c| {
+                json!({
+                    "clid": c.clid,
+                    "nickname": c.nickname,
+                    "dbid": c.cldbid,
+                    "groups": c.server_groups
+                })
             })
-        }).collect();
-        
+            .collect();
+
         Ok(json!({"status": "ok", "clients": json_clients}))
     }
 }

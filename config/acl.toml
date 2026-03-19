@@ -1,8 +1,8 @@
-# Permission rules evaluated top-to-bottom; first match wins.
-# server_group_ids: TeamSpeak server group IDs (integer)
-# allowed_skills: list of skill names, or ["*"] for all
-# can_target_admins: whether this role can perform actions ON admin-group members
-# rate_limit_override: optional per-role requests_per_minute (overrides global)
+# 权限规则从上到下评估；第一个匹配的生效。
+# server_group_ids: TeamSpeak 服务器组 ID（整数）
+# allowed_skills: 技能名称列表，或者 ["*"] 表示全部
+# can_target_admins: 此角色是否可以对管理员组成员执行操作
+# rate_limit_override: 可选的每角色每分钟请求数（覆盖全局设置）
 
 [[rules]]
 name = "superadmin"
@@ -52,10 +52,10 @@ can_target_admins = false
 
 [[rules]]
 name = "default"
-server_group_ids = []          # empty = catch-all
+server_group_ids = []          # 空数组 = 捕获所有剩余情况
 allowed_skills = []
 can_target_admins = false
 
-# Group IDs considered "admin-protected" (can_target_admins = false cannot act on these)
+# 被视为“受管理员保护”的组 ID（can_target_admins = false 不能对这些组执行操作）
 [acl]
 protected_group_ids = [6, 8, 9]
