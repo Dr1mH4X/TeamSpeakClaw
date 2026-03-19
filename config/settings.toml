@@ -1,0 +1,46 @@
+[teamspeak]
+host = "127.0.0.1"
+port = 10011
+ssh_port = 10022
+use_ssh = false
+login_name = "serveradmin"
+login_pass = ""           # override via env TS_LOGIN_PASS
+server_id = 1
+bot_nickname = "TSClaw"
+keepalive_interval_secs = 180
+reconnect_max_retries = 10
+reconnect_base_delay_ms = 1000
+
+[llm]
+provider = "openai"       # openai | anthropic | ollama
+api_key = ""              # override via env LLM_API_KEY
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+max_tokens = 1024
+timeout_secs = 30
+retry_max = 3
+retry_delay_ms = 500
+
+[bot]
+# Prefixes that trigger the bot in channel/server chat
+trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]
+# Private messages always trigger the bot
+respond_to_private = true
+# Max concurrent LLM requests
+max_concurrent_requests = 4
+
+[rate_limit]
+# Per-user token bucket
+requests_per_minute = 10
+burst_size = 3
+
+[audit]
+enabled = true
+log_dir = "./logs"
+log_file = "audit.jsonl"
+
+[cache]
+# Client list refresh interval
+refresh_interval_secs = 30
+# TTL for individual entries after they leave
+entry_ttl_secs = 300

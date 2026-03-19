@@ -1,0 +1,26 @@
+# Rust 构建产物
+/target/
+
+# 本地配置与敏感信息
+config/secrets.toml
+/config.json
+
+# 本地环境文件
+.env
+.env.*
+
+# IDE/系统文件
+.DS_Store
+Thumbs.db
+
+# AI
+.agents/
+.claude/
+
+# 日志
+logs/*.*
+
+
+# Added by cargo
+
+/target

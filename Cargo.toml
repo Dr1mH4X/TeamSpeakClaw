@@ -1,0 +1,41 @@
+[package]
+name = "teamspeakclaw"
+version = "0.1.0"
+edition = "2021"
+authors = ["Copilot <223556219+Copilot@users.noreply.github.com>"]
+description = "LLM-powered TeamSpeak ServerQuery bot"
+license = "MIT"
+
+[[bin]]
+name = "teamspeakclaw"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dashmap = "6"
+governor = "0.6"
+nonzero_ext = "0.3"
+notify = { version = "6", features = ["macos_kqueue"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+thiserror = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+once_cell = "1"
+arc-swap = "1"
+futures = "0.3"
+bytes = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+wiremock = "0.6"
