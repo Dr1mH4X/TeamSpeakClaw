@@ -242,7 +242,7 @@ impl Default for ErrorPrompts {
 }
 
 // Default configuration file contents with Chinese comments
-const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
+pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
@@ -290,7 +290,7 @@ refresh_interval_secs = 30
 entry_ttl_secs = 300
 "#;
 
-const DEFAULT_ACL_TOML: &str = r#"# 权限规则从上到下评估；第一个匹配的生效。
+pub const DEFAULT_ACL_TOML: &str = r#"# 权限规则从上到下评估；第一个匹配的生效。
 # server_group_ids: TeamSpeak 服务器组 ID（整数）
 # allowed_skills: 技能名称列表，或者 ["*"] 表示全部
 # can_target_admins: 此角色是否可以对管理员组成员执行操作
@@ -329,7 +329,7 @@ can_target_admins = false
 protected_group_ids = [6, 8, 9]
 "#;
 
-const DEFAULT_PROMPTS_TOML: &str = r#"[system]
+pub const DEFAULT_PROMPTS_TOML: &str = r#"[system]
 content = """
 你是 TSClaw，一个 TeamSpeak 服务器的自动化管理员助手。
 你的工作是解释管理员的命令并调用合适的工具。
