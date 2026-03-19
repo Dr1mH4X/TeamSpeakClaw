@@ -1,6 +1,7 @@
 pub mod communication;
 pub mod information;
 pub mod moderation;
+pub mod music;
 
 use crate::adapter::TsAdapter;
 use crate::cache::ClientCache;
@@ -39,7 +40,7 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn list_skills(&self) -> Vec<String> {
         self.skills.iter().map(|s| s.key().clone()).collect()
     }
