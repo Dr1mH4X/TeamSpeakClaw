@@ -87,7 +87,12 @@ pub struct AclSettings {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct PromptsConfig {
-    pub system_prompt: String,
+    pub system: SystemPrompts,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SystemPrompts {
+    pub content: String,
 }
 
 impl AppConfig {

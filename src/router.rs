@@ -107,7 +107,7 @@ impl EventRouter {
         };
 
         // 1. Prepare context
-        let system_prompt = &self.prompts.system_prompt;
+        let system_prompt = &self.prompts.system.content;
         let user_ctx = format!(
             "User: {} (clid: {}, groups: {:?})",
             event.invoker_name, event.invoker_id, groups
