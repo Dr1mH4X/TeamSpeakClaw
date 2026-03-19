@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::error::{AppError, Result};
 
 /// 所有 ServerQuery 的响应错误都包含 `id=` 字段。

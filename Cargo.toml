@@ -2,7 +2,8 @@
 name = "teamspeakclaw"
 version = "0.1.0"
 edition = "2021"
-authors = ["Copilot <223556219+Copilot@users.noreply.github.com>"]
+authors = ["Dr1mH4X"]
+repository = "https://github.com/Dr1mH4X/TeamSpeakClaw"
 description = "LLM-powered TeamSpeak ServerQuery bot"
 license = "MIT"
 

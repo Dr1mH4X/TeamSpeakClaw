@@ -95,6 +95,13 @@ impl EventRouter {
             "Handling message from {}: {}",
             event.invoker_name, msg_content
         );
+        
+        // Log the message reception
+        self.audit.log("message_received", json!({
+            "invoker": event.invoker_name,
+            "clid": event.invoker_id,
+            "content": msg_content
+        }));
 
         let groups = if let Some(client) = self.cache.get_client(event.invoker_id) {
             client.server_groups
@@ -167,9 +174,26 @@ impl EventRouter {
                             cache: self.cache.clone(),
                             caller_id: event.invoker_id,
                         };
-                        match skill.execute(call.arguments, &ctx).await {
-                            Ok(val) => val.to_string(),
-                            Err(e) => format!("Error: {e}"),
+                        match skill.execute(call.arguments.clone(), &ctx).await {
+                            Ok(val) => {
+                                self.audit.log("skill_executed", json!({
+                                    "skill": call.name,
+                                    "caller": event.invoker_name,
+                                    "args": call.arguments,
+                                    "result": val
+                                }));
+                                val.to_string()
+                            },
+                            Err(e) => {
+                                let err_msg = format!("Error: {e}");
+                                self.audit.log("skill_failed", json!({
+                                    "skill": call.name,
+                                    "caller": event.invoker_name,
+                                    "args": call.arguments,
+                                    "error": err_msg
+                                }));
+                                err_msg
+                            },
                         }
                     } else {
                         "Error: Skill not found".to_string()

@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(cfg: &AppConfig) {
+fn init_tracing(_cfg: &AppConfig) {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt()
