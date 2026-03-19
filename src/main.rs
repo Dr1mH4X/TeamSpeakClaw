@@ -1,7 +1,7 @@
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod adapter;
 mod audit;
@@ -77,9 +77,35 @@ async fn main() -> Result<()> {
     });
 
     // 主事件循环
-    let router = EventRouter::new(config, prompts, adapter, cache, gate, llm, registry, audit);
+    let router = EventRouter::new(
+        config,
+        prompts,
+        adapter.clone(),
+        cache,
+        gate,
+        llm,
+        registry,
+        audit,
+    );
     info!("Bot ready. Listening for events.");
-    router.run().await?;
+
+    // Ctrl+C 信号处理
+    tokio::select! {
+        res = router.run() => {
+            if let Err(e) = res {
+                error!("Event router exited with error: {}", e);
+            } else {
+                warn!("Event router exited unexpectedly");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down...");
+        }
+    }
+
+    if let Err(e) = adapter.quit().await {
+        error!("Failed to send quit command: {}", e);
+    }
 
     Ok(())
 }

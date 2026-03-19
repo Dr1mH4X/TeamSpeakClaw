@@ -11,6 +11,13 @@ license = "MIT"
 name = "teamspeakclaw"
 path = "src/main.rs"
 
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -35,6 +42,7 @@ once_cell = "1"
 arc-swap = "1"
 futures = "0.3"
 bytes = "1"
+rand = "0.10.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

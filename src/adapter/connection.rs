@@ -102,11 +102,23 @@ impl TsAdapter {
     }
 
     pub async fn set_nickname(&self, nick: &str) -> Result<()> {
-        self.send_raw(&cmd_clientupdate_nick(nick)).await
+        let suffix = rand::random::<u16>();
+        let nickname = format!("{}_{}", nick, suffix);
+        info!("Setting nickname to {}", nickname);
+        self.send_raw(&cmd_clientupdate_nick(&nickname)).await
+    }
+
+    pub async fn quit(&self) -> Result<()> {
+        info!("Sending quit command to TeamSpeak server");
+        self.send_raw("quit").await
     }
 
     pub async fn send_raw(&self, cmd: &str) -> Result<()> {
-        debug!(">> {cmd}");
+        if cmd.starts_with("login ") {
+            debug!(">> login [REDACTED]");
+        } else {
+            debug!(">> {cmd}");
+        }
         let mut w = self.writer.lock().await;
         w.write_all(format!("{cmd}\n").as_bytes()).await?;
         w.flush().await?;
