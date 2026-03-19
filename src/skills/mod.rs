@@ -37,7 +37,7 @@ impl SkillRegistry {
     pub fn get(&self, name: &str) -> Option<impl std::ops::Deref<Target = Box<dyn Skill>> + '_> {
         self.skills.get(name)
     }
-    
+
     pub fn list_skills(&self) -> Vec<String> {
         self.skills.iter().map(|s| s.key().clone()).collect()
     }
@@ -45,7 +45,10 @@ impl SkillRegistry {
     pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<Value> {
         self.skills
             .iter()
-            .filter(|s| allowed_skills.contains(&"*".to_string()) || allowed_skills.contains(&s.key().clone()))
+            .filter(|s| {
+                allowed_skills.contains(&"*".to_string())
+                    || allowed_skills.contains(&s.key().clone())
+            })
             .map(|s| {
                 serde_json::json!({
                     "type": "function",

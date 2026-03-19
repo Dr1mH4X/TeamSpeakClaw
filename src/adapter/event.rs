@@ -11,15 +11,15 @@ pub struct TextMessageEvent {
     pub target_mode: TextMessageTarget,
     pub invoker_name: String,
     pub invoker_uid: String,
-    pub invoker_id: u32,      // clid (session)
+    pub invoker_id: u32, // clid（会话）
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextMessageTarget {
-    Private,   // targetmode=1
-    Channel,   // targetmode=2
-    Server,    // targetmode=3
+    Private, // targetmode=1（私聊）
+    Channel, // targetmode=2（频道）
+    Server,  // targetmode=3（服务器）
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ pub struct ClientLeftEvent {
     pub clid: u32,
 }
 
-/// Parse a raw ServerQuery notification line into a list of TsEvents.
+/// 将一行原始 ServerQuery 通知解析为 TsEvent 列表。
 pub fn parse_events(line: &str) -> Vec<TsEvent> {
     if line.starts_with("notifytextmessage") {
         vec![parse_text_message(line)]
@@ -44,10 +44,8 @@ pub fn parse_events(line: &str) -> Vec<TsEvent> {
     } else if line.starts_with("notifyclientleftview") {
         vec![parse_client_left(line)]
     } else if line.starts_with("clid=") {
-        // Handle clientlist response (pipe separated)
-        line.split('|')
-            .map(parse_client_enter)
-            .collect()
+        // 处理 clientlist 响应（使用 '|' 分隔）
+        line.split('|').map(parse_client_enter).collect()
     } else {
         vec![]
     }
@@ -95,7 +93,9 @@ fn parse_text_message(line: &str) -> TsEvent {
 
 fn parse_client_enter(line: &str) -> TsEvent {
     let clid = kv(line, "clid").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let cldbid = kv(line, "client_database_id").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let cldbid = kv(line, "client_database_id")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let client_nickname = kv(line, "client_nickname").unwrap_or_default();
     let groups = kv(line, "client_servergroups")
         .unwrap_or_default()
@@ -103,7 +103,12 @@ fn parse_client_enter(line: &str) -> TsEvent {
         .filter_map(|s| s.parse().ok())
         .collect();
 
-    TsEvent::ClientEnterView(ClientEnterEvent { clid, cldbid, client_nickname, client_server_groups: groups })
+    TsEvent::ClientEnterView(ClientEnterEvent {
+        clid,
+        cldbid,
+        client_nickname,
+        client_server_groups: groups,
+    })
 }
 
 fn parse_client_left(line: &str) -> TsEvent {

@@ -24,8 +24,8 @@ impl AuditLog {
     pub fn new(config: &AuditConfig) -> Result<Self> {
         let writer = if config.enabled {
             if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
-                // Ignore error if dir exists, or propagate?
-                // create_dir_all succeeds if dir exists.
+                // 如果目录已存在则忽略该错误；否则向上返回错误。
+                // 注意：当目录已存在时，create_dir_all 会返回成功。
                 return Err(e.into());
             }
             let file = OpenOptions::new()
@@ -41,9 +41,11 @@ impl AuditLog {
             writer,
         })
     }
-    
+
     pub fn log(&self, event: &str, details: Value) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if let Some(writer) = &self.writer {
             let entry = LogEntry {
                 ts: Utc::now().to_rfc3339(),
@@ -53,7 +55,7 @@ impl AuditLog {
             };
             if let Ok(line) = serde_json::to_string(&entry) {
                 if let Ok(mut w) = writer.lock() {
-                     let _ = writeln!(w, "{}", line);
+                    let _ = writeln!(w, "{}", line);
                 }
             }
         }

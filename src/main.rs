@@ -26,19 +26,19 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env if present
-    // let _ = dotenvy::dotenv(); // dotenvy not in cargo.toml, skipping or need to add
+    // 如存在则加载 .env
+    // let _ = dotenvy::dotenv(); // Cargo.toml 中未包含 dotenvy，先跳过（如需使用请添加依赖）
 
-    // Init tracing
+    // 初始化 tracing 日志
     let cfg = AppConfig::load("config/settings.toml")?;
     init_tracing(&cfg);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
-    // Shared config with hot-reload support
+    // 共享配置（支持热重载）
     let config = Arc::new(ArcSwap::new(Arc::new(cfg)));
 
-    // Infrastructure
+    // 基础设施组件
     let audit = Arc::new(AuditLog::new(&config.load().audit)?);
     let cache = Arc::new(ClientCache::new(config.clone()));
     let acl_config = crate::config::AclConfig::load("config/acl.toml")?;
@@ -52,23 +52,23 @@ async fn main() -> Result<()> {
     registry.register(Box::new(BanClient));
     registry.register(Box::new(GetClientList));
 
-    // LLM engine
+    // LLM 引擎
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
-    // TS adapter (connects, registers events, keeps alive)
+    // TS 适配器（连接、注册事件、保持心跳）
     let adapter = TsAdapter::connect(config.clone()).await?;
     adapter
         .set_nickname(&config.load().teamspeak.bot_nickname)
         .await?;
 
-    // Start background cache refresh
+    // 启动后台缓存刷新任务
     let cache_clone = cache.clone();
     let adapter_clone = adapter.clone();
     tokio::spawn(async move {
         cache_clone.run_refresh_loop(adapter_clone).await;
     });
 
-    // Start config hot-reload watcher
+    // 启动配置热重载监视器
     let config_clone = config.clone();
     tokio::spawn(async move {
         if let Err(e) = crate::config::watch_config(config_clone).await {
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Main event loop
+    // 主事件循环
     let router = EventRouter::new(config, prompts, adapter, cache, gate, llm, registry, audit);
     info!("Bot ready. Listening for events.");
     router.run().await?;
