@@ -304,48 +304,24 @@ can_target_admins = true
 rate_limit_override = 60
 
 [[rules]]
-name = "admin"
-server_group_ids = [8, 9]
+name = "default_user"
+server_group_ids = [8]
 allowed_skills = [
   "poke_client",
   "send_private_msg",
   "send_channel_msg",
-  "ban_client",
-  "kick_client",
-  "move_client",
   "get_client_info",
   "list_clients",
   "get_server_info",
+  "music_control"
 ]
 can_target_admins = false
 rate_limit_override = 20
 
 [[rules]]
-name = "moderator"
-server_group_ids = [10, 11]
-allowed_skills = [
-  "poke_client",
-  "kick_client",
-  "move_client",
-  "list_clients",
-  "get_server_info",
-]
-can_target_admins = false
-
-[[rules]]
-name = "vip"
-server_group_ids = [15]
-allowed_skills = [
-  "poke_client",
-  "get_server_info",
-  "list_clients",
-]
-can_target_admins = false
-
-[[rules]]
 name = "default"
 server_group_ids = []          # 空数组 = 捕获所有剩余情况
-allowed_skills = []
+allowed_skills = ["music_control"]
 can_target_admins = false
 
 # 被视为“受管理员保护”的组 ID（can_target_admins = false 不能对这些组执行操作）
