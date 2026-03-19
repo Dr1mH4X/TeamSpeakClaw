@@ -13,9 +13,15 @@ mod permission;
 mod router;
 mod skills;
 
+use crate::skills::{
+    communication::{PokeClient, SendPrivateMsg},
+    information::GetClientList,
+    moderation::{BanClient, KickClient},
+    SkillRegistry,
+};
 use crate::{
     adapter::TsAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig, llm::LlmEngine,
-    permission::PermissionGate, router::EventRouter, skills::SkillRegistry,
+    permission::PermissionGate, router::EventRouter,
 };
 
 #[tokio::main]
@@ -36,8 +42,15 @@ async fn main() -> Result<()> {
     let audit = Arc::new(AuditLog::new(&config.load().audit)?);
     let cache = Arc::new(ClientCache::new(config.clone()));
     let acl_config = crate::config::AclConfig::load("config/acl.toml")?;
+    let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
     let gate = Arc::new(PermissionGate::new(acl_config));
+    let prompts = Arc::new(prompts_config);
     let registry = Arc::new(SkillRegistry::default());
+    registry.register(Box::new(PokeClient));
+    registry.register(Box::new(SendPrivateMsg));
+    registry.register(Box::new(KickClient));
+    registry.register(Box::new(BanClient));
+    registry.register(Box::new(GetClientList));
 
     // LLM engine
     let llm = Arc::new(LlmEngine::new(config.clone()));
@@ -64,7 +77,7 @@ async fn main() -> Result<()> {
     });
 
     // Main event loop
-    let router = EventRouter::new(config, adapter, cache, gate, llm, registry, audit);
+    let router = EventRouter::new(config, prompts, adapter, cache, gate, llm, registry, audit);
     info!("Bot ready. Listening for events.");
     router.run().await?;
 

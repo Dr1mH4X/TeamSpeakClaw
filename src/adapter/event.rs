@@ -35,16 +35,21 @@ pub struct ClientLeftEvent {
     pub clid: u32,
 }
 
-/// Parse a raw ServerQuery notification line into a TsEvent.
-pub fn parse_event(line: &str) -> TsEvent {
+/// Parse a raw ServerQuery notification line into a list of TsEvents.
+pub fn parse_events(line: &str) -> Vec<TsEvent> {
     if line.starts_with("notifytextmessage") {
-        parse_text_message(line)
+        vec![parse_text_message(line)]
     } else if line.starts_with("notifycliententerview") {
-        parse_client_enter(line)
+        vec![parse_client_enter(line)]
     } else if line.starts_with("notifyclientleftview") {
-        parse_client_left(line)
+        vec![parse_client_left(line)]
+    } else if line.starts_with("clid=") {
+        // Handle clientlist response (pipe separated)
+        line.split('|')
+            .map(parse_client_enter)
+            .collect()
     } else {
-        TsEvent::Unknown
+        vec![]
     }
 }
 

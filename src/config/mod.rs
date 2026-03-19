@@ -85,6 +85,11 @@ pub struct AclSettings {
     pub protected_group_ids: Vec<u32>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct PromptsConfig {
+    pub system_prompt: String,
+}
+
 impl AppConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -97,6 +102,14 @@ impl AclConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: AclConfig = toml::from_str(&content)?;
+        Ok(config)
+    }
+}
+
+impl PromptsConfig {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: PromptsConfig = toml::from_str(&content)?;
         Ok(config)
     }
 }
