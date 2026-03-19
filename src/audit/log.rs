@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::config::AuditConfig;
 use anyhow::Result;
 use chrono::Utc;
@@ -12,7 +14,7 @@ pub struct AuditLog {
     writer: Option<Mutex<std::fs::File>>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct LogEntry {
     ts: String,
     level: String,

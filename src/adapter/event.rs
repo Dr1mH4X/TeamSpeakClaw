@@ -10,6 +10,7 @@ pub enum TsEvent {
 pub struct TextMessageEvent {
     pub target_mode: TextMessageTarget,
     pub invoker_name: String,
+    #[allow(dead_code)]
     pub invoker_uid: String,
     pub invoker_id: u32, // clid（会话）
     pub message: String,

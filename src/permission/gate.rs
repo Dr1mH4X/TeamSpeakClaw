@@ -12,6 +12,15 @@ impl PermissionGate {
     }
 
     /// Check if a user (with given server groups) can execute a skill.
+    #[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
     pub fn check(&self, caller_groups: &[u32], skill_name: &str) -> Result<()> {
         // Iterate rules top-to-bottom
         for rule in &self.config.rules {
@@ -77,6 +86,15 @@ impl PermissionGate {
         skills
     }
 
+    #[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
     pub fn can_target(&self, caller_groups: &[u32], target_groups: &[u32]) -> bool {
         // Check if target is protected
         let is_protected = target_groups

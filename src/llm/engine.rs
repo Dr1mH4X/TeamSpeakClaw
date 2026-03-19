@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub struct LlmEngine {
+    #[allow(dead_code)]
     config: Arc<ArcSwap<AppConfig>>,
     provider: Box<dyn LlmProvider>,
 }

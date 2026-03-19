@@ -12,6 +12,7 @@ pub struct ClientInfo {
     pub cldbid: u32,
     pub nickname: String,
     pub server_groups: Vec<u32>,
+#[allow(dead_code)]
     pub last_seen: Instant,
 }
 

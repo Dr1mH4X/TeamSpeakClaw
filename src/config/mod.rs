@@ -1,3 +1,21 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
@@ -113,8 +131,17 @@ impl AclConfig {
 
 impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: PromptsConfig = toml::from_str(&content)?;
+        // Debug: print content length
+        // println!("Loading prompts from {:?}, length: {}", path.as_ref(), content.len());
+        let content = std::fs::read_to_string(&path)?;
+        let config: PromptsConfig = match toml::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Failed to parse prompts config from {:?}: {}", path.as_ref(), e);
+                println!("Content preview:\n{}", &content.chars().take(200).collect::<String>());
+                return Err(e.into());
+            }
+        };
         Ok(config)
     }
 }
