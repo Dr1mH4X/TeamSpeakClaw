@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -455,7 +453,31 @@ impl PromptsConfig {
 }
 
 pub async fn watch_config(config: std::sync::Arc<arc_swap::ArcSwap<AppConfig>>) -> Result<()> {
-    // TODO: Implement file watcher
-    let _ = config;
+    use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(
+        move |res: std::result::Result<Event, notify::Error>| {
+            if let Ok(event) = res {
+                if event.kind.is_modify() {
+                    let _ = tx.blocking_send(());
+                }
+            }
+        },
+    )?;
+
+    watcher.watch(Path::new("config/settings.toml"), RecursiveMode::NonRecursive)?;
+
+    while rx.recv().await.is_some() {
+        match AppConfig::load("config/settings.toml") {
+            Ok(new_config) => {
+                config.store(std::sync::Arc::new(new_config));
+                tracing::info!("Config reloaded");
+            }
+            Err(e) => tracing::warn!("Config reload failed: {e}"),
+        }
+    }
+
     Ok(())
 }
