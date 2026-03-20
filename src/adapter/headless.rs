@@ -22,6 +22,9 @@ use crate::headless::{
     identity::Identity,
 };
 
+#[cfg(all(feature = "headless", feature = "audio"))]
+use crate::headless::AudioConfig;
+
 /// 无头客户端适配器
 #[cfg(feature = "headless")]
 pub struct HeadlessAdapter {
@@ -67,6 +70,8 @@ impl HeadlessAdapter {
             nickname: cfg.teamspeak.bot_nickname.clone(),
             identity,
             connect_timeout: std::time::Duration::from_secs(cfg.teamspeak.headless.connect_timeout_secs),
+            #[cfg(feature = "audio")]
+            audio: Some(AudioConfig::default()), // TODO: Load from config
         };
         
         // 创建连接
