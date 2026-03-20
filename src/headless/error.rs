@@ -47,4 +47,11 @@ pub enum HeadlessError {
 
     #[error("Not connected")]
     NotConnected,
+
+    #[cfg(feature = "audio")]
+    #[error("Audio error: {0}")]
+    AudioError(String),
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

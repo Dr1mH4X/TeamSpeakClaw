@@ -1,4 +1,4 @@
-use crate::config::AclConfig;
+use crate::permission::acl::AclConfig;
 use crate::error::{AppError, Result};
 use tracing::debug;
 

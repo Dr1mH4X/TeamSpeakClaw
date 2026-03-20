@@ -24,6 +24,5 @@ pub use reconnect::{AutoReconnectConnection, ReconnectConfig, ReconnectEvent, Re
 
 #[cfg(feature = "audio")]
 pub use audio::{
-    AudioConfig, AudioError, AudioFrame, AudioProcessor, AudioReceiver, AudioSender,
-    FfmpegDecoder, FfmpegEncoder,
+    AudioConfig, AudioPlayer,
 };
