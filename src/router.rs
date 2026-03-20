@@ -3,6 +3,7 @@ use crate::adapter::{TextMessageEvent, TextMessageTarget, UnifiedAdapter, TsEven
 use crate::audit::AuditLog;
 use crate::cache::ClientCache;
 use crate::config::{AppConfig, PromptsConfig};
+use crate::error::AppError;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::skills::{ExecutionContext, SkillRegistry};
@@ -169,31 +170,53 @@ impl EventRouter {
                 // Execute tools
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-                        let ctx = ExecutionContext {
-                            adapter: self.adapter.clone(),
-                            cache: self.cache.clone(),
-                            caller_id: event.invoker_id,
-                        };
-                        match skill.execute(call.arguments.clone(), &ctx).await {
-                            Ok(val) => {
-                                self.audit.log("skill_executed", json!({
-                                    "skill": call.name,
-                                    "caller": event.invoker_name,
-                                    "args": call.arguments,
-                                    "result": val
-                                }));
-                                val.to_string()
-                            },
-                            Err(e) => {
-                                let err_msg = format!("Error: {e}");
-                                self.audit.log("skill_failed", json!({
-                                    "skill": call.name,
-                                    "caller": event.invoker_name,
-                                    "args": call.arguments,
-                                    "error": err_msg
-                                }));
-                                err_msg
-                            },
+                        // Pre-execution permission check
+                        if let Err(e) = self.gate.check(&groups, &call.name) {
+                            let err_msg = match &e {
+                                AppError::PermissionDenied { .. } => {
+                                    self.prompts.error.permission_denied.clone()
+                                }
+                                _ => format!("Error: {e}"),
+                            };
+                            self.audit.log("skill_denied", json!({
+                                "skill": call.name,
+                                "caller": event.invoker_name,
+                                "error": format!("{e}")
+                            }));
+                            err_msg
+                        } else {
+                            let ctx = ExecutionContext {
+                                adapter: self.adapter.clone(),
+                                cache: self.cache.clone(),
+                                caller_id: event.invoker_id,
+                                gate: self.gate.clone(),
+                            };
+                            match skill.execute(call.arguments.clone(), &ctx).await {
+                                Ok(val) => {
+                                    self.audit.log("skill_executed", json!({
+                                        "skill": call.name,
+                                        "caller": event.invoker_name,
+                                        "args": call.arguments,
+                                        "result": val
+                                    }));
+                                    val.to_string()
+                                },
+                                Err(e) => {
+                                    let err_msg = match &e {
+                                        AppError::TargetProtected => {
+                                            self.prompts.error.target_protected.clone()
+                                        }
+                                        _ => format!("Error: {e}"),
+                                    };
+                                    self.audit.log("skill_failed", json!({
+                                        "skill": call.name,
+                                        "caller": event.invoker_name,
+                                        "args": call.arguments,
+                                        "error": format!("{e}")
+                                    }));
+                                    err_msg
+                                },
+                            }
                         }
                     } else {
                         "Error: Skill not found".to_string()

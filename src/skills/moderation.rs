@@ -1,5 +1,5 @@
 use crate::adapter::command::{cmd_ban, cmd_kick};
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -29,6 +29,16 @@ impl Skill for KickClient {
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
         let reason = args["reason"].as_str().unwrap_or("Kicked by bot");
+
+        // Check if target is protected
+        if let Some(target) = ctx.cache.get_client(clid) {
+            let caller_groups = ctx.cache.get_client(ctx.caller_id)
+                .map(|c| c.server_groups)
+                .unwrap_or_default();
+            if !ctx.gate.can_target(&caller_groups, &target.server_groups) {
+                return Err(AppError::TargetProtected);
+            }
+        }
 
         ctx.adapter.send_raw(&cmd_kick(clid, reason)).await?;
         Ok(json!({"status": "ok", "message": "Client kicked"}))
@@ -64,6 +74,16 @@ impl Skill for BanClient {
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing time"))?;
         let reason = args["reason"].as_str().unwrap_or("Banned by bot");
+
+        // Check if target is protected
+        if let Some(target) = ctx.cache.get_client(clid) {
+            let caller_groups = ctx.cache.get_client(ctx.caller_id)
+                .map(|c| c.server_groups)
+                .unwrap_or_default();
+            if !ctx.gate.can_target(&caller_groups, &target.server_groups) {
+                return Err(AppError::TargetProtected);
+            }
+        }
 
         ctx.adapter.send_raw(&cmd_ban(clid, time, reason)).await?;
         Ok(json!({"status": "ok", "message": "Client banned"}))
