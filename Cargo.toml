@@ -57,6 +57,7 @@ der = { version = "0.7", features = ["alloc"], optional = true }
 elliptic-curve = { version = "0.13", optional = true }
 generic-array = { version = "0.14", optional = true }
 bitflags = "2.6"
+flate2 = { version = "1", optional = true }
 
 [features]
 default = ["serverquery"]
@@ -71,6 +72,7 @@ headless = [
     "dep:der",
     "dep:elliptic-curve",
     "dep:generic-array",
+    "dep:flate2",
 ]
 audio = ["headless"]
 
