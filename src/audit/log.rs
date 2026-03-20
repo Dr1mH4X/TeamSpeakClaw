@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::config::AuditConfig;
 use anyhow::Result;
 use chrono::{Local, Utc};
@@ -26,14 +24,11 @@ impl AuditLog {
     pub fn new(config: &AuditConfig) -> Result<Self> {
         let writer = if config.enabled {
             std::fs::create_dir_all(&config.log_dir)?;
-            
+
             let filename = Local::now().format("tsclaw-%y-%m-%d.log").to_string();
             let path = format!("{}/{}", config.log_dir, filename);
-            
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
+
+            let file = OpenOptions::new().create(true).append(true).open(path)?;
             Some(Mutex::new(file))
         } else {
             None

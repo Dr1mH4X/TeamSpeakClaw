@@ -1,3 +1,4 @@
+use crate::adapter::command::cmd_clientlist_uid_groups;
 use crate::adapter::UnifiedAdapter;
 use crate::config::AppConfig;
 use arc_swap::ArcSwap;
@@ -12,7 +13,6 @@ pub struct ClientInfo {
     pub cldbid: u32,
     pub nickname: String,
     pub server_groups: Vec<u32>,
-#[allow(dead_code)]
     pub last_seen: Instant,
 }
 
@@ -35,7 +35,9 @@ impl ClientCache {
 
     pub async fn run_refresh_loop(&self, adapter: Arc<UnifiedAdapter>) {
         loop {
-            let interval = self.config.load().cache.refresh_interval_secs;
+            let cfg = self.config.load();
+            let interval = cfg.cache.refresh_interval_secs;
+            let ttl_secs = cfg.cache.entry_ttl_secs;
             if interval == 0 {
                 sleep(Duration::from_secs(60)).await;
                 continue;
@@ -43,8 +45,15 @@ impl ClientCache {
             sleep(Duration::from_secs(interval)).await;
 
             // Refresh client list
-            if let Err(e) = adapter.send_raw("clientlist -uid -groups").await {
+            if let Err(e) = adapter.send_raw(&cmd_clientlist_uid_groups()).await {
                 tracing::error!("Failed to refresh client cache: {e}");
+            }
+
+            // TTL cleanup: remove stale entries
+            if ttl_secs > 0 {
+                let now = Instant::now();
+                let ttl = Duration::from_secs(ttl_secs);
+                self.clients.retain(|_, info| now.duration_since(info.last_seen) < ttl);
             }
         }
     }

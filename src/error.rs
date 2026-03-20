@@ -6,7 +6,6 @@ pub enum AppError {
     TsError { code: u32, message: String },
 
     #[error("Permission denied: {reason}")]
-    #[allow(dead_code)]
     PermissionDenied { reason: String },
 
     #[error("Rate limited")]
@@ -18,7 +17,6 @@ pub enum AppError {
     TargetNotFound { name: String },
 
     #[error("Target is protected")]
-    #[allow(dead_code)]
     TargetProtected,
 
     #[error("LLM error: {0}")]
