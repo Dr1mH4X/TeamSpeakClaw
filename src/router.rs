@@ -1,5 +1,5 @@
 use crate::adapter::command::cmd_send_text;
-use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
+use crate::adapter::{TextMessageEvent, TextMessageTarget, UnifiedAdapter, TsEvent};
 use crate::audit::AuditLog;
 use crate::cache::ClientCache;
 use crate::config::{AppConfig, PromptsConfig};
@@ -15,7 +15,7 @@ use tracing::{debug, error, info};
 pub struct EventRouter {
     config: Arc<ArcSwap<AppConfig>>,
     prompts: Arc<PromptsConfig>,
-    adapter: Arc<TsAdapter>,
+    adapter: Arc<UnifiedAdapter>,
     cache: Arc<ClientCache>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
@@ -27,7 +27,7 @@ impl EventRouter {
     pub fn new(
         config: Arc<ArcSwap<AppConfig>>,
         prompts: Arc<PromptsConfig>,
-        adapter: Arc<TsAdapter>,
+        adapter: Arc<UnifiedAdapter>,
         cache: Arc<ClientCache>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,

@@ -40,6 +40,12 @@ pub struct TsConfig {
     pub keepalive_interval_secs: u64,
     pub reconnect_max_retries: u32,
     pub reconnect_base_delay_ms: u64,
+    /// 连接模式: "serverquery" | "headless"
+    #[cfg(feature = "headless")]
+    pub connection_mode: String,
+    /// 无头客户端配置
+    #[cfg(feature = "headless")]
+    pub headless: HeadlessConfig,
 }
 
 impl Default for TsConfig {
@@ -56,6 +62,36 @@ impl Default for TsConfig {
             keepalive_interval_secs: 180,
             reconnect_max_retries: 10,
             reconnect_base_delay_ms: 1000,
+            #[cfg(feature = "headless")]
+            connection_mode: "serverquery".to_string(),
+            #[cfg(feature = "headless")]
+            headless: HeadlessConfig::default(),
+        }
+    }
+}
+
+/// 无头客户端配置
+#[cfg(feature = "headless")]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HeadlessConfig {
+    /// TeamSpeak 服务器地址 (host:voice_port)
+    pub server_address: String,
+    /// 身份密钥文件路径
+    pub identity_path: String,
+    /// 连接超时（秒）
+    pub connect_timeout_secs: u64,
+    /// ffmpeg 可执行文件路径 (可选，默认 "ffmpeg")
+    pub ffmpeg_path: Option<String>,
+}
+
+#[cfg(feature = "headless")]
+impl Default for HeadlessConfig {
+    fn default() -> Self {
+        Self {
+            server_address: "127.0.0.1:9987".to_string(),
+            identity_path: "./identity.toml".to_string(),
+            connect_timeout_secs: 30,
+            ffmpeg_path: None,
         }
     }
 }

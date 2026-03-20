@@ -11,6 +11,8 @@ mod cache;
 mod cli;
 mod config;
 mod error;
+#[cfg(feature = "headless")]
+mod headless;
 mod llm;
 mod permission;
 mod router;
@@ -25,7 +27,7 @@ use crate::skills::{
     SkillRegistry,
 };
 use crate::{
-    adapter::TsAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig, llm::LlmEngine,
+    adapter::UnifiedAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig, llm::LlmEngine,
     permission::PermissionGate, router::EventRouter,
 };
 
@@ -68,7 +70,7 @@ async fn main() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     // 5. 连接服务
-    let adapter = TsAdapter::connect(config.clone()).await?;
+    let adapter = Arc::new(UnifiedAdapter::connect(config.clone()).await?);
     adapter
         .set_nickname(&config.load().teamspeak.bot_nickname)
         .await?;

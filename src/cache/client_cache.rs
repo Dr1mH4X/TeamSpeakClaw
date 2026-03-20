@@ -1,4 +1,4 @@
-use crate::adapter::TsAdapter;
+use crate::adapter::UnifiedAdapter;
 use crate::config::AppConfig;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -33,7 +33,7 @@ impl ClientCache {
         self.clients.get(&clid).map(|r| r.clone())
     }
 
-    pub async fn run_refresh_loop(&self, adapter: Arc<TsAdapter>) {
+    pub async fn run_refresh_loop(&self, adapter: Arc<UnifiedAdapter>) {
         loop {
             let interval = self.config.load().cache.refresh_interval_secs;
             if interval == 0 {

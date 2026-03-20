@@ -3,7 +3,7 @@ pub mod information;
 pub mod moderation;
 pub mod music;
 
-use crate::adapter::TsAdapter;
+use crate::adapter::UnifiedAdapter;
 use crate::cache::ClientCache;
 use crate::error::Result;
 use async_trait::async_trait;
@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub struct ExecutionContext {
-    pub adapter: Arc<TsAdapter>,
+    pub adapter: Arc<UnifiedAdapter>,
     pub cache: Arc<ClientCache>,
     #[allow(dead_code)]
     pub caller_id: u32,

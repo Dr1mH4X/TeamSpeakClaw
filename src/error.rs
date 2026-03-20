@@ -6,6 +6,7 @@ pub enum AppError {
     TsError { code: u32, message: String },
 
     #[error("Permission denied: {reason}")]
+    #[allow(dead_code)]
     PermissionDenied { reason: String },
 
     #[error("Rate limited")]
@@ -31,6 +32,10 @@ pub enum AppError {
 
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+
+    #[error("Config error: {0}")]
+    #[allow(dead_code)]
+    ConfigError(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
