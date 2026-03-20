@@ -1,6 +1,6 @@
 use crate::{
     adapter::{
-        command::{cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
+        command::{cmd_clientupdate_nick, cmd_clientlist_uid_groups, cmd_login, cmd_quit, cmd_register_event, cmd_use, cmd_whoami},
         event::{parse_events, TsEvent},
     },
     config::{AppConfig, TsConfig},
@@ -98,10 +98,10 @@ impl TsAdapter {
         self.send_raw(&cmd_register_event("server")).await?;
 
         // 拉取初始客户端列表
-        self.send_raw("clientlist -uid -groups").await?;
+        self.send_raw(&cmd_clientlist_uid_groups()).await?;
 
         // 获取自身 ID
-        self.send_raw("whoami").await?;
+        self.send_raw(&cmd_whoami()).await?;
         
         // 等待一下以确保 bot_clid 被更新 (虽然不是强一致性，但足够)
         sleep(Duration::from_millis(200)).await;
@@ -123,7 +123,7 @@ impl TsAdapter {
 
     pub async fn quit(&self) -> Result<()> {
         info!("Sending quit command to TeamSpeak server");
-        self.send_raw("quit").await
+        self.send_raw(&cmd_quit()).await
     }
 
     pub async fn send_raw(&self, cmd: &str) -> Result<()> {
@@ -190,7 +190,7 @@ impl TsAdapter {
         loop {
             let interval = self.config.load().teamspeak.keepalive_interval_secs;
             sleep(Duration::from_secs(interval)).await;
-            if let Err(e) = self.send_raw("whoami").await {
+            if let Err(e) = self.send_raw(&cmd_whoami()).await {
                 error!("Keepalive failed: {e}");
             }
         }

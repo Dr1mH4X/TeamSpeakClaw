@@ -1,8 +1,7 @@
-#![allow(dead_code)]
-
 use crate::error::{AppError, Result};
 
 /// 所有 ServerQuery 的响应错误都包含 `id=` 字段。
+#[allow(dead_code)]
 pub fn check_ts_error(response: &str) -> Result<()> {
     let id: u32 = response
         .split_whitespace()
@@ -32,6 +31,7 @@ pub fn check_ts_error(response: &str) -> Result<()> {
     })
 }
 
+#[allow(dead_code)]
 fn ts_unescape(s: &str) -> String {
     s.replace("\\s", " ")
         .replace("\\p", "|")
@@ -49,7 +49,6 @@ pub fn ts_escape(s: &str) -> String {
 
 /// 高层命令构建器：返回要发送的原始查询字符串。
 pub fn cmd_login(name: &str, pass: &str) -> String {
-    // Avoid "login {} {}" string literal which might trigger heuristics
     let mut s = String::with_capacity(6 + name.len() + pass.len() + 2);
     s.push_str("login ");
     s.push_str(&ts_escape(name));
@@ -63,6 +62,7 @@ pub fn cmd_use(server_id: u32) -> String {
 pub fn cmd_whoami() -> String {
     "whoami".into()
 }
+#[allow(dead_code)]
 pub fn cmd_version() -> String {
     "version".into()
 }
@@ -76,15 +76,19 @@ pub fn cmd_register_event(event: &str) -> String {
         format!("servernotifyregister event={event}")
     }
 }
+#[allow(dead_code)]
 pub fn cmd_clientlist() -> String {
     "clientlist -groups".into()
 }
+#[allow(dead_code)]
 pub fn cmd_clientfind(pattern: &str) -> String {
     format!("clientfind pattern={}", ts_escape(pattern))
 }
+#[allow(dead_code)]
 pub fn cmd_clientinfo(clid: u32) -> String {
     format!("clientinfo clid={clid}")
 }
+#[allow(dead_code)]
 pub fn cmd_clientdbinfo(cldbid: u32) -> String {
     format!("clientdbinfo cldbid={cldbid}")
 }
@@ -109,12 +113,21 @@ pub fn cmd_ban(clid: u32, time_secs: u64, reason: &str) -> String {
         ts_escape(reason)
     )
 }
+#[allow(dead_code)]
 pub fn cmd_move(clid: u32, channel_id: u32) -> String {
     format!("clientmove clid={clid} cid={channel_id}")
 }
+#[allow(dead_code)]
 pub fn cmd_serverinfo() -> String {
     "serverinfo".into()
 }
+#[allow(dead_code)]
 pub fn cmd_channellist() -> String {
     "channellist".into()
+}
+pub fn cmd_clientlist_uid_groups() -> String {
+    "clientlist -uid -groups".into()
+}
+pub fn cmd_quit() -> String {
+    "quit".into()
 }

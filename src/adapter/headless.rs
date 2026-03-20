@@ -261,8 +261,7 @@ impl HeadlessAdapter {
         let suffix = rand::random::<u16>();
         let nickname = format!("{}_{}", nick, suffix);
         info!("Setting nickname to {}", nickname);
-        self.send_raw(&format!("clientupdate client_nickname={}", 
-            crate::adapter::command::ts_escape(&nickname))).await
+        self.send_raw(&crate::adapter::command::cmd_clientupdate_nick(&nickname)).await
     }
     
     /// 退出
