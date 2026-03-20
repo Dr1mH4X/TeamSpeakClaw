@@ -106,15 +106,25 @@ jobs:
         run: |
           mkdir -p dist
           SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
-          DEST="dist/${{ env.PROJECT_NAME }}-v${{ needs.meta.outputs.version }}-${{ matrix.platform }}${{ matrix.bin_suffix }}"
+          BIN_NAME="${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
+          ARCHIVE_NAME="${{ env.PROJECT_NAME }}-v${{ needs.meta.outputs.version }}-${{ matrix.platform }}"
 
           if [ -f "$SRC" ]; then
-            cp "$SRC" "$DEST"
-            echo "Artifact prepared: $DEST"
+            cp "$SRC" "dist/$BIN_NAME"
           else
             echo "Error: Binary not found at $SRC"
             exit 1
           fi
+
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            zip "${ARCHIVE_NAME}.zip" "$BIN_NAME"
+            echo "Artifact prepared: ${ARCHIVE_NAME}.zip"
+          else
+            tar czf "${ARCHIVE_NAME}.tar.gz" "$BIN_NAME"
+            echo "Artifact prepared: ${ARCHIVE_NAME}.tar.gz"
+          fi
+          rm "$BIN_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
