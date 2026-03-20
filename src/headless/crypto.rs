@@ -3,12 +3,12 @@
 //! 实现 ECDH 密钥交换和 AES-EAX 加密
 
 use aes::Aes128;
-use eax::{aead::Aead, AeadInPlace, Eax, KeyInit, Nonce, Tag};
+use eax::{AeadInPlace, Eax, KeyInit, Nonce, Tag};
 use p256::PublicKey;
 
 use crate::headless::{
     error::{HeadlessError, Result},
-    identity::{ts_hash, Identity},
+    identity::{ts_hash256, Identity},
     packet::{Packet, PacketType},
 };
 
@@ -160,12 +160,12 @@ impl TsCrypto {
         let iv_len = 10 + beta.len();
         let mut iv_struct = vec![0u8; iv_len];
 
-        // XOR 共享密钥和 alpha
+        // XOR shared_secret[0..alpha_len] with alpha -> iv_struct[0..alpha_len]
         xor_bytes(&mut iv_struct, shared_secret, alpha, alpha.len());
 
-        // XOR 共享密钥和 beta
-        let beta_start = alpha.len();
-        xor_bytes_range(&mut iv_struct, shared_secret, beta, beta_start);
+        // XOR shared_secret[10..10+beta_len] with beta -> iv_struct[10..10+beta_len]
+        let beta_start = 10;
+        xor_bytes_range(&mut iv_struct, &shared_secret[10..], beta, beta_start);
 
         self.iv_struct = Some(iv_struct);
 
@@ -182,25 +182,19 @@ impl TsCrypto {
             .as_ref()
             .ok_or_else(|| HeadlessError::CryptoError("IV struct not initialized".into()))?;
 
-        let half = iv_struct.len() / 2;
-
+        // 对每个包类型派生唯一的 key 和 nonce
+        // 参考 TS3AudioBot: hash = SHA256([direction(1) | packet_type(1) | generation(4) | iv_struct])
+        // 前 16 字节为 key，后 16 字节为 nonce
         for i in 0..PACKET_TYPE_KINDS {
-            // 计算密钥
-            let key_input = &iv_struct[..half];
-            let key_hash = ts_hash(key_input);
-            self.cached_keys[i] = key_hash[..16].try_into().unwrap();
+            let mut input = Vec::with_capacity(2 + 4 + iv_struct.len());
+            input.push(0x31); // direction: client->server
+            input.push(i as u8);
+            input.extend_from_slice(&0u32.to_be_bytes()); // generation 0
+            input.extend_from_slice(iv_struct);
 
-            // 计算 IV
-            let iv_input = &iv_struct[half..];
-            let iv_hash = ts_hash(iv_input);
-            self.cached_ivs[i] = iv_hash[..16].try_into().unwrap();
-
-            // 通过改变输入来使每个包类型不同
-            if i < PACKET_TYPE_KINDS - 1 {
-                // 简单的差异化处理
-                self.cached_keys[i][0] ^= i as u8;
-                self.cached_ivs[i][0] ^= i as u8;
-            }
+            let hash = ts_hash256(&input);
+            self.cached_keys[i] = hash[..16].try_into().unwrap();
+            self.cached_ivs[i] = hash[16..32].try_into().unwrap();
         }
 
         Ok(())
@@ -251,7 +245,7 @@ impl TsCrypto {
             || packet.header.packet_type == PacketType::Ping
             || packet.header.packet_type == PacketType::Pong
         {
-            // 这些包类型不加密
+            // 这些包类型不加密，使用 fake_signature
             packet.mac = FAKE_SIGNATURE;
             return Ok(());
         }
@@ -264,24 +258,23 @@ impl TsCrypto {
         let key = &self.cached_keys[packet_type_idx];
         let iv = &self.cached_ivs[packet_type_idx];
 
-        // 构造 nonce
+        // 构造 nonce (14 bytes IV + 2 bytes packet_id)
         let mut nonce_bytes = [0u8; 16];
         nonce_bytes[..14].copy_from_slice(&iv[..14]);
         nonce_bytes[14..].copy_from_slice(&packet.header.packet_id.to_be_bytes());
 
-        // AES-EAX 加密
+        // AES-EAX 加密，使用包头作为 AAD
         let cipher =
             Eax::<Aes128>::new_from_slice(key).map_err(|_| HeadlessError::EncryptionFailed)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
+        let header_bytes = packet.header.to_bytes();
 
-        let ciphertext = cipher
-            .encrypt(nonce, packet.data.as_ref())
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, &header_bytes, &mut packet.data)
             .map_err(|_| HeadlessError::EncryptionFailed)?;
 
-        // EAX 返回 Vec<u8>，直接使用
-        packet.data = ciphertext;
-        // MAC 从 tag 中提取（需要单独计算）
-        packet.mac = [0u8; 8]; // 临时设置，后续需要正确处理 tag
+        // EAX 返回 16 字节 tag，TeamSpeak 只用前 8 字节作为 MAC
+        packet.mac = tag[..8].try_into().unwrap();
 
         Ok(())
     }
@@ -296,8 +289,8 @@ impl TsCrypto {
             || packet.header.packet_type == PacketType::Ping
             || packet.header.packet_type == PacketType::Pong
         {
-            // 这些包类型不加密
-            return Ok(true);
+            // 这些包类型不加密，验证 fake_signature
+            return Ok(packet.mac == FAKE_SIGNATURE);
         }
 
         let packet_type_idx = packet.header.packet_type as usize;
@@ -313,18 +306,19 @@ impl TsCrypto {
         nonce_bytes[..14].copy_from_slice(&iv[..14]);
         nonce_bytes[14..].copy_from_slice(&packet.header.packet_id.to_be_bytes());
 
-        // 构造 tag
+        // 构造完整 16 字节 tag (前 8 字节来自 MAC，后 8 字节补零)
         let mut tag_bytes = [0u8; 16];
         tag_bytes[..8].copy_from_slice(&packet.mac);
 
-        // AES-EAX 解密
+        // AES-EAX 解密，使用包头作为 AAD
         let cipher =
             Eax::<Aes128>::new_from_slice(key).map_err(|_| HeadlessError::DecryptionFailed)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let tag = Tag::from_slice(&tag_bytes);
+        let header_bytes = packet.header.to_bytes();
 
         cipher
-            .decrypt_in_place_detached(nonce, b"", &mut packet.data, tag)
+            .decrypt_in_place_detached(nonce, &header_bytes, &mut packet.data, tag)
             .map(|_| true)
             .map_err(|_| HeadlessError::DecryptionFailed)
     }

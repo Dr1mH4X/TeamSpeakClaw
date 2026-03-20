@@ -2,9 +2,6 @@
 //! 
 //! 基于 TS3AudioBot 的 TSLib 实现，提供完整的 TeamSpeak 客户端协议支持。
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 pub mod connection;
 pub mod crypto;
 pub mod error;

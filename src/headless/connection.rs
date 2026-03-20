@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info};
 
@@ -81,10 +81,10 @@ pub struct Connection {
     state: Arc<RwLock<ConnectionState>>,
     /// 包处理器
     packet_handler: Arc<PacketHandler>,
-    /// 接收通道
-    packet_rx: Arc<Mutex<mpsc::Receiver<Packet>>>,
+    /// 接收通道（connect 时 move 进消息循环，使用 std::sync::Mutex 因为 take 操作很快）
+    packet_rx: std::sync::Mutex<Option<mpsc::Receiver<Packet>>>,
     /// 加密处理器
-    crypto: Arc<Mutex<TsCrypto>>,
+    crypto: Arc<AsyncMutex<TsCrypto>>,
     /// 客户端 ID
     client_id: Arc<RwLock<Option<u16>>>,
     /// 事件发送器
@@ -114,8 +114,8 @@ impl Connection {
         let connection = Self {
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             packet_handler: Arc::new(handler),
-            packet_rx: Arc::new(Mutex::new(packet_rx)),
-            crypto: Arc::new(Mutex::new(crypto)),
+            packet_rx: std::sync::Mutex::new(Some(packet_rx)),
+            crypto: Arc::new(AsyncMutex::new(crypto)),
             client_id: Arc::new(RwLock::new(None)),
             event_tx,
             config,
@@ -151,10 +151,26 @@ impl Connection {
             self.packet_handler.send(&init_data, PacketType::Init1).await?;
         }
 
-        // 启动消息处理循环
-        let connection = self.clone();
+        // 启动消息处理循环（packet_rx move 进任务，不再共享）
+        let state = self.state.clone();
+        let packet_handler = self.packet_handler.clone();
+        let crypto = self.crypto.clone();
+        let client_id = self.client_id.clone();
+        let event_tx = self.event_tx.clone();
+        let config = self.config.clone();
+        let mut packet_rx = self.packet_rx.lock().unwrap().take()
+            .ok_or_else(|| HeadlessError::ConnectionError("Already connected".into()))?;
+
         tokio::spawn(async move {
-            connection.message_loop().await;
+            Self::message_loop(
+                &state,
+                &packet_handler,
+                &crypto,
+                &client_id,
+                &event_tx,
+                &config,
+                &mut packet_rx,
+            ).await;
         });
 
         // 等待连接完成或超时
@@ -192,19 +208,27 @@ impl Connection {
         }
     }
 
-    /// 消息处理循环
-    async fn message_loop(&self) {
-        let mut packet_rx = self.packet_rx.lock().await;
-
+    /// 消息处理循环（独立于 Connection 实例运行）
+    async fn message_loop(
+        state: &Arc<RwLock<ConnectionState>>,
+        packet_handler: &Arc<PacketHandler>,
+        crypto: &Arc<AsyncMutex<TsCrypto>>,
+        client_id: &Arc<RwLock<Option<u16>>>,
+        event_tx: &mpsc::Sender<ConnectionEvent>,
+        config: &ConnectionConfig,
+        packet_rx: &mut mpsc::Receiver<Packet>,
+    ) {
         while let Some(packet) = packet_rx.recv().await {
-            if let Err(e) = self.handle_packet(packet).await {
+            if let Err(e) = Self::handle_packet(
+                packet, state, packet_handler, crypto, client_id, event_tx, config,
+            ).await {
                 error!("Error handling packet: {e}");
                 
                 // 发送错误事件
-                let _ = self.event_tx.send(ConnectionEvent::Error(e.to_string())).await;
+                let _ = event_tx.send(ConnectionEvent::Error(e.to_string())).await;
                 
                 // 如果是严重错误，断开连接
-                self.set_state(ConnectionState::Disconnected).await;
+                Self::set_state_static(state, event_tx, ConnectionState::Disconnected).await;
                 break;
             }
         }
@@ -212,67 +236,74 @@ impl Connection {
         debug!("Message loop ended");
     }
 
-    /// 处理接收到的包
-    async fn handle_packet(&self, packet: Packet) -> Result<()> {
-        let state = *self.state.read().await;
+    /// 处理接收到的包（独立版本）
+    async fn handle_packet(
+        packet: Packet,
+        state: &Arc<RwLock<ConnectionState>>,
+        packet_handler: &Arc<PacketHandler>,
+        crypto: &Arc<AsyncMutex<TsCrypto>>,
+        client_id: &Arc<RwLock<Option<u16>>>,
+        event_tx: &mpsc::Sender<ConnectionEvent>,
+        config: &ConnectionConfig,
+    ) -> Result<()> {
+        let current_state = *state.read().await;
 
-        match state {
+        match current_state {
             ConnectionState::Connecting => {
-                // 等待 Init1 响应或 initserver
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
                     
                     if data.contains("initserver") {
-                        // 服务器初始化响应
-                        self.handle_init_server(&data).await?;
+                        Self::handle_init_server(&data, crypto, packet_handler, state, event_tx, config).await?;
                     }
                 }
             }
             ConnectionState::KeyExchange => {
-                // 处理密钥交换
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
                     
                     if data.contains("clientinitiv") {
-                        self.handle_client_init_iv(&data).await?;
+                        Self::handle_client_init_iv(&data, crypto, packet_handler, state, event_tx, config).await?;
                     }
                 }
             }
             ConnectionState::Initializing => {
-                // 等待 clientinit 响应
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
                     
                     if data.contains("notifycliententerview") {
-                        // 成功进入服务器
-                        self.handle_client_enter(&data).await?;
+                        Self::handle_client_enter(&data, client_id, state, event_tx).await?;
                     }
                 }
             }
             ConnectionState::Connected => {
-                // 处理正常消息
                 let data = String::from_utf8_lossy(&packet.data);
                 
                 if data.starts_with("notify") {
-                    let _ = self.event_tx.send(ConnectionEvent::Notification(data.to_string())).await;
+                    let _ = event_tx.send(ConnectionEvent::Notification(data.to_string())).await;
                 } else {
-                    let _ = self.event_tx.send(ConnectionEvent::CommandResponse(data.to_string())).await;
+                    let _ = event_tx.send(ConnectionEvent::CommandResponse(data.to_string())).await;
                 }
             }
             _ => {
-                debug!("Ignoring packet in state {}: {}", state, packet);
+                debug!("Ignoring packet in state {}: {}", current_state, packet);
             }
         }
 
         Ok(())
     }
 
-    /// 处理 initserver 响应
-    async fn handle_init_server(&self, data: &str) -> Result<()> {
-        debug!("Handling initserver: {}", data);
-
+    /// 处理 initserver 响应（独立版本）
+    async fn handle_init_server(
+        data: &str,
+        crypto: &Arc<AsyncMutex<TsCrypto>>,
+        packet_handler: &Arc<PacketHandler>,
+        state: &Arc<RwLock<ConnectionState>>,
+        _event_tx: &mpsc::Sender<ConnectionEvent>,
+        _config: &ConnectionConfig,
+    ) -> Result<()> {
         // 解析服务器公钥 (omega)
-        let omega = self.extract_parameter(data, "omega")
+        let omega = Self::extract_param(data, "omega")
             .ok_or_else(|| HeadlessError::ProtocolError("Missing omega".into()))?;
 
         // 生成 alpha 和 beta
@@ -281,33 +312,41 @@ impl Connection {
 
         // 初始化加密
         {
-            let mut crypto = self.crypto.lock().await;
-            crypto.crypto_init(
+            let mut crypto_guard = crypto.lock().await;
+            crypto_guard.crypto_init(
                 &BASE64.decode(&alpha).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
                 &BASE64.decode(&beta).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
                 &BASE64.decode(&omega).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
             )?;
         }
 
-        self.set_state(ConnectionState::KeyExchange).await;
+        Self::set_state_static(state, _event_tx, ConnectionState::KeyExchange).await;
 
         // 发送 clientinitiv
+        let public_key_b64 = crypto.lock().await.identity().public_key_base64();
         let client_init_iv = format!(
             "clientinitiv alpha={} omega={} ip=",
             alpha,
-            self.crypto.lock().await.identity().public_key_base64()
+            public_key_b64
         );
         
-        self.packet_handler.send(client_init_iv.as_bytes(), PacketType::Command).await?;
+        packet_handler.send(client_init_iv.as_bytes(), PacketType::Command).await?;
 
         Ok(())
     }
 
-    /// 处理 clientinitiv 响应
-    async fn handle_client_init_iv(&self, data: &str) -> Result<()> {
+    /// 处理 clientinitiv 响应（独立版本）
+    async fn handle_client_init_iv(
+        data: &str,
+        _crypto: &Arc<AsyncMutex<TsCrypto>>,
+        packet_handler: &Arc<PacketHandler>,
+        state: &Arc<RwLock<ConnectionState>>,
+        event_tx: &mpsc::Sender<ConnectionEvent>,
+        config: &ConnectionConfig,
+    ) -> Result<()> {
         debug!("Handling clientinitiv response: {}", data);
 
-        self.set_state(ConnectionState::Initializing).await;
+        Self::set_state_static(state, event_tx, ConnectionState::Initializing).await;
 
         // 发送 clientinit
         let client_init = format!(
@@ -315,30 +354,35 @@ impl Connection {
              client_input_hardware=1 client_output_hardware=1 client_default_channel \
              client_meta_data client_version_sign= client_key_offset=0 \
              client_nickname_phonetic client_default_token= client_badges",
-            self.config.nickname
+            config.nickname
         );
 
-        self.packet_handler.send(client_init.as_bytes(), PacketType::Command).await?;
+        packet_handler.send(client_init.as_bytes(), PacketType::Command).await?;
 
         Ok(())
     }
 
-    /// 处理客户端进入服务器
-    async fn handle_client_enter(&self, data: &str) -> Result<()> {
+    /// 处理客户端进入服务器（独立版本）
+    async fn handle_client_enter(
+        data: &str,
+        client_id: &Arc<RwLock<Option<u16>>>,
+        state: &Arc<RwLock<ConnectionState>>,
+        event_tx: &mpsc::Sender<ConnectionEvent>,
+    ) -> Result<()> {
         debug!("Handling client enter: {}", data);
 
         // 解析客户端 ID
-        if let Some(clid_str) = self.extract_parameter(data, "clid") {
+        if let Some(clid_str) = Self::extract_param(data, "clid") {
             if let Ok(clid) = clid_str.parse::<u16>() {
-                *self.client_id.write().await = Some(clid);
+                *client_id.write().await = Some(clid);
                 info!("Client ID: {}", clid);
             }
         }
 
-        self.set_state(ConnectionState::Connected).await;
+        Self::set_state_static(state, event_tx, ConnectionState::Connected).await;
 
         // 发送状态变更事件
-        let _ = self.event_tx.send(ConnectionEvent::StateChanged(ConnectionState::Connected)).await;
+        let _ = event_tx.send(ConnectionEvent::StateChanged(ConnectionState::Connected)).await;
 
         Ok(())
     }
@@ -390,13 +434,22 @@ impl Connection {
 
     /// 设置状态
     async fn set_state(&self, new_state: ConnectionState) {
-        let mut state = self.state.write().await;
-        let old_state = *state;
-        *state = new_state;
+        Self::set_state_static(&self.state, &self.event_tx, new_state).await;
+    }
+
+    /// 设置状态（静态版本，供消息循环使用）
+    async fn set_state_static(
+        state: &Arc<RwLock<ConnectionState>>,
+        event_tx: &mpsc::Sender<ConnectionEvent>,
+        new_state: ConnectionState,
+    ) {
+        let mut state_guard = state.write().await;
+        let old_state = *state_guard;
+        *state_guard = new_state;
 
         if old_state != new_state {
             debug!("State changed: {} -> {}", old_state, new_state);
-            let _ = self.event_tx.send(ConnectionEvent::StateChanged(new_state)).await;
+            let _ = event_tx.send(ConnectionEvent::StateChanged(new_state)).await;
         }
     }
 
@@ -411,7 +464,7 @@ impl Connection {
     }
 
     /// 提取参数值
-    fn extract_parameter<'a>(&self, data: &'a str, param: &str) -> Option<&'a str> {
+    fn extract_param<'a>(data: &'a str, param: &str) -> Option<&'a str> {
         let pattern = format!("{}=", param);
         data.split_whitespace()
             .find(|s| s.starts_with(&pattern))
@@ -424,7 +477,7 @@ impl Clone for Connection {
         Self {
             state: self.state.clone(),
             packet_handler: self.packet_handler.clone(),
-            packet_rx: self.packet_rx.clone(),
+            packet_rx: std::sync::Mutex::new(None), // clone 不持有接收器，只在原始实例中使用
             crypto: self.crypto.clone(),
             client_id: self.client_id.clone(),
             event_tx: self.event_tx.clone(),
@@ -447,16 +500,8 @@ mod tests {
     fn test_extract_parameter() {
         let data = "initserver server_name=Test\\sServer server_welcome_message=Welcome";
         
-        // 直接测试参数提取逻辑
-        fn extract<'a>(data: &'a str, param: &str) -> Option<&'a str> {
-            let pattern = format!("{}=", param);
-            data.split_whitespace()
-                .find(|s| s.starts_with(&pattern))
-                .map(|s| &s[pattern.len()..])
-        }
-        
-        assert_eq!(extract(data, "server_name"), Some("Test\\sServer"));
-        assert_eq!(extract(data, "server_welcome_message"), Some("Welcome"));
-        assert_eq!(extract(data, "missing"), None);
+        assert_eq!(Connection::extract_param(data, "server_name"), Some("Test\\sServer"));
+        assert_eq!(Connection::extract_param(data, "server_welcome_message"), Some("Welcome"));
+        assert_eq!(Connection::extract_param(data, "missing"), None);
     }
 }

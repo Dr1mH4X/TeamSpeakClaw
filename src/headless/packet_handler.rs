@@ -60,6 +60,8 @@ struct FragmentInfo {
     received: usize,
     /// 总分片数
     total: usize,
+    /// 创建时间（用于超时清理）
+    created: Instant,
 }
 
 /// 包处理器配置
@@ -368,6 +370,35 @@ impl PacketHandler {
         self.send_single(&data, ack_packet_type, PacketFlags::NONE).await
     }
 
+    /// 内部发送 Ack（在接收循环中调用，直接使用 socket 发送）
+    async fn send_ack_internal(
+        socket: &Arc<UdpSocket>,
+        crypto: &Arc<Mutex<TsCrypto>>,
+        ack_id: PacketId,
+        packet_type: PacketType,
+    ) -> Result<()> {
+        let ack_packet_type = if packet_type == PacketType::CommandLow {
+            PacketType::AckLow
+        } else {
+            PacketType::Ack
+        };
+
+        let data = ack_id.to_be_bytes().to_vec();
+        let mut packet = Packet::new(ack_packet_type, 0, 0, data);
+        packet.header.flags |= PacketFlags::UNENCRYPTED;
+
+        let crypto = crypto.lock().await;
+        crypto.encrypt(&mut packet)?;
+        drop(crypto);
+
+        let raw = packet.to_bytes();
+        socket.send(&raw).await
+            .map_err(|e| HeadlessError::ConnectionError(format!("Ack send failed: {e}")))?;
+
+        trace!("Sent Ack for packet {}", ack_id);
+        Ok(())
+    }
+
     /// 获取包计数器
     async fn get_counter(&self, packet_type: PacketType) -> (PacketId, GenerationId) {
         let counters = self.packet_counters.read().await;
@@ -415,6 +446,7 @@ impl PacketHandler {
                         Ok(len) => {
                             if let Err(e) = Self::handle_received(
                                 &buf[..len],
+                                &socket,
                                 &crypto,
                                 &receive_window,
                                 &fragment_buffer,
@@ -442,6 +474,7 @@ impl PacketHandler {
     /// 处理接收到的包
     async fn handle_received(
         data: &[u8],
+        socket: &Arc<UdpSocket>,
         crypto: &Arc<Mutex<TsCrypto>>,
         receive_window: &Arc<RwLock<ReceiveWindow>>,
         fragment_buffer: &Arc<RwLock<HashMap<PacketId, FragmentInfo>>>,
@@ -514,9 +547,9 @@ impl PacketHandler {
 
         // 发送 Ack（如果需要）
         if packet.needs_ack() {
-            // 异步发送 Ack
-            // TODO: 需要传递 socket 来发送 Ack
-            // 暂时跳过
+            if let Err(e) = Self::send_ack_internal(socket, crypto, packet.header.packet_id, packet.header.packet_type).await {
+                warn!("Failed to send Ack: {e}");
+            }
         }
 
         // 发送到接收通道
@@ -537,12 +570,17 @@ impl PacketHandler {
 
         let mut buffer = fragment_buffer.write().await;
 
+        // 清理超时的分片（超过 30 秒）
+        let now = Instant::now();
+        buffer.retain(|_, info| now.duration_since(info.created) < Duration::from_secs(30));
+
         if is_first {
             // 第一个分片，创建新的分片信息
             let info = FragmentInfo {
                 fragments: vec![packet.data.clone()],
                 received: 1,
                 total: 0, // 未知总数
+                created: Instant::now(),
             };
             buffer.insert(packet_id, info);
         } else {

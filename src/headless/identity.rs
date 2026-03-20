@@ -5,6 +5,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::fmt;
 
 use crate::headless::error::{HeadlessError, Result};
@@ -13,9 +14,9 @@ use crate::headless::error::{HeadlessError, Result};
 #[derive(Clone)]
 pub struct Identity {
     /// 私钥
-    pub private_key: SecretKey,
+    private_key: SecretKey,
     /// 公钥
-    pub public_key: PublicKey,
+    public_key: PublicKey,
     /// 安全级别偏移量
     pub key_offset: u64,
     /// 最后检查的偏移量
@@ -212,6 +213,13 @@ impl Identity {
 /// SHA1 哈希（TeamSpeak 使用单次 SHA1）
 pub fn ts_hash(data: &[u8]) -> [u8; 20] {
     let mut hasher = Sha1::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// SHA256 哈希（用于密钥派生）
+pub fn ts_hash256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
 }

@@ -5,15 +5,11 @@
 #[cfg(feature = "audio")]
 use std::io::Write;
 #[cfg(feature = "audio")]
-use std::path::PathBuf;
-#[cfg(feature = "audio")]
 use std::process::{Command, Stdio};
 #[cfg(feature = "audio")]
 use std::sync::Arc;
 #[cfg(feature = "audio")]
-use tokio::sync::{mpsc, RwLock};
-#[cfg(feature = "audio")]
-use tracing::{debug, error, info, warn};
+use tokio::sync::RwLock;
 
 /// 音频配置
 #[cfg(feature = "audio")]

@@ -290,6 +290,13 @@ bot_nickname = "TSClaw"
 keepalive_interval_secs = 180
 reconnect_max_retries = 10
 reconnect_base_delay_ms = 1000
+connection_mode = "serverquery"  # "serverquery" 或 "headless"
+
+[teamspeak.headless]
+server_address = "127.0.0.1:9987"
+identity_path = "./identity.toml"
+connect_timeout_secs = 30
+# ffmpeg_path = "ffmpeg"  # 可选
 
 [llm]
 provider = "openai"       # 可选: openai | anthropic | ollama

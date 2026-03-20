@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
@@ -54,6 +55,8 @@ pub struct ReconnectManager {
     event_tx: mpsc::Sender<ReconnectEvent>,
     /// 关闭信号
     shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// 监控任务句柄（用于取消旧任务）
+    monitor_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// 重连事件
@@ -88,6 +91,7 @@ impl ReconnectManager {
             is_reconnecting: Arc::new(RwLock::new(false)),
             event_tx,
             shutdown: Arc::new(Mutex::new(None)),
+            monitor_handle: Arc::new(Mutex::new(None)),
         };
 
         (manager, event_rx)
@@ -125,13 +129,18 @@ impl ReconnectManager {
 
     /// 启动监控任务
     async fn start_monitoring(&self) {
+        // 取消之前的监控任务
+        if let Some(handle) = self.monitor_handle.lock().await.take() {
+            handle.abort();
+        }
+
         let connection = self.connection.clone();
         let is_reconnecting = self.is_reconnecting.clone();
         let event_tx = self.event_tx.clone();
         let connection_config = self.connection_config.clone();
         let reconnect_config = self.reconnect_config.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 // 等待连接断开
                 sleep(Duration::from_secs(1)).await;
@@ -177,6 +186,8 @@ impl ReconnectManager {
                 }
             }
         });
+
+        *self.monitor_handle.lock().await = Some(handle);
     }
 
     /// 执行重连

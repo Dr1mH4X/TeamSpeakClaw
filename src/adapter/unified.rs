@@ -34,8 +34,7 @@ impl UnifiedAdapter {
         }
         
         // 默认使用 ServerQuery
-        let _config = config;
-        let adapter = crate::adapter::connection::TsAdapter::connect(_config).await?;
+        let adapter = crate::adapter::connection::TsAdapter::connect(config).await?;
         Ok(Self::ServerQuery(adapter))
     }
     
