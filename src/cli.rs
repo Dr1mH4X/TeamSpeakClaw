@@ -1,4 +1,5 @@
-use crate::config::{AppConfig, DEFAULT_ACL_TOML, DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
+use crate::config::{AppConfig, DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
+use crate::permission::acl::DEFAULT_ACL_TOML;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
