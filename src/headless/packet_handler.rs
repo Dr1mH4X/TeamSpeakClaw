@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
+use flate2::write::ZlibEncoder;
+use flate2::read::ZlibDecoder;
+use flate2::Compression;
+use std::io::{Read, Write};
 use tracing::{debug, trace, warn};
 
 use crate::headless::{
@@ -37,6 +41,21 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// 连接超时
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 使用 zlib 压缩数据
+fn compress_zlib(data: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data).unwrap_or_default();
+    encoder.finish().unwrap_or_default()
+}
+
+/// 使用 zlib 解压数据
+fn decompress_zlib(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(data);
+    let mut output = Vec::new();
+    decoder.read_to_end(&mut output)?;
+    Ok(output)
+}
 
 /// 待确认包信息
 #[derive(Debug, Clone)]
@@ -276,10 +295,11 @@ impl PacketHandler {
         let needs_split = needs_splitting(data.len());
         
         if needs_split && packet_type != PacketType::Voice && packet_type != PacketType::VoiceWhisper {
-            // 尝试压缩
-            // TODO: 实现压缩
-            
-            // 分片发送
+            // 压缩后再分片发送
+            let compressed = compress_zlib(data);
+            if compressed.len() < data.len() {
+                return self.send_fragmented(&compressed, packet_type).await;
+            }
             return self.send_fragmented(data, packet_type).await;
         }
 
