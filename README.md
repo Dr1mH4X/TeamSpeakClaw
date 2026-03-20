@@ -4,7 +4,7 @@
 <strong>LLM驱动的TeamSpeak机器人</strong>
 </p>
 
-[快速开始](https://tsclaw.dreamhax.cc/docs/download)
+[快速开始](https://tsclaw.dreamhax.cc/docs/setup)
 |
 [开发指南](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
 |
