@@ -9,6 +9,7 @@ use std::time::Duration;
 pub trait LlmProvider: Send + Sync {
     async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Value>)
         -> Result<LlmResponse>;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Debug)]
@@ -36,6 +37,17 @@ impl OpenAiProvider {
             .build()
             .unwrap_or_default();
         Self { client, config }
+    }
+
+    pub fn config_matches(&self, other: &LlmConfig) -> bool {
+        self.config.provider == other.provider
+            && self.config.api_key == other.api_key
+            && self.config.base_url == other.base_url
+            && self.config.model == other.model
+            && self.config.max_tokens == other.max_tokens
+            && self.config.timeout_secs == other.timeout_secs
+            && self.config.retry_max == other.retry_max
+            && self.config.retry_delay_ms == other.retry_delay_ms
     }
 }
 
@@ -110,5 +122,9 @@ impl LlmProvider for OpenAiProvider {
             content,
             tool_calls,
         })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
