@@ -44,8 +44,20 @@ async fn main() -> Result<()> {
     }
 
     // 3. 初始化配置与日志
-    let cfg = AppConfig::load("config/settings.toml")?;
+    #[cfg_attr(not(feature = "headless"), allow(unused_mut))]
+    let mut cfg = AppConfig::load("config/settings.toml")?;
     let _guard = init_tracing(&cfg, &args.log_level);
+
+    // 应用 --mode CLI 参数覆盖
+    #[cfg(feature = "headless")]
+    if let Some(mode) = args.mode {
+        let mode_str = match mode {
+            crate::cli::ConnectionMode::Serverquery => "serverquery",
+            crate::cli::ConnectionMode::Headless => "headless",
+        };
+        cfg.teamspeak.connection_mode = mode_str.to_string();
+        info!("Connection mode overridden to: {}", mode_str);
+    }
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
@@ -66,6 +78,14 @@ async fn main() -> Result<()> {
     registry.register(Box::new(BanClient));
     registry.register(Box::new(GetClientList));
     registry.register(Box::new(MusicControl));
+
+    if args.list_skills {
+        println!("Registered skills:");
+        for name in registry.list_skills() {
+            println!("  - {name}");
+        }
+        return Ok(());
+    }
 
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
