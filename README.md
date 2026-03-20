@@ -4,11 +4,9 @@
 <strong>LLM驱动的TeamSpeak机器人</strong>
 </p>
 
-[快速开始](#How-to-use)
+[快速开始](https://tsclaw.dreamhax.cc)
 |
 [开发指南](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
-|
-[快速开始](https://tsclaw.dreamhax.cc)
 |
 [问题反馈](https://github.com/Dr1mH4X/TeamSpeakClaw/issues)
 
@@ -32,6 +30,12 @@ TeamSpeakClaw 是一个基于 LLM (大语言模型) 的 TeamSpeak 助手。
     - **信息查询**：获取在线用户列表、服务器状态等。
     - **可扩展性**：轻松编写自定义 Skill，扩展机器人的能力边界。
 - **🤖 广泛的模型支持**：兼容 OpenAI 接口格式，轻松接入 DeepSeek、Ollama、LocalAI 等多种大模型。
+
+![Alt](https://repobeats.axiom.co/api/embed/e20c0a7a0fb24465f50fb3882dadf4416456dd24.svg "Repobeats analytics image")
+
+## ☕ 请开发者喝一杯咖啡
+
+占位
 
 ## 🙏 致谢 (Credits)
 
