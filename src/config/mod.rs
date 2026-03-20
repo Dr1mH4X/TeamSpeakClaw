@@ -275,7 +275,7 @@ impl Default for ErrorPrompts {
     }
 }
 
-// Default configuration file contents with Chinese comments
+// 默认配置文件内容
 pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
 host = "127.0.0.1"
 port = 10011
