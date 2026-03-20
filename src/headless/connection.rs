@@ -8,6 +8,9 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info};
 
+#[cfg(feature = "audio")]
+use crate::headless::audio::{AudioConfig, AudioPlayer};
+
 use crate::headless::{
     crypto::TsCrypto,
     error::{HeadlessError, Result},
@@ -58,6 +61,9 @@ pub struct ConnectionConfig {
     pub identity: Identity,
     /// 连接超时
     pub connect_timeout: Duration,
+    /// 音频配置
+    #[cfg(feature = "audio")]
+    pub audio: Option<AudioConfig>,
 }
 
 /// 连接事件
@@ -91,6 +97,9 @@ pub struct Connection {
     event_tx: mpsc::Sender<ConnectionEvent>,
     /// 配置
     config: ConnectionConfig,
+    /// 音频播放器
+    #[cfg(feature = "audio")]
+    audio_player: Option<Arc<AudioPlayer>>,
 }
 
 impl Connection {
@@ -108,17 +117,55 @@ impl Connection {
         };
 
         let (handler, packet_rx) = PacketHandler::new(handler_config, crypto.clone()).await?;
+        handler.start().await?;
+        let handler = Arc::new(handler); // Ensure handler is Arc for sharing
         
         let (event_tx, event_rx) = mpsc::channel(1024);
 
+        #[cfg(feature = "audio")]
+        let audio_player = if let Some(audio_config) = config.audio.clone() {
+            let (frame_tx, mut frame_rx) = mpsc::channel(1024);
+            let player = Arc::new(AudioPlayer::new(audio_config, frame_tx));
+            
+            // 启动音频发送循环
+            let handler_clone = handler.clone();
+            tokio::spawn(async move {
+                let mut sequence: u16 = 0;
+                while let Some(opus_data) = frame_rx.recv().await {
+                    // TeamSpeak 语音包格式: [Sequence(2 bytes BE)] [Opus Data]
+                    // 需要构建语音包并发送
+                    let mut data = Vec::with_capacity(2 + opus_data.len());
+                    data.extend_from_slice(&sequence.to_be_bytes());
+                    data.extend_from_slice(&opus_data);
+                    
+                    // 发送 Voice 包
+                    if let Err(_) = handler_clone.send(&data, PacketType::Voice).await {
+                         // error!("Failed to send voice packet: {}", e);
+                         // 这里的错误可能很频繁（如连接断开时），降级日志或忽略
+                    }
+                    
+                    sequence = sequence.wrapping_add(1);
+                }
+            });
+            
+            Some(player)
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "audio"))]
+        let audio_player = None; // Explicitly handled for non-audio builds
+
         let connection = Self {
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
-            packet_handler: Arc::new(handler),
+            packet_handler: handler,
             packet_rx: std::sync::Mutex::new(Some(packet_rx)),
             crypto: Arc::new(AsyncMutex::new(crypto)),
             client_id: Arc::new(RwLock::new(None)),
             event_tx,
             config,
+            #[cfg(feature = "audio")]
+            audio_player,
         };
 
         Ok((connection, event_rx))
@@ -432,6 +479,30 @@ impl Connection {
         Ok(())
     }
 
+    #[cfg(feature = "audio")]
+    pub async fn play_audio(&self, source: &str) -> crate::headless::error::Result<()> {
+        let state = self.state.read().await;
+        if *state != ConnectionState::Connected {
+            return Err(HeadlessError::NotConnected);
+        }
+        #[cfg(feature = "audio")]
+        if let Some(player) = &self.audio_player {
+            player.play(source.to_string()).await.map_err(|e| HeadlessError::AudioError(e.to_string()))
+        } else {
+            Err(HeadlessError::AudioError("Audio not enabled".into()))
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    pub async fn stop_audio(&self) -> crate::headless::error::Result<()> {
+        #[cfg(feature = "audio")]
+        if let Some(player) = &self.audio_player {
+            player.stop().await.map_err(|e| HeadlessError::AudioError(e.to_string()))
+        } else {
+            Err(HeadlessError::AudioError("Audio not enabled".into()))
+        }
+    }
+
     /// 设置状态
     async fn set_state(&self, new_state: ConnectionState) {
         Self::set_state_static(&self.state, &self.event_tx, new_state).await;
@@ -482,6 +553,8 @@ impl Clone for Connection {
             client_id: self.client_id.clone(),
             event_tx: self.event_tx.clone(),
             config: self.config.clone(),
+            #[cfg(feature = "audio")]
+            audio_player: self.audio_player.clone(),
         }
     }
 }
