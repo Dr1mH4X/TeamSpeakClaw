@@ -1,6 +1,8 @@
-# TeamSpeakClaw 开发指南_中文
+# TeamSpeakClaw 开发指南
 
-[English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development.md)|[Chinese](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
+[English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development.md)
+|
+[Chinese](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
 
 欢迎来到 TeamSpeakClaw 开发文档！本指南将帮助你搭建开发环境、理解项目结构并为新功能的开发做出贡献。
 

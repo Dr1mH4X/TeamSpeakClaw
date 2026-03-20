@@ -1,6 +1,8 @@
 # TeamSpeakClaw Development Guide
 
-[English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development.md)|[Chinese](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
+[English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development.md)
+|
+[Chinese](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/docs/Development_CN.md)
 
 Welcome to the TeamSpeakClaw development documentation! This guide will help you set up your development environment, understand the project structure, and contribute new features.
 
