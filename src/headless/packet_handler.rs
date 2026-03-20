@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, broadcast};
 use tokio::time::interval;
 use flate2::write::ZlibEncoder;
 use flate2::read::ZlibDecoder;
@@ -92,7 +92,7 @@ pub struct PacketHandlerConfig {
     pub remote_addr: SocketAddr,
 }
 
-/// 包处理器
+#[derive(Clone)]
 pub struct PacketHandler {
     /// UDP socket
     socket: Arc<UdpSocket>,
@@ -112,8 +112,8 @@ pub struct PacketHandler {
     rtt_estimator: Arc<Mutex<RttEstimator>>,
     /// 接收通道
     rx_tx: mpsc::Sender<Packet>,
-    /// 关闭信号
-    shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// 关闭信号发送器
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 /// 接收窗口（用于去重）
@@ -233,6 +233,7 @@ impl PacketHandler {
             .map_err(|e| HeadlessError::ConnectionError(format!("Connect failed: {e}")))?;
 
         let (tx, rx) = mpsc::channel(1024);
+        let (shutdown_tx, _) = broadcast::channel(1);
 
         let handler = Self {
             socket: Arc::new(socket),
@@ -244,7 +245,7 @@ impl PacketHandler {
             fragment_buffer: Arc::new(RwLock::new(HashMap::new())),
             rtt_estimator: Arc::new(Mutex::new(RttEstimator::new())),
             rx_tx: tx,
-            shutdown: Arc::new(Mutex::new(None)),
+            shutdown_tx,
         };
 
         Ok((handler, rx))
@@ -252,39 +253,26 @@ impl PacketHandler {
 
     /// 启动包处理器
     pub async fn start(&self) -> Result<()> {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        *self.shutdown.lock().await = Some(shutdown_tx);
+        let shutdown_rx1 = self.shutdown_tx.subscribe();
+        let shutdown_rx2 = self.shutdown_tx.subscribe();
+        let shutdown_rx3 = self.shutdown_tx.subscribe();
 
         // 启动接收任务
-        let socket = self.socket.clone();
-        let crypto = self.crypto.clone();
-        let receive_window = self.receive_window.clone();
-        let fragment_buffer = self.fragment_buffer.clone();
-        let rx_tx = self.rx_tx.clone();
-        let pending_acks = self.pending_acks.clone();
-        let rtt_estimator = self.rtt_estimator.clone();
-
+        let this = self.clone();
         tokio::spawn(async move {
-            Self::receive_loop(
-                socket,
-                crypto,
-                receive_window,
-                fragment_buffer,
-                rx_tx,
-                pending_acks,
-                rtt_estimator,
-                shutdown_rx,
-            ).await;
+            this.run_receive_loop(shutdown_rx1).await;
         });
 
         // 启动重传任务
-        let socket = self.socket.clone();
-        let crypto = self.crypto.clone();
-        let pending_acks = self.pending_acks.clone();
-        let rtt_estimator = self.rtt_estimator.clone();
-
+        let this = self.clone();
         tokio::spawn(async move {
-            Self::resend_loop(socket, crypto, pending_acks, rtt_estimator).await;
+            this.run_resend_loop(shutdown_rx2).await;
+        });
+
+        // 启动 Ping 任务
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.run_ping_loop(shutdown_rx3).await;
         });
 
         Ok(())
@@ -390,10 +378,9 @@ impl PacketHandler {
         self.send_single(&data, ack_packet_type, PacketFlags::NONE).await
     }
 
-    /// 内部发送 Ack（在接收循环中调用，直接使用 socket 发送）
+    /// 内部发送 Ack
     async fn send_ack_internal(
-        socket: &Arc<UdpSocket>,
-        crypto: &Arc<Mutex<TsCrypto>>,
+        &self,
         ack_id: PacketId,
         packet_type: PacketType,
     ) -> Result<()> {
@@ -407,12 +394,12 @@ impl PacketHandler {
         let mut packet = Packet::new(ack_packet_type, 0, 0, data);
         packet.header.flags |= PacketFlags::UNENCRYPTED;
 
-        let crypto = crypto.lock().await;
+        let crypto = self.crypto.lock().await;
         crypto.encrypt(&mut packet)?;
         drop(crypto);
 
         let raw = packet.to_bytes();
-        socket.send(&raw).await
+        self.socket.send(&raw).await
             .map_err(|e| HeadlessError::ConnectionError(format!("Ack send failed: {e}")))?;
 
         trace!("Sent Ack for packet {}", ack_id);
@@ -447,33 +434,15 @@ impl PacketHandler {
     }
 
     /// 接收循环
-    async fn receive_loop(
-        socket: Arc<UdpSocket>,
-        crypto: Arc<Mutex<TsCrypto>>,
-        receive_window: Arc<RwLock<ReceiveWindow>>,
-        fragment_buffer: Arc<RwLock<HashMap<PacketId, FragmentInfo>>>,
-        tx: mpsc::Sender<Packet>,
-        pending_acks: Arc<RwLock<HashMap<PacketId, PendingPacket>>>,
-        rtt_estimator: Arc<Mutex<RttEstimator>>,
-        mut shutdown: tokio::sync::oneshot::Receiver<()>,
-    ) {
+    async fn run_receive_loop(self, mut shutdown: broadcast::Receiver<()>) {
         let mut buf = vec![0u8; 4096];
 
         loop {
             tokio::select! {
-                result = socket.recv(&mut buf) => {
+                result = self.socket.recv(&mut buf) => {
                     match result {
                         Ok(len) => {
-                            if let Err(e) = Self::handle_received(
-                                &buf[..len],
-                                &socket,
-                                &crypto,
-                                &receive_window,
-                                &fragment_buffer,
-                                &tx,
-                                &pending_acks,
-                                &rtt_estimator,
-                            ).await {
+                            if let Err(e) = self.handle_received(&buf[..len]).await {
                                 warn!("Error handling packet: {e}");
                             }
                         }
@@ -483,7 +452,7 @@ impl PacketHandler {
                         }
                     }
                 }
-                _ = &mut shutdown => {
+                _ = shutdown.recv() => {
                     debug!("Receive loop shutdown");
                     break;
                 }
@@ -492,22 +461,13 @@ impl PacketHandler {
     }
 
     /// 处理接收到的包
-    async fn handle_received(
-        data: &[u8],
-        socket: &Arc<UdpSocket>,
-        crypto: &Arc<Mutex<TsCrypto>>,
-        receive_window: &Arc<RwLock<ReceiveWindow>>,
-        fragment_buffer: &Arc<RwLock<HashMap<PacketId, FragmentInfo>>>,
-        tx: &mpsc::Sender<Packet>,
-        pending_acks: &Arc<RwLock<HashMap<PacketId, PendingPacket>>>,
-        rtt_estimator: &Arc<Mutex<RttEstimator>>,
-    ) -> Result<()> {
+    async fn handle_received(&self, data: &[u8]) -> Result<()> {
         let mut packet = Packet::from_raw(data)?;
         trace!("Received raw packet: {}", packet);
 
         // 检查是否重复
         {
-            let window = receive_window.read().await;
+            let window = self.receive_window.read().await;
             if window.is_received(packet.header.packet_id) {
                 trace!("Duplicate packet, ignoring: {}", packet.header.packet_id);
                 return Ok(());
@@ -516,7 +476,7 @@ impl PacketHandler {
 
         // 解密
         {
-            let crypto = crypto.lock().await;
+            let crypto = self.crypto.lock().await;
             if !crypto.decrypt(&mut packet)? {
                 warn!("Failed to decrypt packet");
                 return Ok(());
@@ -525,7 +485,7 @@ impl PacketHandler {
 
         // 标记为已接收
         {
-            let mut window = receive_window.write().await;
+            let mut window = self.receive_window.write().await;
             window.mark_received(packet.header.packet_id);
         }
 
@@ -534,10 +494,10 @@ impl PacketHandler {
             PacketType::Ack | PacketType::AckLow => {
                 if packet.data.len() >= 2 {
                     let ack_id = u16::from_be_bytes([packet.data[0], packet.data[1]]);
-                    let mut pending = pending_acks.write().await;
+                    let mut pending = self.pending_acks.write().await;
                     if let Some(pending_packet) = pending.remove(&ack_id) {
                         let rtt = pending_packet.first_send.elapsed();
-                        let mut estimator = rtt_estimator.lock().await;
+                        let mut estimator = self.rtt_estimator.lock().await;
                         estimator.update(rtt);
                         trace!("Ack received for packet {} (RTT: {:?})", ack_id, rtt);
                     }
@@ -547,10 +507,10 @@ impl PacketHandler {
             PacketType::Pong => {
                 if packet.data.len() >= 2 {
                     let ping_id = u16::from_be_bytes([packet.data[0], packet.data[1]]);
-                    let mut pending = pending_acks.write().await;
+                    let mut pending = self.pending_acks.write().await;
                     if let Some(pending_packet) = pending.remove(&ping_id) {
                         let rtt = pending_packet.first_send.elapsed();
-                        let mut estimator = rtt_estimator.lock().await;
+                        let mut estimator = self.rtt_estimator.lock().await;
                         estimator.update(rtt);
                         trace!("Pong received for ping {} (RTT: {:?})", ping_id, rtt);
                     }
@@ -562,33 +522,29 @@ impl PacketHandler {
 
         // 处理分片
         if packet.header.flags.contains(PacketFlags::FRAGMENTED) {
-            return Self::handle_fragment(packet, fragment_buffer, tx).await;
+            return self.handle_fragment(packet).await;
         }
 
         // 发送 Ack（如果需要）
         if packet.needs_ack() {
-            if let Err(e) = Self::send_ack_internal(socket, crypto, packet.header.packet_id, packet.header.packet_type).await {
+            if let Err(e) = self.send_ack_internal(packet.header.packet_id, packet.header.packet_type).await {
                 warn!("Failed to send Ack: {e}");
             }
         }
 
         // 发送到接收通道
-        tx.send(packet).await
+        self.rx_tx.send(packet).await
             .map_err(|_| HeadlessError::ConnectionError("Channel closed".into()))?;
 
         Ok(())
     }
 
     /// 处理分片
-    async fn handle_fragment(
-        packet: Packet,
-        fragment_buffer: &Arc<RwLock<HashMap<PacketId, FragmentInfo>>>,
-        tx: &mpsc::Sender<Packet>,
-    ) -> Result<()> {
+    async fn handle_fragment(&self, packet: Packet) -> Result<()> {
         let packet_id = packet.header.packet_id;
         let is_first = packet.header.flags.contains(PacketFlags::COMPRESSED);
 
-        let mut buffer = fragment_buffer.write().await;
+        let mut buffer = self.fragment_buffer.write().await;
 
         // 清理超时的分片（超过 30 秒）
         let now = Instant::now();
@@ -627,7 +583,7 @@ impl PacketHandler {
 
                     buffer.remove(&packet_id);
 
-                    tx.send(complete_packet).await
+                    self.rx_tx.send(complete_packet).await
                         .map_err(|_| HeadlessError::ConnectionError("Channel closed".into()))?;
                 }
             }
@@ -637,55 +593,121 @@ impl PacketHandler {
     }
 
     /// 重传循环
-    async fn resend_loop(
-        socket: Arc<UdpSocket>,
-        _crypto: Arc<Mutex<TsCrypto>>,
-        pending_acks: Arc<RwLock<HashMap<PacketId, PendingPacket>>>,
-        rtt_estimator: Arc<Mutex<RttEstimator>>,
-    ) {
+    async fn run_resend_loop(self, mut shutdown: broadcast::Receiver<()>) {
         let mut ticker = interval(Duration::from_millis(50));
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let now = Instant::now();
+                    let rto = {
+                        let estimator = self.rtt_estimator.lock().await;
+                        estimator.rto()
+                    };
 
-            let now = Instant::now();
-            let rto = {
-                let estimator = rtt_estimator.lock().await;
-                estimator.rto()
-            };
+                    let mut to_resend = Vec::new();
+                    let mut to_remove = Vec::new();
 
-            let mut to_resend = Vec::new();
-            let mut to_remove = Vec::new();
+                    {
+                        let mut pending = self.pending_acks.write().await;
+                        for (id, info) in pending.iter_mut() {
+                            let elapsed = now.duration_since(info.last_send);
+                            
+                            if elapsed >= rto {
+                                if info.retries >= MAX_RETRIES {
+                                    to_remove.push(*id);
+                                    warn!("Packet {} exceeded max retries", id);
+                                } else {
+                                    to_resend.push(info.packet.clone());
+                                    info.last_send = now;
+                                    info.retries += 1;
+                                }
+                            }
+                        }
 
-            {
-                let mut pending = pending_acks.write().await;
-                for (id, info) in pending.iter_mut() {
-                    let elapsed = now.duration_since(info.last_send);
-                    
-                    if elapsed >= rto {
-                        if info.retries >= MAX_RETRIES {
-                            to_remove.push(*id);
-                            warn!("Packet {} exceeded max retries", id);
+                        for id in to_remove {
+                            pending.remove(&id);
+                        }
+                    }
+
+                    // 重发包
+                    for packet in to_resend {
+                        let raw = packet.to_bytes();
+                        if let Err(e) = self.socket.send(&raw).await {
+                            warn!("Resend failed: {e}");
                         } else {
-                            to_resend.push(info.packet.clone());
-                            info.last_send = now;
-                            info.retries += 1;
+                            trace!("Resent packet: {}", packet.header.packet_id);
                         }
                     }
                 }
-
-                for id in to_remove {
-                    pending.remove(&id);
+                _ = shutdown.recv() => {
+                    debug!("Resend loop shutdown");
+                    break;
                 }
             }
+        }
+    }
 
-            // 重发包
-            for packet in to_resend {
-                let raw = packet.to_bytes();
-                if let Err(e) = socket.send(&raw).await {
-                    warn!("Resend failed: {e}");
-                } else {
-                    trace!("Resent packet: {}", packet.header.packet_id);
+    /// Ping 循环
+    async fn run_ping_loop(self, mut shutdown: broadcast::Receiver<()>) {
+        let mut interval = interval(PING_INTERVAL);
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // 获取计数
+                    let packet_type = PacketType::Ping;
+                    let idx = packet_type as usize;
+                    let (packet_id, generation_id) = {
+                        let counters = self.packet_counters.read().await;
+                        let generations = self.generation_counters.read().await;
+                        (counters[idx], generations[idx])
+                    };
+                    
+                    // 递增计数
+                    {
+                        let mut counters = self.packet_counters.write().await;
+                        let mut generations = self.generation_counters.write().await;
+                         counters[idx] = counters[idx].wrapping_add(1);
+                        if counters[idx] == 0 {
+                            generations[idx] = generations[idx].wrapping_add(1);
+                        }
+                    }
+
+                    let data = packet_id.to_be_bytes().to_vec();
+                    let mut packet = Packet::new(packet_type, packet_id, generation_id, data);
+                    packet.header.flags |= PacketFlags::UNENCRYPTED;
+
+                    // 加密 (Ping 不加密但需要 MAC)
+                    {
+                        let crypto_guard = self.crypto.lock().await;
+                        if let Err(e) = crypto_guard.encrypt(&mut packet) {
+                            warn!("Failed to encrypt ping: {}", e);
+                            continue;
+                        }
+                    }
+                    
+                    // 添加到待确认列表（用于计算 RTT）
+                    {
+                        let mut pending = self.pending_acks.write().await;
+                        pending.insert(packet_id, PendingPacket {
+                            packet: packet.clone(),
+                            first_send: Instant::now(),
+                            last_send: Instant::now(),
+                            retries: 0,
+                        });
+                    }
+
+                    let raw = packet.to_bytes();
+                    if let Err(e) = self.socket.send(&raw).await {
+                         warn!("Failed to send ping: {}", e);
+                    } else {
+                        trace!("Sent ping {}", packet_id);
+                    }
+                }
+                _ = shutdown.recv() => {
+                    debug!("Ping loop shutdown");
+                    break;
                 }
             }
         }
@@ -699,9 +721,7 @@ impl PacketHandler {
 
     /// 关闭包处理器
     pub async fn shutdown(&self) {
-        if let Some(tx) = self.shutdown.lock().await.take() {
-            let _ = tx.send(());
-        }
+        let _ = self.shutdown_tx.send(());
     }
 }
 
