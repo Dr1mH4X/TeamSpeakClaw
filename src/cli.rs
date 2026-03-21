@@ -1,10 +1,9 @@
 use crate::config::AppConfig;
-use crate::config::{DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
+use crate::config::{get_config_path, DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
 use crate::permission::acl::DEFAULT_ACL_TOML;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use std::path::Path;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -65,9 +64,9 @@ pub fn handle_config_action(action: ConfigAction) -> anyhow::Result<()> {
 }
 
 fn generate_config() -> anyhow::Result<()> {
-    let config_dir = Path::new("config");
+    let config_dir = get_config_path("config")?;
     if !config_dir.exists() {
-        std::fs::create_dir_all(config_dir).context("Failed to create config directory")?;
+        std::fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
         println!("Created directory: {}", config_dir.display());
     }
 
@@ -98,7 +97,7 @@ fn generate_config() -> anyhow::Result<()> {
 
 fn edit_config() -> anyhow::Result<()> {
     // We will focus on editing settings.toml (AppConfig) for now as it's the main one.
-    let config_path = Path::new("config/settings.toml");
+    let config_path = get_config_path("config/settings.toml")?;
 
     // Attempt to load existing config, or default if missing
     let mut config = if config_path.exists() {
@@ -106,7 +105,7 @@ fn edit_config() -> anyhow::Result<()> {
             "Loading existing configuration from {}",
             config_path.display()
         );
-        AppConfig::load(config_path)?
+        AppConfig::load(&config_path)?
     } else {
         println!(
             "Config file not found at {}. Starting with defaults.",
@@ -266,7 +265,7 @@ fn edit_config() -> anyhow::Result<()> {
 
         // Use toml serializer
         let toml_string = toml::to_string_pretty(&config)?;
-        std::fs::write(config_path, toml_string)?;
+        std::fs::write(&config_path, toml_string)?;
         println!("Configuration successfully saved to {:?}", config_path);
     } else {
         println!("Changes discarded.");

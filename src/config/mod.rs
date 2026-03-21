@@ -311,18 +311,29 @@ llm_error = "AI 后端当前不可用。请稍后再试。"
 ts_error = "TeamSpeak 命令执行失败: {detail}"
 "#;
 
+/// Helper to resolve configuration paths relative to the executable directory
+pub fn get_config_path<P: AsRef<Path>>(path: P) -> Result<std::path::PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+    Ok(exe_dir.join(path))
+}
+
 impl AppConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        let path = get_config_path(path)?;
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, DEFAULT_SETTINGS_TOML)?;
+            std::fs::write(&path, DEFAULT_SETTINGS_TOML)?;
             println!("Created default AppConfig at {:?}", path);
         }
 
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let config: AppConfig = toml::from_str(&content)?;
         Ok(config)
     }
@@ -330,16 +341,16 @@ impl AppConfig {
 
 impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        let path = get_config_path(path)?;
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, DEFAULT_PROMPTS_TOML)?;
+            std::fs::write(&path, DEFAULT_PROMPTS_TOML)?;
             println!("Created default PromptsConfig at {:?}", path);
         }
 
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let config: PromptsConfig = match toml::from_str(&content) {
             Ok(c) => c,
             Err(e) => {
@@ -369,13 +380,11 @@ pub async fn watch_config(config: std::sync::Arc<arc_swap::ArcSwap<AppConfig>>) 
             }
         })?;
 
-    watcher.watch(
-        Path::new("config/settings.toml"),
-        RecursiveMode::NonRecursive,
-    )?;
+    let config_path = get_config_path("config/settings.toml")?;
+    watcher.watch(&config_path, RecursiveMode::NonRecursive)?;
 
     while rx.recv().await.is_some() {
-        match AppConfig::load("config/settings.toml") {
+        match AppConfig::load(&config_path) {
             Ok(new_config) => {
                 config.store(std::sync::Arc::new(new_config));
                 tracing::info!("Config reloaded");

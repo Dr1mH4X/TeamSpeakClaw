@@ -1,3 +1,4 @@
+use crate::config::get_config_path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -10,7 +11,7 @@ pub struct AclConfig {
 
 impl Default for AclConfig {
     fn default() -> Self {
-        // Note: The programmatic default here is minimal. 
+        // Note: The programmatic default here is minimal.
         // The file template (DEFAULT_ACL_TOML) contains the full default configuration.
         Self {
             rules: vec![],
@@ -82,16 +83,16 @@ protected_group_ids = [6, 8, 9]
 
 impl AclConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        let path = get_config_path(path)?;
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, DEFAULT_ACL_TOML)?;
+            std::fs::write(&path, DEFAULT_ACL_TOML)?;
             println!("Created default AclConfig at {:?}", path);
         }
-        
-        let content = std::fs::read_to_string(path)?;
+
+        let content = std::fs::read_to_string(&path)?;
         let config: AclConfig = toml::from_str(&content)?;
         Ok(config)
     }
