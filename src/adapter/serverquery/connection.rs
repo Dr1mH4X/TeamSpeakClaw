@@ -23,14 +23,17 @@ use tracing::{debug, error, info, warn};
 pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
     event_tx: broadcast::Sender<TsEvent>,
-    config: Arc<ArcSwap<AppConfig>>,
     bot_clid: AtomicU32,
 }
 
 impl TsAdapter {
     pub async fn connect(config: Arc<ArcSwap<AppConfig>>) -> Result<Arc<Self>> {
         let cfg = config.load();
-        let addr = format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port);
+        let addr = format!(
+            "{}:{}",
+            cfg.teamspeak.serverquery.host,
+            cfg.teamspeak.serverquery.query_port()
+        );
         info!("Connecting to TeamSpeak ServerQuery at {addr}");
 
         let stream = Self::connect_with_retry(&cfg.teamspeak).await?;
@@ -40,7 +43,6 @@ impl TsAdapter {
         let adapter = Arc::new(Self {
             writer: Mutex::new(writer),
             event_tx: tx,
-            config: config.clone(),
             bot_clid: AtomicU32::new(0),
         });
 
@@ -66,9 +68,10 @@ impl TsAdapter {
     }
 
     async fn connect_with_retry(cfg: &TsConfig) -> Result<TcpStream> {
-        let addr = format!("{}:{}", cfg.host, cfg.port);
-        let mut delay = Duration::from_millis(cfg.reconnect_base_delay_ms);
-        for attempt in 0..cfg.reconnect_max_retries {
+        let sq = &cfg.serverquery;
+        let addr = format!("{}:{}", sq.host, sq.query_port());
+        let mut delay = Duration::from_millis(crate::config::TS_RECONNECT_BASE_DELAY_MS);
+        for attempt in 0..crate::config::TS_RECONNECT_MAX_RETRIES {
             match TcpStream::connect(&addr).await {
                 Ok(s) => {
                     // 跳过 TS 欢迎横幅（2 行）
@@ -92,9 +95,12 @@ impl TsAdapter {
         // 等待一小段时间，让欢迎横幅先被处理
         sleep(Duration::from_millis(500)).await;
 
-        self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass))
-            .await?;
-        self.send_raw(&cmd_use(cfg.server_id)).await?;
+        self.send_raw(&cmd_login(
+            &cfg.serverquery.login_name,
+            &cfg.serverquery.login_pass,
+        ))
+        .await?;
+        self.send_raw(&cmd_use(crate::config::TS_SERVER_ID)).await?;
         self.send_raw(&cmd_register_event("textprivate")).await?;
         self.send_raw(&cmd_register_event("textchannel")).await?;
         self.send_raw(&cmd_register_event("textserver")).await?;
@@ -199,8 +205,10 @@ impl TsAdapter {
 
     async fn keepalive_loop(&self) {
         loop {
-            let interval = self.config.load().teamspeak.keepalive_interval_secs;
-            sleep(Duration::from_secs(interval)).await;
+            sleep(Duration::from_secs(
+                crate::config::TS_KEEPALIVE_INTERVAL_SECS,
+            ))
+            .await;
             if let Err(e) = self.send_raw(&cmd_whoami()).await {
                 error!("Keepalive failed: {e}");
             }

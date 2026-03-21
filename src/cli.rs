@@ -1,10 +1,9 @@
 use crate::config::AppConfig;
-use crate::config::{DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
+use crate::config::{get_config_path, DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
 use crate::permission::acl::DEFAULT_ACL_TOML;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use std::path::Path;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -65,9 +64,9 @@ pub fn handle_config_action(action: ConfigAction) -> anyhow::Result<()> {
 }
 
 fn generate_config() -> anyhow::Result<()> {
-    let config_dir = Path::new("config");
+    let config_dir = get_config_path("config")?;
     if !config_dir.exists() {
-        std::fs::create_dir_all(config_dir).context("Failed to create config directory")?;
+        std::fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
         println!("Created directory: {}", config_dir.display());
     }
 
@@ -98,7 +97,7 @@ fn generate_config() -> anyhow::Result<()> {
 
 fn edit_config() -> anyhow::Result<()> {
     // We will focus on editing settings.toml (AppConfig) for now as it's the main one.
-    let config_path = Path::new("config/settings.toml");
+    let config_path = get_config_path("config/settings.toml")?;
 
     // Attempt to load existing config, or default if missing
     let mut config = if config_path.exists() {
@@ -106,7 +105,7 @@ fn edit_config() -> anyhow::Result<()> {
             "Loading existing configuration from {}",
             config_path.display()
         );
-        AppConfig::load(config_path)?
+        AppConfig::load(&config_path)?
     } else {
         println!(
             "Config file not found at {}. Starting with defaults.",
@@ -124,29 +123,38 @@ fn edit_config() -> anyhow::Result<()> {
         .default(true)
         .interact()?
     {
-        config.teamspeak.host = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.host = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("TeamSpeak Server Host")
-            .default(config.teamspeak.host)
+            .default(config.teamspeak.serverquery.host)
             .interact_text()?;
 
-        config.teamspeak.port = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.port = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Query Port")
-            .default(config.teamspeak.port)
+            .default(config.teamspeak.serverquery.port)
             .interact_text()?;
 
-        config.teamspeak.ssh_port = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.ssh_port = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("SSH Port")
-            .default(config.teamspeak.ssh_port)
+            .default(config.teamspeak.serverquery.ssh_port)
             .interact_text()?;
 
-        config.teamspeak.use_ssh = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Use SSH?")
-            .default(config.teamspeak.use_ssh)
-            .interact()?;
+        {
+            let methods = vec!["tcp", "ssh"];
+            let default_idx = methods
+                .iter()
+                .position(|&m| m == config.teamspeak.serverquery.sq_method)
+                .unwrap_or(0);
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("ServerQuery Method")
+                .default(default_idx)
+                .items(&methods)
+                .interact()?;
+            config.teamspeak.serverquery.sq_method = methods[selection].to_string();
+        }
 
-        config.teamspeak.login_name = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.login_name = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Query Login Name")
-            .default(config.teamspeak.login_name)
+            .default(config.teamspeak.serverquery.login_name)
             .interact_text()?;
 
         // Password handling
@@ -156,7 +164,7 @@ fn edit_config() -> anyhow::Result<()> {
             .interact()?;
 
         if change_pass {
-            config.teamspeak.login_pass = Input::with_theme(&ColorfulTheme::default())
+            config.teamspeak.serverquery.login_pass = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("New Query Login Password")
                 .interact_text()?;
         }
@@ -164,11 +172,6 @@ fn edit_config() -> anyhow::Result<()> {
         config.teamspeak.bot_nickname = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Bot Nickname")
             .default(config.teamspeak.bot_nickname)
-            .interact_text()?;
-
-        config.teamspeak.server_id = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Virtual Server ID")
-            .default(config.teamspeak.server_id)
             .interact_text()?;
 
         {
@@ -197,12 +200,6 @@ fn edit_config() -> anyhow::Result<()> {
                     Input::with_theme(&ColorfulTheme::default())
                         .with_prompt("Identity Key File Path")
                         .default(config.teamspeak.headless.identity_path)
-                        .interact_text()?;
-
-                config.teamspeak.headless.connect_timeout_secs =
-                    Input::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Connect Timeout (seconds)")
-                        .default(config.teamspeak.headless.connect_timeout_secs)
                         .interact_text()?;
             }
         }
@@ -266,7 +263,7 @@ fn edit_config() -> anyhow::Result<()> {
 
         // Use toml serializer
         let toml_string = toml::to_string_pretty(&config)?;
-        std::fs::write(config_path, toml_string)?;
+        std::fs::write(&config_path, toml_string)?;
         println!("Configuration successfully saved to {:?}", config_path);
     } else {
         println!("Changes discarded.");

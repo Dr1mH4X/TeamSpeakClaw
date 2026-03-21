@@ -47,7 +47,7 @@ rand = "0.10.0"
 dialoguer = "0.11"
 
 # Headless client dependencies (now mandatory)
-p256 = { version = "0.13", features = ["ecdh", "pkcs8", "arithmetic"] }
+p256 = { version = "0.13", features = ["ecdh", "pkcs8", "arithmetic", "ecdsa"] }
 aes = "0.8"
 eax = "0.5"
 sha1 = "0.10"
@@ -58,6 +58,8 @@ elliptic-curve = "0.13"
 generic-array = "0.14"
 bitflags = "2.6"
 flate2 = "1"
+num-bigint = "0.4"
+curve25519-dalek = "4"
 
 
 

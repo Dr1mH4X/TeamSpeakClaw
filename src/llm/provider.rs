@@ -1,15 +1,15 @@
-use crate::config::LlmConfig;
+use crate::config::{LlmConfig, LLM_RETRY_DELAY_MS, LLM_RETRY_MAX, LLM_TIMEOUT_SECS};
 use crate::error::Result;
 use crate::llm::schema::{Tool, ToolCall};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Tool>)
-        -> Result<LlmResponse>;
+    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Tool>) -> Result<LlmResponse>;
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -27,7 +27,7 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
+            .timeout(Duration::from_secs(LLM_TIMEOUT_SECS))
             .build()
             .unwrap_or_default();
         Self { client, config }
@@ -39,19 +39,12 @@ impl OpenAiProvider {
             && self.config.base_url == other.base_url
             && self.config.model == other.model
             && self.config.max_tokens == other.max_tokens
-            && self.config.timeout_secs == other.timeout_secs
-            && self.config.retry_max == other.retry_max
-            && self.config.retry_delay_ms == other.retry_delay_ms
     }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn chat_completion(
-        &self,
-        messages: Vec<Value>,
-        tools: Vec<Tool>,
-    ) -> Result<LlmResponse> {
+    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Tool>) -> Result<LlmResponse> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -68,44 +61,69 @@ impl LlmProvider for OpenAiProvider {
             body["tool_choice"] = json!("auto");
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .json(&body)
-            .send()
-            .await?;
+        for attempt in 0..=LLM_RETRY_MAX {
+            let resp_result = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .json(&body)
+                .send()
+                .await;
 
-        if !resp.status().is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("LLM API error: {}", error_text).into());
+            match resp_result {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let data: Value = resp.json().await?;
+
+                        let choice = data["choices"][0]
+                            .as_object()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+                        let message = choice["message"]
+                            .as_object()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid message format"))?;
+
+                        let content = message
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
+                        let tool_calls: Vec<ToolCall> = if let Some(calls) =
+                            message.get("tool_calls")
+                        {
+                            serde_json::from_value(calls.clone())
+                                .map_err(|e| anyhow::anyhow!("Failed to parse tool calls: {}", e))?
+                        } else {
+                            Vec::new()
+                        };
+
+                        return Ok(LlmResponse {
+                            content,
+                            tool_calls,
+                        });
+                    }
+
+                    let status = resp.status();
+                    let error_text = resp.text().await.unwrap_or_default();
+                    let can_retry = status.is_server_error() || status.as_u16() == 429;
+                    if can_retry && attempt < LLM_RETRY_MAX {
+                        sleep(Duration::from_millis(LLM_RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(
+                        anyhow::anyhow!("LLM API error [{}]: {}", status, error_text).into(),
+                    );
+                }
+                Err(e) => {
+                    if attempt < LLM_RETRY_MAX {
+                        sleep(Duration::from_millis(LLM_RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
         }
 
-        let data: Value = resp.json().await?;
-
-        let choice = data["choices"][0]
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-        let message = choice["message"]
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("Invalid message format"))?;
-
-        let content = message
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let tool_calls: Vec<ToolCall> = if let Some(calls) = message.get("tool_calls") {
-            serde_json::from_value(calls.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse tool calls: {}", e))?
-        } else {
-            Vec::new()
-        };
-
-        Ok(LlmResponse {
-            content,
-            tool_calls,
-        })
+        Err(anyhow::anyhow!("LLM request failed after retries").into())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

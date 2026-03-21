@@ -10,7 +10,10 @@ use crate::{
     adapter::serverquery::event::{
         ClientEnterEvent, ClientLeftEvent, TextMessageEvent, TextMessageTarget, TsEvent,
     },
-    config::AppConfig,
+    config::{
+        AppConfig, TS_HEADLESS_CONNECT_TIMEOUT_SECS, TS_RECONNECT_BASE_DELAY_MS,
+        TS_RECONNECT_MAX_RETRIES,
+    },
     error::{AppError, Result},
 };
 
@@ -66,15 +69,13 @@ impl HeadlessAdapter {
             server_addr,
             nickname: cfg.teamspeak.bot_nickname.clone(),
             identity,
-            connect_timeout: std::time::Duration::from_secs(
-                cfg.teamspeak.headless.connect_timeout_secs,
-            ),
+            connect_timeout: std::time::Duration::from_secs(TS_HEADLESS_CONNECT_TIMEOUT_SECS),
             audio: Some(AudioConfig::default()), // TODO: Load from config
         };
 
         let reconnect_config = ReconnectConfig {
-            max_retries: cfg.teamspeak.reconnect_max_retries,
-            initial_delay_ms: cfg.teamspeak.reconnect_base_delay_ms,
+            max_retries: TS_RECONNECT_MAX_RETRIES,
+            initial_delay_ms: TS_RECONNECT_BASE_DELAY_MS,
             max_delay_ms: 30000,
             backoff_multiplier: 2.0,
             enabled: true,
@@ -137,14 +138,39 @@ impl HeadlessAdapter {
             let key: serde_json::Value = serde_json::from_str(&content)?;
 
             if let Some(key_str) = key.get("key").and_then(|v| v.as_str()) {
-                return Identity::from_teamspeak_key(key_str)
-                    .map_err(|e| AppError::ConfigError(format!("Failed to load identity: {e}")));
+                let mut identity = Identity::from_teamspeak_key(key_str)
+                    .map_err(|e| AppError::ConfigError(format!("Failed to load identity: {e}")))?;
+
+                let level_before = identity.security_level();
+                if level_before < 10 {
+                    info!(
+                        "Identity security level {} is too low, improving to >=10",
+                        level_before
+                    );
+                    let level_after = identity.ensure_security_level(10);
+                    let key_data = serde_json::json!({
+                        "key": identity.to_teamspeak_key(),
+                        "uid": identity.uid(),
+                    });
+                    std::fs::write(path, serde_json::to_string_pretty(&key_data)?)?;
+                    info!(
+                        "Identity key_offset updated to {}, security level={}",
+                        identity.key_offset, level_after
+                    );
+                }
+
+                return Ok(identity);
             }
         }
 
         // 生成新身份
         info!("Generating new identity");
-        let identity = Identity::generate();
+        let mut identity = Identity::generate();
+        let level = identity.ensure_security_level(10);
+        info!(
+            "Generated identity with key_offset={}, security level={}",
+            identity.key_offset, level
+        );
 
         // 保存身份
         if let Some(parent) = path.parent() {
@@ -322,7 +348,7 @@ impl HeadlessAdapter {
 
     /// 退出
     pub async fn quit(&self) -> Result<()> {
-        info!("Sending quit command");
+        info!("Sending disconnect command");
         self.connection.shutdown().await;
         Ok(())
     }

@@ -1,8 +1,12 @@
 //! TeamSpeak 身份管理
 //!
-//! 处理客户端密钥对的生成、导入和导出。
+//! 当前阶段先保证连接握手可用：
+//! - 兼容 identity 存储格式（`{level}V{base64(private32)}`）
+//! - 提供 TS 握手所需 DER 公钥导出
+//! - 共享密钥派生与安全等级计算对齐 TS3AudioBot
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -10,18 +14,11 @@ use std::fmt;
 
 use super::error::{HeadlessError, Result};
 
-/// TeamSpeak 客户端身份
 #[derive(Clone)]
 pub struct Identity {
-    /// 私钥
     private_key: SecretKey,
-    /// 公钥
     public_key: PublicKey,
-    /// 安全级别偏移量
     pub key_offset: u64,
-    /// 最后检查的偏移量
-
-    /// 用户唯一标识符
     uid: String,
 }
 
@@ -35,13 +32,11 @@ impl fmt::Debug for Identity {
 }
 
 impl Identity {
-    /// 生成新的随机身份
     pub fn generate() -> Self {
-        // 使用 p256 内置的随机数生成器
         let private_key = SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
         let public_key = private_key.public_key();
-        let uid = Self::compute_uid(&public_key);
-
+        let public_key_b64 = Self::encode_public_key_ts_base64(&public_key);
+        let uid = Self::compute_uid_from_public_key_string(&public_key_b64);
         Self {
             private_key,
             public_key,
@@ -50,13 +45,8 @@ impl Identity {
         }
     }
 
-    /// 从私钥字节创建身份
-
-    /// 从 TeamSpeak 格式的密钥导入
-    ///
-    /// 格式: "{level}V{base64_encoded_key}"
+    /// 兼容已有 key 格式：`{level}V{base64(private32)}`
     pub fn from_teamspeak_key(key: &str) -> Result<Self> {
-        // 解析格式 "20Vbase64..."
         let parts: Vec<&str> = key.splitn(2, 'V').collect();
         if parts.len() != 2 {
             return Err(HeadlessError::InvalidKey(
@@ -68,154 +58,225 @@ impl Identity {
             .parse()
             .map_err(|_| HeadlessError::InvalidKey("Invalid key level".into()))?;
 
-        let encoded = parts[1];
-        let mut data = BASE64
-            .decode(encoded)
+        let decoded = BASE64
+            .decode(parts[1])
             .map_err(|e| HeadlessError::InvalidKey(format!("Base64 decode failed: {e}")))?;
+        if decoded.len() < 32 {
+            return Err(HeadlessError::InvalidKey(
+                "Private key bytes too short".into(),
+            ));
+        }
 
-        // 解混淆
-        Self::deobfuscate_identity(&mut data)?;
+        let mut sk = [0u8; 32];
+        sk.copy_from_slice(&decoded[decoded.len() - 32..]);
+        let private_key = SecretKey::from_slice(&sk)
+            .map_err(|e| HeadlessError::InvalidKey(format!("Invalid private key: {e}")))?;
+        let public_key = private_key.public_key();
+        let public_key_b64 = Self::encode_public_key_ts_base64(&public_key);
+        let uid = Self::compute_uid_from_public_key_string(&public_key_b64);
 
-        // 导入密钥
-        Self::import_key_data(&data, level)
+        Ok(Self {
+            private_key,
+            public_key,
+            key_offset: level,
+            uid,
+        })
     }
 
-    /// 解混淆 TeamSpeak 身份数据
-    fn deobfuscate_identity(data: &mut [u8]) -> Result<()> {
-        if data.len() < 20 {
-            return Err(HeadlessError::InvalidKey("Identity too short".into()));
-        }
-
-        // 计算哈希用于解混淆
-        let hash_start = 20;
-        let hash_end = data.len();
-        let hash = ts_hash_range(data, hash_start, hash_end);
-
-        // XOR 解混淆
-        for (i, byte) in data.iter_mut().enumerate().take(hash_end) {
-            if i < hash.len() {
-                *byte ^= hash[i];
-            }
-        }
-
-        // 第二层 XOR 使用固定密钥
-        let obfuscation_key = [
-            0xb9, 0xdf, 0xaa, 0x7b, 0xee, 0x6a, 0xc5, 0x7a, 0xc7, 0xb6, 0x5f, 0x10, 0x94, 0xa1,
-            0xc1, 0x55, 0xe7, 0x47, 0x32, 0x7b, 0xc2, 0xfe, 0x5d, 0x51, 0xc5, 0x12, 0x02, 0x3f,
-            0xe5, 0x4a, 0x28, 0x02, 0x01, 0x00, 0x4e, 0x90, 0xad, 0x1d, 0xaa, 0xae, 0x10, 0x75,
-            0xd5, 0x3b, 0x7d, 0x57, 0x1c, 0x30, 0xe0, 0x63, 0xb5, 0xa6, 0x2a, 0x4a, 0x01, 0x7b,
-            0xb3, 0x94, 0x83, 0x3a, 0xa0, 0x98, 0x3e, 0x6e,
-        ];
-        let len = std::cmp::min(obfuscation_key.len(), data.len());
-        for (i, byte) in data.iter_mut().enumerate().take(len) {
-            *byte ^= obfuscation_key[i];
-        }
-
-        Ok(())
-    }
-
-    /// 从原始密钥数据导入
-    fn import_key_data(data: &[u8], level: u64) -> Result<Self> {
-        // 尝试解析 ASN.1 DER 格式
-        // TeamSpeak 使用的格式可能不同，这里简化处理
-
-        // 尝试直接作为私钥导入
-        if data.len() >= 32 {
-            let key_bytes = &data[data.len() - 32..];
-            if let Ok(private_key) = SecretKey::from_slice(key_bytes) {
-                let public_key = private_key.public_key();
-                let uid = Self::compute_uid(&public_key);
-                return Ok(Self {
-                    private_key,
-                    public_key,
-                    key_offset: level,
-                    uid,
-                });
-            }
-        }
-
-        Err(HeadlessError::InvalidKey(
-            "Could not import key data".into(),
-        ))
-    }
-
-    /// 导出为 TeamSpeak 格式
+    /// 与现有存储保持一致
     pub fn to_teamspeak_key(&self) -> String {
         let private_bytes = self.private_key.to_bytes();
-        let encoded = BASE64.encode(&private_bytes);
-        format!("{}V{}", self.key_offset, encoded)
+        format!("{}V{}", self.key_offset, BASE64.encode(private_bytes))
     }
 
-    /// 获取私钥字节
-
-    /// 获取公钥字节（未压缩格式）
-    pub fn public_key_bytes(&self) -> Vec<u8> {
-        self.public_key.to_encoded_point(false).as_bytes().to_vec()
+    /// 握手里 `omega` 字段：对齐 TS3AudioBot 的 DER 公钥导出格式
+    pub fn public_key_ts_base64(&self) -> String {
+        Self::encode_public_key_ts_base64(&self.public_key)
     }
 
-    /// 获取公钥 Base64 编码
-    pub fn public_key_base64(&self) -> String {
-        BASE64.encode(self.public_key_bytes())
-    }
-
-    /// 计算 UID（从公钥哈希）
-    pub fn compute_uid(public_key: &PublicKey) -> String {
-        let key_bytes = public_key.to_encoded_point(false);
-        let hash = ts_hash(key_bytes.as_bytes());
-        BASE64.encode(hash)
-    }
-
-    /// 获取 UID
     pub fn uid(&self) -> &str {
         &self.uid
     }
 
-    /// 与服务器公钥计算共享密钥
-    pub fn compute_shared_secret(&self, server_public_key: &PublicKey) -> [u8; 32] {
+    pub fn security_level(&self) -> u8 {
+        let public_key_b64 = self.public_key_ts_base64();
+        security_level_for_offset(&public_key_b64, self.key_offset)
+    }
+
+    /// 将 key_offset 提升到至少指定安全等级（与 TS3AudioBot ImproveSecurity 等价）
+    pub fn ensure_security_level(&mut self, required_level: u8) -> u8 {
+        let public_key_b64 = self.public_key_ts_base64();
+
+        let mut best_offset = self.key_offset;
+        let mut best_level = security_level_for_offset(&public_key_b64, best_offset);
+        if best_level >= required_level {
+            return best_level;
+        }
+
+        let mut offset = self.key_offset;
+        loop {
+            let level = security_level_for_offset(&public_key_b64, offset);
+            if level > best_level {
+                best_level = level;
+                best_offset = offset;
+                if best_level >= required_level {
+                    self.key_offset = best_offset;
+                    return best_level;
+                }
+            }
+
+            match offset.checked_add(1) {
+                Some(next) => offset = next,
+                None => {
+                    self.key_offset = best_offset;
+                    return best_level;
+                }
+            }
+        }
+    }
+
+    /// 对齐 TS3AudioBot：shared_x -> SHA1(20)
+    pub fn compute_shared_secret_sha1(&self, server_public_key: &PublicKey) -> [u8; 20] {
         let shared = diffie_hellman(
             self.private_key.to_nonzero_scalar(),
             server_public_key.as_affine(),
         );
 
-        // TeamSpeak 使用 SHA1 哈希共享密钥
         let raw_secret = shared.raw_secret_bytes();
-        let hash = if raw_secret.len() == 32 {
+        if raw_secret.len() == 32 {
             ts_hash(raw_secret)
         } else if raw_secret.len() > 32 {
             ts_hash(&raw_secret[raw_secret.len() - 32..])
         } else {
-            // 填充到 32 字节
             let mut padded = [0u8; 32];
             padded[32 - raw_secret.len()..].copy_from_slice(raw_secret);
             ts_hash(&padded)
-        };
+        }
+    }
 
-        // 扩展到 32 字节（SHA1 只有 20 字节）
-        let mut result = [0u8; 32];
-        result[..20].copy_from_slice(&hash);
-        result
+    pub fn sign_ecdsa_sha256_der(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let key_bytes = self.private_key.to_bytes();
+        let signing_key = SigningKey::from_bytes(&key_bytes)
+            .map_err(|e| HeadlessError::CryptoError(format!("Invalid ECDSA private key: {e}")))?;
+        let sig: Signature = signing_key.sign(data);
+        Ok(sig.to_der().as_bytes().to_vec())
+    }
+
+    fn compute_uid_from_public_key_string(public_key_b64: &str) -> String {
+        BASE64.encode(ts_hash(public_key_b64.as_bytes()))
+    }
+
+    fn encode_public_key_ts_base64(public_key: &PublicKey) -> String {
+        let point = public_key.to_encoded_point(false);
+        let x = point
+            .x()
+            .expect("uncompressed P-256 point should contain x coordinate");
+        let y = point
+            .y()
+            .expect("uncompressed P-256 point should contain y coordinate");
+
+        // TS3AudioBot ExportPublicKey:
+        // SEQUENCE {
+        //   BIT STRING (flags=0x00, pad bits=7),
+        //   INTEGER 32,
+        //   INTEGER x,
+        //   INTEGER y
+        // }
+        let bit_string = vec![0x03, 0x02, 0x07, 0x00];
+        let key_size = vec![0x02, 0x01, 0x20];
+        let x_int = der_encode_integer_positive(x);
+        let y_int = der_encode_integer_positive(y);
+
+        let mut seq_data =
+            Vec::with_capacity(bit_string.len() + key_size.len() + x_int.len() + y_int.len());
+        seq_data.extend_from_slice(&bit_string);
+        seq_data.extend_from_slice(&key_size);
+        seq_data.extend_from_slice(&x_int);
+        seq_data.extend_from_slice(&y_int);
+
+        let mut out = Vec::with_capacity(2 + seq_data.len());
+        out.push(0x30);
+        der_write_len(&mut out, seq_data.len());
+        out.extend_from_slice(&seq_data);
+        BASE64.encode(out)
     }
 }
 
-/// SHA1 哈希（TeamSpeak 使用单次 SHA1）
 pub fn ts_hash(data: &[u8]) -> [u8; 20] {
     let mut hasher = Sha1::new();
     hasher.update(data);
     hasher.finalize().into()
 }
 
-/// SHA256 哈希（用于密钥派生）
 pub fn ts_hash256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
 }
 
-/// 对数据范围进行 SHA1 哈希
-fn ts_hash_range(data: &[u8], start: usize, end: usize) -> [u8; 20] {
-    let mut hasher = Sha1::new();
-    hasher.update(&data[start..end]);
-    hasher.finalize().into()
+fn der_write_len(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+        return;
+    }
+
+    let mut buf = [0u8; 8];
+    let mut n = len;
+    let mut idx = buf.len();
+    while n > 0 {
+        idx -= 1;
+        buf[idx] = (n & 0xFF) as u8;
+        n >>= 8;
+    }
+    let octets = buf.len() - idx;
+    out.push(0x80 | (octets as u8));
+    out.extend_from_slice(&buf[idx..]);
+}
+
+fn der_encode_integer_positive(raw_be: &[u8]) -> Vec<u8> {
+    let first_non_zero = raw_be
+        .iter()
+        .position(|b| *b != 0)
+        .unwrap_or(raw_be.len().saturating_sub(1));
+    let mut val = raw_be[first_non_zero..].to_vec();
+    if val.is_empty() {
+        val.push(0);
+    }
+    if val[0] & 0x80 != 0 {
+        val.insert(0, 0);
+    }
+
+    let mut out = Vec::with_capacity(2 + val.len());
+    out.push(0x02);
+    der_write_len(&mut out, val.len());
+    out.extend_from_slice(&val);
+    out
+}
+
+fn security_level_for_offset(public_key_b64: &str, offset: u64) -> u8 {
+    let mut hash_buffer = Vec::with_capacity(public_key_b64.len() + 20);
+    hash_buffer.extend_from_slice(public_key_b64.as_bytes());
+    hash_buffer.extend_from_slice(offset.to_string().as_bytes());
+    let hash = ts_hash(&hash_buffer);
+    leading_zero_bits_ts(&hash)
+}
+
+fn leading_zero_bits_ts(hash: &[u8]) -> u8 {
+    let mut count: u8 = 0;
+    for &b in hash {
+        if b == 0 {
+            count = count.saturating_add(8);
+            continue;
+        }
+
+        let mut mask = 1u8;
+        while mask != 0 && (b & mask) == 0 {
+            count = count.saturating_add(1);
+            mask <<= 1;
+        }
+        break;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -223,25 +284,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_identity_generate() {
-        let identity = Identity::generate();
-        assert!(!identity.uid().is_empty());
-        assert_eq!(identity.key_offset, 0);
-    }
-
-    #[test]
     fn test_identity_export_import() {
         let identity = Identity::generate();
         let key = identity.to_teamspeak_key();
-
-        assert!(key.contains('V'));
-        assert!(key.starts_with('0'));
-    }
-
-    #[test]
-    fn test_ts_hash() {
-        let data = b"test data";
-        let hash = ts_hash(data);
-        assert_eq!(hash.len(), 20);
+        let loaded = Identity::from_teamspeak_key(&key).unwrap();
+        assert!(!loaded.uid().is_empty());
     }
 }

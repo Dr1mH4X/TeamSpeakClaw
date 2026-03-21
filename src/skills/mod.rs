@@ -52,13 +52,7 @@ impl SkillRegistry {
                 allowed_skills.contains(&"*".to_string())
                     || allowed_skills.contains(&s.key().clone())
             })
-            .map(|s| {
-                crate::llm::schema::Tool::new(
-                    s.name(),
-                    s.description(),
-                    s.parameters(),
-                )
-            })
+            .map(|s| crate::llm::schema::Tool::new(s.name(), s.description(), s.parameters()))
             .collect()
     }
 }

@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
 
     // 4. 初始化组件
     let audit = Arc::new(AuditLog::new(&config.load().audit)?);
-    let cache = Arc::new(ClientCache::new(config.clone()));
+    let cache = Arc::new(ClientCache::new());
     let acl_config = crate::permission::AclConfig::load("config/acl.toml")?;
     let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
     let gate = Arc::new(PermissionGate::new(acl_config));
@@ -163,7 +163,10 @@ fn init_tracing(_cfg: &AppConfig, console_level: &str) -> WorkerGuard {
         .compact()
         .with_filter(console_filter);
 
-    let file_appender = tracing_appender::rolling::daily("logs", "teamspeakclaw.log");
+    let file_appender = crate::audit::log::DailyLogWriter::new(
+        std::path::PathBuf::from("logs"),
+        "teamspeakclaw.log",
+    );
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = EnvFilter::new("trace");

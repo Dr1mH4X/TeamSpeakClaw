@@ -1,7 +1,6 @@
 use crate::adapter::serverquery::command::cmd_clientlist_uid_groups;
 use crate::adapter::UnifiedAdapter;
-use crate::config::AppConfig;
-use arc_swap::ArcSwap;
+use crate::config::{CACHE_ENTRY_TTL_SECS, CACHE_REFRESH_INTERVAL_SECS};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,14 +16,12 @@ pub struct ClientInfo {
 }
 
 pub struct ClientCache {
-    config: Arc<ArcSwap<AppConfig>>,
     pub clients: DashMap<u32, ClientInfo>,
 }
 
 impl ClientCache {
-    pub fn new(config: Arc<ArcSwap<AppConfig>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            config,
             clients: DashMap::new(),
         }
     }
@@ -35,9 +32,8 @@ impl ClientCache {
 
     pub async fn run_refresh_loop(&self, adapter: Arc<UnifiedAdapter>) {
         loop {
-            let cfg = self.config.load();
-            let interval = cfg.cache.refresh_interval_secs;
-            let ttl_secs = cfg.cache.entry_ttl_secs;
+            let interval = CACHE_REFRESH_INTERVAL_SECS;
+            let ttl_secs = CACHE_ENTRY_TTL_SECS;
             if interval == 0 {
                 sleep(Duration::from_secs(60)).await;
                 continue;

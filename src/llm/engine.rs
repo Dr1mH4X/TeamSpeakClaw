@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
+use crate::error::Result;
 use crate::llm::provider::{LlmProvider, LlmResponse, OpenAiProvider};
 use crate::llm::schema::Tool;
-use crate::error::Result;
 use arc_swap::ArcSwap;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
