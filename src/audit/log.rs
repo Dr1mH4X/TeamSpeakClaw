@@ -45,7 +45,7 @@ impl DailyLogWriter {
         let now_date = now.format("%Y-%m-%d").to_string();
 
         if self.file.is_none() || self.current_date != now_date {
-             let separator = if self.file_stem.ends_with('-') || self.file_stem.ends_with('_') {
+            let separator = if self.file_stem.ends_with('-') || self.file_stem.ends_with('_') {
                 ""
             } else {
                 "-"
@@ -56,7 +56,7 @@ impl DailyLogWriter {
                 self.file_stem, separator, now_date, self.extension
             );
             let file_path = self.dir.join(new_filename);
-            
+
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -118,7 +118,8 @@ impl AuditLog {
 
         std::fs::create_dir_all(&config.log_dir)?;
 
-        let custom_writer = DailyLogWriter::new(PathBuf::from(&config.log_dir), "teamspeakclaw-audit.log");
+        let custom_writer =
+            DailyLogWriter::new(PathBuf::from(&config.log_dir), "teamspeakclaw.log");
 
         let (non_blocking, guard) = tracing_appender::non_blocking(custom_writer);
 
@@ -150,4 +151,3 @@ impl AuditLog {
         }
     }
 }
-
