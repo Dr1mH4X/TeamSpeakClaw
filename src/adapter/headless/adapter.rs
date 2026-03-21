@@ -10,7 +10,10 @@ use crate::{
     adapter::serverquery::event::{
         ClientEnterEvent, ClientLeftEvent, TextMessageEvent, TextMessageTarget, TsEvent,
     },
-    config::AppConfig,
+    config::{
+        AppConfig, TS_HEADLESS_CONNECT_TIMEOUT_SECS, TS_RECONNECT_BASE_DELAY_MS,
+        TS_RECONNECT_MAX_RETRIES,
+    },
     error::{AppError, Result},
 };
 
@@ -66,15 +69,13 @@ impl HeadlessAdapter {
             server_addr,
             nickname: cfg.teamspeak.bot_nickname.clone(),
             identity,
-            connect_timeout: std::time::Duration::from_secs(
-                cfg.teamspeak.headless.connect_timeout_secs,
-            ),
+            connect_timeout: std::time::Duration::from_secs(TS_HEADLESS_CONNECT_TIMEOUT_SECS),
             audio: Some(AudioConfig::default()), // TODO: Load from config
         };
 
         let reconnect_config = ReconnectConfig {
-            max_retries: cfg.teamspeak.reconnect_max_retries,
-            initial_delay_ms: cfg.teamspeak.reconnect_base_delay_ms,
+            max_retries: TS_RECONNECT_MAX_RETRIES,
+            initial_delay_ms: TS_RECONNECT_BASE_DELAY_MS,
             max_delay_ms: 30000,
             backoff_multiplier: 2.0,
             enabled: true,
@@ -347,7 +348,7 @@ impl HeadlessAdapter {
 
     /// 退出
     pub async fn quit(&self) -> Result<()> {
-        info!("Sending quit command");
+        info!("Sending disconnect command");
         self.connection.shutdown().await;
         Ok(())
     }

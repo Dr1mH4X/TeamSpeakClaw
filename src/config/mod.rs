@@ -2,6 +2,19 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub const TS_SERVER_ID: u32 = 1;
+pub const TS_KEEPALIVE_INTERVAL_SECS: u64 = 180;
+pub const TS_RECONNECT_MAX_RETRIES: u32 = 10;
+pub const TS_RECONNECT_BASE_DELAY_MS: u64 = 1000;
+pub const TS_HEADLESS_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+pub const LLM_TIMEOUT_SECS: u64 = 30;
+pub const LLM_RETRY_MAX: u32 = 3;
+pub const LLM_RETRY_DELAY_MS: u64 = 500;
+
+pub const CACHE_REFRESH_INTERVAL_SECS: u64 = 30;
+pub const CACHE_ENTRY_TTL_SECS: u64 = 300;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub teamspeak: TsConfig,
@@ -9,7 +22,6 @@ pub struct AppConfig {
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
     pub audit: AuditConfig,
-    pub cache: CacheConfig,
 }
 
 impl Default for AppConfig {
@@ -20,24 +32,14 @@ impl Default for AppConfig {
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
             audit: AuditConfig::default(),
-            cache: CacheConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TsConfig {
-    pub host: String,
-    pub port: u16,
-    pub ssh_port: u16,
-    pub use_ssh: bool,
-    pub login_name: String,
-    pub login_pass: String,
-    pub server_id: u32,
+    pub serverquery: ServerQueryConfig,
     pub bot_nickname: String,
-    pub keepalive_interval_secs: u64,
-    pub reconnect_max_retries: u32,
-    pub reconnect_base_delay_ms: u64,
     /// 连接模式: "serverquery" | "headless"
     pub connection_mode: String,
     /// 无头客户端配置
@@ -47,20 +49,54 @@ pub struct TsConfig {
 impl Default for TsConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
-            port: 10011,
-            ssh_port: 10022,
-            use_ssh: false,
-            login_name: "serveradmin".to_string(),
-            login_pass: "".to_string(),
-            server_id: 1,
+            serverquery: ServerQueryConfig::default(),
             bot_nickname: "TSClaw".to_string(),
-            keepalive_interval_secs: 180,
-            reconnect_max_retries: 10,
-            reconnect_base_delay_ms: 1000,
             connection_mode: "serverquery".to_string(),
             headless: HeadlessConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerQueryConfig {
+    pub host: String,
+    pub port: u16,
+    pub ssh_port: u16,
+    /// 连接方式: "tcp" | "ssh"
+    pub sq_method: String,
+    pub login_name: String,
+    pub login_pass: String,
+}
+
+impl Default for ServerQueryConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 10011,
+            ssh_port: 10022,
+            sq_method: "tcp".to_string(),
+            login_name: "serveradmin".to_string(),
+            login_pass: "".to_string(),
+        }
+    }
+}
+
+impl ServerQueryConfig {
+    pub fn query_port(&self) -> u16 {
+        if self.sq_method == "ssh" {
+            return self.ssh_port;
+        }
+        self.port
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.sq_method != "tcp" && self.sq_method != "ssh" {
+            anyhow::bail!(
+                "Invalid teamspeak.serverquery.sq_method: '{}', expected 'tcp' or 'ssh'",
+                self.sq_method
+            );
+        }
+        Ok(())
     }
 }
 
@@ -71,8 +107,6 @@ pub struct HeadlessConfig {
     pub server_address: String,
     /// 身份密钥文件路径
     pub identity_path: String,
-    /// 连接超时（秒）
-    pub connect_timeout_secs: u64,
     /// ffmpeg 可执行文件路径 (可选，默认 "ffmpeg")
     pub ffmpeg_path: Option<String>,
 }
@@ -82,7 +116,6 @@ impl Default for HeadlessConfig {
         Self {
             server_address: "127.0.0.1:9987".to_string(),
             identity_path: "config/identity.toml".to_string(),
-            connect_timeout_secs: 30,
             ffmpeg_path: None,
         }
     }
@@ -95,9 +128,6 @@ pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
     pub max_tokens: u32,
-    pub timeout_secs: u64,
-    pub retry_max: u32,
-    pub retry_delay_ms: u64,
 }
 
 impl Default for LlmConfig {
@@ -108,9 +138,6 @@ impl Default for LlmConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
             max_tokens: 1024,
-            timeout_secs: 30,
-            retry_max: 3,
-            retry_delay_ms: 500,
         }
     }
 }
@@ -162,21 +189,6 @@ impl Default for AuditConfig {
         Self {
             enabled: true,
             log_dir: "./logs".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CacheConfig {
-    pub refresh_interval_secs: u64,
-    pub entry_ttl_secs: u64,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            refresh_interval_secs: 30,
-            entry_ttl_secs: 300,
         }
     }
 }
@@ -234,23 +246,20 @@ impl Default for ErrorPrompts {
 
 // 默认配置文件内容
 pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
+bot_nickname = "TSClaw"
+connection_mode = "serverquery"  # "serverquery" 或 "headless"
+
+[teamspeak.serverquery]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
-use_ssh = false
+sq_method = "tcp"         # "tcp" 或 "ssh"
 login_name = "serveradmin"
 login_pass = ""           # 通过环境变量 TS_LOGIN_PASS 覆盖
-server_id = 1
-bot_nickname = "TSClaw"
-keepalive_interval_secs = 180
-reconnect_max_retries = 10
-reconnect_base_delay_ms = 1000
-connection_mode = "serverquery"  # "serverquery" 或 "headless"
 
 [teamspeak.headless]
 server_address = "127.0.0.1:9987"
 identity_path = "config/identity.toml"
-connect_timeout_secs = 30
 # ffmpeg_path = "ffmpeg"  # 可选
 
 [llm]
@@ -259,9 +268,6 @@ api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 max_tokens = 1024
-timeout_secs = 30
-retry_max = 3
-retry_delay_ms = 500
 
 [bot]
 # 在频道/服务器聊天中触发机器人的前缀
@@ -279,12 +285,6 @@ burst_size = 3
 [audit]
 enabled = true
 log_dir = "./logs"
-
-[cache]
-# 客户端列表刷新间隔（秒）
-refresh_interval_secs = 30
-# 客户端离开后其缓存条目的存活时间（TTL）
-entry_ttl_secs = 300
 "#;
 
 pub const DEFAULT_PROMPTS_TOML: &str = r#"[system]
@@ -335,7 +335,13 @@ impl AppConfig {
 
         let content = std::fs::read_to_string(&path)?;
         let config: AppConfig = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.teamspeak.serverquery.validate()?;
+        Ok(())
     }
 }
 

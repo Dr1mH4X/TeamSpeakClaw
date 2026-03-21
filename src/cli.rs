@@ -123,29 +123,38 @@ fn edit_config() -> anyhow::Result<()> {
         .default(true)
         .interact()?
     {
-        config.teamspeak.host = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.host = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("TeamSpeak Server Host")
-            .default(config.teamspeak.host)
+            .default(config.teamspeak.serverquery.host)
             .interact_text()?;
 
-        config.teamspeak.port = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.port = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Query Port")
-            .default(config.teamspeak.port)
+            .default(config.teamspeak.serverquery.port)
             .interact_text()?;
 
-        config.teamspeak.ssh_port = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.ssh_port = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("SSH Port")
-            .default(config.teamspeak.ssh_port)
+            .default(config.teamspeak.serverquery.ssh_port)
             .interact_text()?;
 
-        config.teamspeak.use_ssh = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Use SSH?")
-            .default(config.teamspeak.use_ssh)
-            .interact()?;
+        {
+            let methods = vec!["tcp", "ssh"];
+            let default_idx = methods
+                .iter()
+                .position(|&m| m == config.teamspeak.serverquery.sq_method)
+                .unwrap_or(0);
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("ServerQuery Method")
+                .default(default_idx)
+                .items(&methods)
+                .interact()?;
+            config.teamspeak.serverquery.sq_method = methods[selection].to_string();
+        }
 
-        config.teamspeak.login_name = Input::with_theme(&ColorfulTheme::default())
+        config.teamspeak.serverquery.login_name = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Query Login Name")
-            .default(config.teamspeak.login_name)
+            .default(config.teamspeak.serverquery.login_name)
             .interact_text()?;
 
         // Password handling
@@ -155,7 +164,7 @@ fn edit_config() -> anyhow::Result<()> {
             .interact()?;
 
         if change_pass {
-            config.teamspeak.login_pass = Input::with_theme(&ColorfulTheme::default())
+            config.teamspeak.serverquery.login_pass = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("New Query Login Password")
                 .interact_text()?;
         }
@@ -163,11 +172,6 @@ fn edit_config() -> anyhow::Result<()> {
         config.teamspeak.bot_nickname = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Bot Nickname")
             .default(config.teamspeak.bot_nickname)
-            .interact_text()?;
-
-        config.teamspeak.server_id = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Virtual Server ID")
-            .default(config.teamspeak.server_id)
             .interact_text()?;
 
         {
@@ -196,12 +200,6 @@ fn edit_config() -> anyhow::Result<()> {
                     Input::with_theme(&ColorfulTheme::default())
                         .with_prompt("Identity Key File Path")
                         .default(config.teamspeak.headless.identity_path)
-                        .interact_text()?;
-
-                config.teamspeak.headless.connect_timeout_secs =
-                    Input::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Connect Timeout (seconds)")
-                        .default(config.teamspeak.headless.connect_timeout_secs)
                         .interact_text()?;
             }
         }
