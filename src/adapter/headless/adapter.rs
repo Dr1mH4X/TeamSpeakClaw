@@ -137,14 +137,39 @@ impl HeadlessAdapter {
             let key: serde_json::Value = serde_json::from_str(&content)?;
 
             if let Some(key_str) = key.get("key").and_then(|v| v.as_str()) {
-                return Identity::from_teamspeak_key(key_str)
-                    .map_err(|e| AppError::ConfigError(format!("Failed to load identity: {e}")));
+                let mut identity = Identity::from_teamspeak_key(key_str)
+                    .map_err(|e| AppError::ConfigError(format!("Failed to load identity: {e}")))?;
+
+                let level_before = identity.security_level();
+                if level_before < 10 {
+                    info!(
+                        "Identity security level {} is too low, improving to >=10",
+                        level_before
+                    );
+                    let level_after = identity.ensure_security_level(10);
+                    let key_data = serde_json::json!({
+                        "key": identity.to_teamspeak_key(),
+                        "uid": identity.uid(),
+                    });
+                    std::fs::write(path, serde_json::to_string_pretty(&key_data)?)?;
+                    info!(
+                        "Identity key_offset updated to {}, security level={}",
+                        identity.key_offset, level_after
+                    );
+                }
+
+                return Ok(identity);
             }
         }
 
         // 生成新身份
         info!("Generating new identity");
-        let identity = Identity::generate();
+        let mut identity = Identity::generate();
+        let level = identity.ensure_security_level(10);
+        info!(
+            "Generated identity with key_offset={}, security level={}",
+            identity.key_offset, level
+        );
 
         // 保存身份
         if let Some(parent) = path.parent() {
