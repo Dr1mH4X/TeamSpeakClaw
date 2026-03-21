@@ -1,5 +1,6 @@
 use crate::config::LlmConfig;
 use crate::error::Result;
+use crate::llm::schema::{Tool, ToolCall};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -7,7 +8,7 @@ use std::time::Duration;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Value>)
+    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Tool>)
         -> Result<LlmResponse>;
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -16,13 +17,6 @@ pub trait LlmProvider: Send + Sync {
 pub struct LlmResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
 }
 
 pub struct OpenAiProvider {
@@ -56,7 +50,7 @@ impl LlmProvider for OpenAiProvider {
     async fn chat_completion(
         &self,
         messages: Vec<Value>,
-        tools: Vec<Value>,
+        tools: Vec<Tool>,
     ) -> Result<LlmResponse> {
         let url = format!(
             "{}/chat/completions",
@@ -101,22 +95,12 @@ impl LlmProvider for OpenAiProvider {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-            for call in calls {
-                let id = call["id"].as_str().unwrap_or_default().to_string();
-                let func = &call["function"];
-                let name = func["name"].as_str().unwrap_or_default().to_string();
-                let args_str = func["arguments"].as_str().unwrap_or("{}");
-                let args = serde_json::from_str(args_str).unwrap_or(json!({}));
-
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments: args,
-                });
-            }
-        }
+        let tool_calls: Vec<ToolCall> = if let Some(calls) = message.get("tool_calls") {
+            serde_json::from_value(calls.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse tool calls: {}", e))?
+        } else {
+            Vec::new()
+        };
 
         Ok(LlmResponse {
             content,

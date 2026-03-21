@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::llm::provider::{LlmProvider, LlmResponse, OpenAiProvider};
+use crate::llm::schema::Tool;
 use crate::error::Result;
 use arc_swap::ArcSwap;
 use serde_json::Value;
@@ -36,7 +37,7 @@ impl LlmEngine {
         tracing::info!("LLM provider hot-reloaded");
     }
 
-    pub async fn chat(&self, messages: Vec<Value>, tools: Vec<Value>) -> Result<LlmResponse> {
+    pub async fn chat(&self, messages: Vec<Value>, tools: Vec<Tool>) -> Result<LlmResponse> {
         self.ensure_provider();
         let p = self.provider.read().unwrap();
         p.chat_completion(messages, tools).await

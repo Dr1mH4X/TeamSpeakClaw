@@ -45,7 +45,7 @@ impl SkillRegistry {
         self.skills.iter().map(|s| s.key().clone()).collect()
     }
 
-    pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<Value> {
+    pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<crate::llm::schema::Tool> {
         self.skills
             .iter()
             .filter(|s| {
@@ -53,14 +53,11 @@ impl SkillRegistry {
                     || allowed_skills.contains(&s.key().clone())
             })
             .map(|s| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": s.name(),
-                        "description": s.description(),
-                        "parameters": s.parameters()
-                    }
-                })
+                crate::llm::schema::Tool::new(
+                    s.name(),
+                    s.description(),
+                    s.parameters(),
+                )
             })
             .collect()
     }

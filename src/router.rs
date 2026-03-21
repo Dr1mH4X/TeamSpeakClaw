@@ -149,16 +149,7 @@ impl EventRouter {
                 let assistant_tool_calls: Vec<_> = response
                     .tool_calls
                     .iter()
-                    .map(|tc| {
-                        json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments.to_string()
-                            }
-                        })
-                    })
+                    .map(|tc| json!(tc))
                     .collect();
 
                 messages.push(json!({
@@ -169,9 +160,9 @@ impl EventRouter {
 
                 // Execute tools
                 for call in response.tool_calls {
-                    let tool_result = if let Some(skill) = self.registry.get(&call.name) {
+                    let tool_result = if let Some(skill) = self.registry.get(&call.function.name) {
                         // Pre-execution permission check
-                        if let Err(e) = self.gate.check(&groups, &call.name) {
+                        if let Err(e) = self.gate.check(&groups, &call.function.name) {
                             let err_msg = match &e {
                                 AppError::PermissionDenied { .. } => {
                                     self.prompts.error.permission_denied.clone()
@@ -179,7 +170,7 @@ impl EventRouter {
                                 _ => format!("Error: {e}"),
                             };
                             self.audit.log("skill_denied", json!({
-                                "skill": call.name,
+                                "skill": call.function.name,
                                 "caller": event.invoker_name,
                                 "error": format!("{e}")
                             }));
@@ -191,12 +182,16 @@ impl EventRouter {
                                 caller_id: event.invoker_id,
                                 gate: self.gate.clone(),
                             };
-                            match skill.execute(call.arguments.clone(), &ctx).await {
+                            
+                            let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                                .unwrap_or(json!({}));
+
+                            match skill.execute(args.clone(), &ctx).await {
                                 Ok(val) => {
                                     self.audit.log("skill_executed", json!({
-                                        "skill": call.name,
+                                        "skill": call.function.name,
                                         "caller": event.invoker_name,
-                                        "args": call.arguments,
+                                        "args": args,
                                         "result": val
                                     }));
                                     val.to_string()
@@ -209,9 +204,9 @@ impl EventRouter {
                                         _ => format!("Error: {e}"),
                                     };
                                     self.audit.log("skill_failed", json!({
-                                        "skill": call.name,
+                                        "skill": call.function.name,
                                         "caller": event.invoker_name,
-                                        "args": call.arguments,
+                                        "args": args,
                                         "error": format!("{e}")
                                     }));
                                     err_msg
@@ -225,7 +220,7 @@ impl EventRouter {
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
-                        "name": call.name,
+                        "name": call.function.name,
                         "content": tool_result
                     }));
                 }

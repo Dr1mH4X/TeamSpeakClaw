@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
     // 4. 初始化组件
     let audit = Arc::new(AuditLog::new(&config.load().audit)?);
     let cache = Arc::new(ClientCache::new(config.clone()));
-    let acl_config = crate::permission::acl::AclConfig::load("config/acl.toml")?;
+    let acl_config = crate::permission::AclConfig::load("config/acl.toml")?;
     let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
