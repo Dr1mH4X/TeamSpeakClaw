@@ -1,5 +1,5 @@
-use crate::permission::acl::AclConfig;
 use crate::error::{AppError, Result};
+use crate::permission::acl::AclConfig;
 use tracing::debug;
 
 pub struct PermissionGate {
