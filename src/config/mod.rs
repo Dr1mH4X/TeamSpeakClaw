@@ -155,7 +155,6 @@ impl Default for RateLimitConfig {
 pub struct AuditConfig {
     pub enabled: bool,
     pub log_dir: String,
-    pub log_file: String,
 }
 
 impl Default for AuditConfig {
@@ -163,7 +162,6 @@ impl Default for AuditConfig {
         Self {
             enabled: true,
             log_dir: "./logs".to_string(),
-            log_file: "audit.jsonl".to_string(),
         }
     }
 }
@@ -281,7 +279,6 @@ burst_size = 3
 [audit]
 enabled = true
 log_dir = "./logs"
-log_file = "audit.jsonl"
 
 [cache]
 # 客户端列表刷新间隔（秒）
