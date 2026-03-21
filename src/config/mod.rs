@@ -81,7 +81,7 @@ impl Default for HeadlessConfig {
     fn default() -> Self {
         Self {
             server_address: "127.0.0.1:9987".to_string(),
-            identity_path: "./identity.toml".to_string(),
+            identity_path: "config/identity.toml".to_string(),
             connect_timeout_secs: 30,
             ffmpeg_path: None,
         }
@@ -249,7 +249,7 @@ connection_mode = "serverquery"  # "serverquery" 或 "headless"
 
 [teamspeak.headless]
 server_address = "127.0.0.1:9987"
-identity_path = "./identity.toml"
+identity_path = "config/identity.toml"
 connect_timeout_secs = 30
 # ffmpeg_path = "ffmpeg"  # 可选
 

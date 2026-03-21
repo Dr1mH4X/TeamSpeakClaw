@@ -163,7 +163,7 @@ fn init_tracing(_cfg: &AppConfig, console_level: &str) -> WorkerGuard {
         .compact()
         .with_filter(console_filter);
 
-    let file_appender = tracing_appender::rolling::daily("logs", "teamspeakclaw.log");
+    let file_appender = crate::audit::log::DailyLogWriter::new(std::path::PathBuf::from("logs"), "teamspeakclaw.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = EnvFilter::new("trace");

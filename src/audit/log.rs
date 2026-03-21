@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 
-struct DailyLogWriter {
+pub struct DailyLogWriter {
     dir: PathBuf,
     file_stem: String,
     extension: String,
@@ -18,7 +18,7 @@ struct DailyLogWriter {
 }
 
 impl DailyLogWriter {
-    fn new(dir: PathBuf, filename: &str) -> Self {
+    pub fn new(dir: PathBuf, filename: &str) -> Self {
         let path = Path::new(filename);
         let file_stem = path
             .file_stem()
@@ -41,10 +41,11 @@ impl DailyLogWriter {
     }
 
     fn ensure_file_open(&mut self) -> std::io::Result<()> {
-        let now_date = Utc::now().format("%Y-%m-%d").to_string();
+        let now = Utc::now();
+        let now_date = now.format("%Y-%m-%d").to_string();
 
         if self.file.is_none() || self.current_date != now_date {
-            let separator = if self.file_stem.ends_with('-') || self.file_stem.ends_with('_') {
+             let separator = if self.file_stem.ends_with('-') || self.file_stem.ends_with('_') {
                 ""
             } else {
                 "-"
@@ -55,6 +56,10 @@ impl DailyLogWriter {
                 self.file_stem, separator, now_date, self.extension
             );
             let file_path = self.dir.join(new_filename);
+            
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
 
             let file = OpenOptions::new()
                 .create(true)
@@ -113,7 +118,7 @@ impl AuditLog {
 
         std::fs::create_dir_all(&config.log_dir)?;
 
-        let custom_writer = DailyLogWriter::new(PathBuf::from(&config.log_dir), "tsclaw.log");
+        let custom_writer = DailyLogWriter::new(PathBuf::from(&config.log_dir), "teamspeakclaw-audit.log");
 
         let (non_blocking, guard) = tracing_appender::non_blocking(custom_writer);
 
@@ -145,3 +150,4 @@ impl AuditLog {
         }
     }
 }
+
