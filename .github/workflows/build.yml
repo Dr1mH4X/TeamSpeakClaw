@@ -118,7 +118,7 @@ jobs:
 
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            zip "${ARCHIVE_NAME}.zip" "$BIN_NAME"
+            powershell.exe -Command "Compress-Archive -Path '${BIN_NAME}' -DestinationPath '${ARCHIVE_NAME}.zip'"
             echo "Artifact prepared: ${ARCHIVE_NAME}.zip"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" "$BIN_NAME"
