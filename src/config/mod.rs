@@ -39,10 +39,8 @@ pub struct TsConfig {
     pub reconnect_max_retries: u32,
     pub reconnect_base_delay_ms: u64,
     /// 连接模式: "serverquery" | "headless"
-    #[cfg(feature = "headless")]
     pub connection_mode: String,
     /// 无头客户端配置
-    #[cfg(feature = "headless")]
     pub headless: HeadlessConfig,
 }
 
@@ -60,16 +58,13 @@ impl Default for TsConfig {
             keepalive_interval_secs: 180,
             reconnect_max_retries: 10,
             reconnect_base_delay_ms: 1000,
-            #[cfg(feature = "headless")]
             connection_mode: "serverquery".to_string(),
-            #[cfg(feature = "headless")]
             headless: HeadlessConfig::default(),
         }
     }
 }
 
 /// 无头客户端配置
-#[cfg(feature = "headless")]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HeadlessConfig {
     /// TeamSpeak 服务器地址 (host:voice_port)
@@ -82,7 +77,6 @@ pub struct HeadlessConfig {
     pub ffmpeg_path: Option<String>,
 }
 
-#[cfg(feature = "headless")]
 impl Default for HeadlessConfig {
     fn default() -> Self {
         Self {
@@ -131,7 +125,11 @@ pub struct BotConfig {
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
-            trigger_prefixes: vec!["!tsclaw".to_string(), "!bot".to_string(), "@TSClaw".to_string()],
+            trigger_prefixes: vec![
+                "!tsclaw".to_string(),
+                "!bot".to_string(),
+                "@TSClaw".to_string(),
+            ],
             respond_to_private: true,
             max_concurrent_requests: 4,
         }
@@ -184,7 +182,6 @@ impl Default for CacheConfig {
         }
     }
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PromptsConfig {
@@ -293,7 +290,6 @@ refresh_interval_secs = 30
 entry_ttl_secs = 300
 "#;
 
-
 pub const DEFAULT_PROMPTS_TOML: &str = r#"[system]
 content = """
 你是 TSClaw，一个 TeamSpeak 服务器的自动化管理员助手。
@@ -328,19 +324,18 @@ impl AppConfig {
             std::fs::write(path, DEFAULT_SETTINGS_TOML)?;
             println!("Created default AppConfig at {:?}", path);
         }
-        
+
         let content = std::fs::read_to_string(path)?;
         let config: AppConfig = toml::from_str(&content)?;
         Ok(config)
     }
 }
 
-
 impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
-             if let Some(parent) = path.parent() {
+            if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, DEFAULT_PROMPTS_TOML)?;
@@ -352,7 +347,10 @@ impl PromptsConfig {
             Ok(c) => c,
             Err(e) => {
                 println!("Failed to parse prompts config from {:?}: {}", path, e);
-                println!("Content preview:\n{}", &content.chars().take(200).collect::<String>());
+                println!(
+                    "Content preview:\n{}",
+                    &content.chars().take(200).collect::<String>()
+                );
                 return Err(e.into());
             }
         };
@@ -365,17 +363,19 @@ pub async fn watch_config(config: std::sync::Arc<arc_swap::ArcSwap<AppConfig>>) 
     use tokio::sync::mpsc;
 
     let (tx, mut rx) = mpsc::channel(1);
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(
-        move |res: std::result::Result<Event, notify::Error>| {
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: std::result::Result<Event, notify::Error>| {
             if let Ok(event) = res {
                 if event.kind.is_modify() {
                     let _ = tx.blocking_send(());
                 }
             }
-        },
-    )?;
+        })?;
 
-    watcher.watch(Path::new("config/settings.toml"), RecursiveMode::NonRecursive)?;
+    watcher.watch(
+        Path::new("config/settings.toml"),
+        RecursiveMode::NonRecursive,
+    )?;
 
     while rx.recv().await.is_some() {
         match AppConfig::load("config/settings.toml") {

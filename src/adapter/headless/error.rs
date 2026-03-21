@@ -36,19 +36,13 @@ pub enum HeadlessError {
     #[error("Decryption failed")]
     DecryptionFailed,
 
-    #[error("Invalid MAC")]
-    InvalidMac,
-
-    #[error("Connection closed")]
-    ConnectionClosed,
-
     #[error("Timeout")]
     Timeout,
 
     #[error("Not connected")]
     NotConnected,
 
-    #[cfg(feature = "audio")]
+    #[allow(dead_code)]
     #[error("Audio error: {0}")]
     AudioError(String),
 

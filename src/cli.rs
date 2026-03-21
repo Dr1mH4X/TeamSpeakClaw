@@ -1,9 +1,11 @@
-use crate::config::{AppConfig, DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
+use crate::config::AppConfig;
+use crate::config::{DEFAULT_PROMPTS_TOML, DEFAULT_SETTINGS_TOML};
 use crate::permission::acl::DEFAULT_ACL_TOML;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::path::Path;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -13,7 +15,6 @@ pub struct Args {
     pub log_level: String,
 
     /// Connection mode: serverquery or headless
-    #[cfg(feature = "headless")]
     #[arg(long, value_enum)]
     pub mode: Option<ConnectionMode>,
 
@@ -26,7 +27,20 @@ pub struct Args {
     pub list_skills: bool,
 }
 
-#[cfg(feature = "headless")]
+impl Args {
+    /// Apply CLI arguments to override configuration
+    pub fn apply_overrides(&self, config: &mut AppConfig) {
+        if let Some(mode) = self.mode {
+            let mode_str = match mode {
+                ConnectionMode::Serverquery => "serverquery",
+                ConnectionMode::Headless => "headless",
+            };
+            config.teamspeak.connection_mode = mode_str.to_string();
+            info!("Connection mode overridden to: {}", mode_str);
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ConnectionMode {
     /// Use ServerQuery protocol (default)
@@ -157,7 +171,6 @@ fn edit_config() -> anyhow::Result<()> {
             .default(config.teamspeak.server_id)
             .interact_text()?;
 
-        #[cfg(feature = "headless")]
         {
             let modes = vec!["serverquery", "headless"];
             let default_idx = modes

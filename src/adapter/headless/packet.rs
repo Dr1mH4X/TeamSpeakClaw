@@ -5,7 +5,7 @@
 use bitflags::bitflags;
 use std::fmt;
 
-use crate::headless::error::{HeadlessError, Result};
+use super::error::{HeadlessError, Result};
 
 /// 包类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,14 +51,6 @@ impl PacketType {
     /// 是否需要确认
     pub fn needs_ack(&self) -> bool {
         matches!(self, Self::Command | Self::CommandLow)
-    }
-
-    /// 是否加密
-    pub fn is_encrypted(&self) -> bool {
-        !matches!(
-            self,
-            Self::Init1 | Self::Ping | Self::Pong | Self::Ack | Self::AckLow
-        )
     }
 }
 
@@ -146,11 +138,6 @@ impl PacketHeader {
         }
     }
 
-    /// 包头大小（字节）
-    pub const fn size() -> usize {
-        1 + 2 + 4 + 2 // type + id + generation + flags
-    }
-
     /// 序列化为字节
     pub fn to_bytes(&self) -> [u8; 9] {
         let mut bytes = [0u8; 9];
@@ -233,16 +220,6 @@ impl Packet {
         result.extend_from_slice(&self.data);
         result.extend_from_slice(&self.mac);
         result
-    }
-
-    /// 总大小
-    pub fn total_size(&self) -> usize {
-        9 + self.data.len() + 8
-    }
-
-    /// 是否是初始化包
-    pub fn is_init(&self) -> bool {
-        self.header.packet_type == PacketType::Init1
     }
 
     /// 是否需要确认

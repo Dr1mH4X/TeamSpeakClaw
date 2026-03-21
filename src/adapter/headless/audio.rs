@@ -1,23 +1,17 @@
 //! TeamSpeak 音频处理模块
-//! 
+//!
 //! 使用外部 ffmpeg 进行音频解码和编码，通过 Ogg 容器流式传输 Opus 数据。
 //! 避免内部链接 libopus，完全依赖外部进程。
 
-use tokio::process::{Command, Child};
+use super::error::{HeadlessError, Result};
 use std::process::Stdio;
-#[cfg(feature = "audio")]
 use tokio::io::AsyncReadExt;
-#[cfg(feature = "audio")]
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-#[cfg(feature = "audio")]
 use tokio::task;
-#[cfg(feature = "audio")]
 use tracing::{debug, error, info, warn};
-#[cfg(feature = "audio")]
-use crate::headless::error::{HeadlessError, Result};
 
 /// 音频配置
-#[cfg(feature = "audio")]
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
     /// ffmpeg 可执行文件路径
@@ -32,13 +26,12 @@ pub struct AudioConfig {
     pub volume: f32,
 }
 
-#[cfg(feature = "audio")]
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             ffmpeg_path: "ffmpeg".to_string(),
             sample_rate: 48000,
-            channels: 2, // Stereo
+            channels: 2,    // Stereo
             bitrate: 48000, // 48kbps
             volume: 1.0,
         }
@@ -46,53 +39,61 @@ impl Default for AudioConfig {
 }
 
 /// 音频播放器
-/// 
+///
 /// 管理 ffmpeg 子进程，解析 Ogg Opus 流，并发送音频帧
-#[cfg(feature = "audio")]
 pub struct AudioPlayer {
-    config: AudioConfig,
+    _config: AudioConfig,
+    #[allow(dead_code)]
     command_tx: mpsc::Sender<PlayerCommand>,
 }
 
-#[cfg(feature = "audio")]
+#[allow(dead_code)]
 enum PlayerCommand {
     Play(String),
     Stop,
     Volume(f32),
 }
 
-#[cfg(feature = "audio")]
 impl AudioPlayer {
     /// 创建新的音频播放器
     pub fn new(config: AudioConfig, frame_tx: mpsc::Sender<Vec<u8>>) -> Self {
         let (command_tx, command_rx) = mpsc::channel(32);
-        
+
         let player_config = config.clone();
         task::spawn(async move {
             Self::run_player_loop(player_config, command_rx, frame_tx).await;
         });
 
         Self {
-            config,
+            _config: config,
             command_tx,
         }
     }
 
     /// 播放 URL 或文件
+    #[allow(dead_code)]
     pub async fn play(&self, url: String) -> Result<()> {
-        self.command_tx.send(PlayerCommand::Play(url)).await
+        self.command_tx
+            .send(PlayerCommand::Play(url))
+            .await
             .map_err(|_| HeadlessError::InternalError("Audio player loop closed".into()))
     }
 
     /// 停止播放
+    #[allow(dead_code)]
     pub async fn stop(&self) -> Result<()> {
-        self.command_tx.send(PlayerCommand::Stop).await
+        self.command_tx
+            .send(PlayerCommand::Stop)
+            .await
             .map_err(|_| HeadlessError::InternalError("Audio player loop closed".into()))
     }
 
     /// 设置音量
+    #[allow(dead_code)]
     pub async fn set_volume(&self, volume: f32) -> Result<()> {
-        self.command_tx.send(PlayerCommand::Volume(volume)).await
+        self.command_tx
+            .send(PlayerCommand::Volume(volume))
+            .await
             .map_err(|_| HeadlessError::InternalError("Audio player loop closed".into()))
     }
 
@@ -125,7 +126,7 @@ impl AudioPlayer {
                                 Ok(mut child) => {
                                     if let Some(stdout) = child.stdout.take() {
                                         let frame_tx_clone = frame_tx.clone();
-                                        
+
                                         // 启动读取任务
                                         abort_handle = Some(task::spawn(async move {
                                             if let Err(e) = process_ffmpeg_output(stdout, frame_tx_clone).await {
@@ -159,7 +160,6 @@ impl AudioPlayer {
 }
 
 /// 启动 ffmpeg 进程
-#[cfg(feature = "audio")]
 fn start_ffmpeg(config: &AudioConfig, url: &str, volume: f32) -> std::io::Result<Child> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -224,18 +224,26 @@ struct OggPage {
 
 /// 解析 Ogg 页面头
 fn parse_ogg_page(data: &[u8]) -> Option<OggPage> {
-    if data.len() < 27 { return None; }
-    if &data[0..4] != b"OggS" { return None; }
+    if data.len() < 27 {
+        return None;
+    }
+    if &data[0..4] != b"OggS" {
+        return None;
+    }
 
     let page_segments = data[26] as usize;
     let header_len = 27 + page_segments;
-    
-    if data.len() < header_len { return None; }
+
+    if data.len() < header_len {
+        return None;
+    }
 
     let segment_table = data[27..header_len].to_vec();
     let body_len: usize = segment_table.iter().map(|&x| x as usize).sum();
 
-    if data.len() < header_len + body_len { return None; }
+    if data.len() < header_len + body_len {
+        return None;
+    }
 
     Some(OggPage {
         header_len,
@@ -245,7 +253,6 @@ fn parse_ogg_page(data: &[u8]) -> Option<OggPage> {
 }
 
 /// 从 ffmpeg stdout 读取并解析 Opus 帧
-#[cfg(feature = "audio")]
 pub async fn process_ffmpeg_output(
     mut stdout: tokio::process::ChildStdout,
     frame_tx: mpsc::Sender<Vec<u8>>,
@@ -258,10 +265,14 @@ pub async fn process_ffmpeg_output(
     let mut headers_skipped = 0; // 0=none, 1=id done, 2=comment done
 
     loop {
-        let n = stdout.read(&mut temp_buf).await
+        let n = stdout
+            .read(&mut temp_buf)
+            .await
             .map_err(|e| HeadlessError::InternalError(format!("Read ffmpeg failed: {}", e)))?;
-        
-        if n == 0 { break; }
+
+        if n == 0 {
+            break;
+        }
         buffer.extend_from_slice(&temp_buf[..n]);
 
         loop {
@@ -275,7 +286,7 @@ pub async fn process_ffmpeg_output(
                     let mut body_offset = 0;
                     for &seg_len in &page.segment_table {
                         let len = seg_len as usize;
-                        packet_buffer.extend_from_slice(&page_body[body_offset..body_offset+len]);
+                        packet_buffer.extend_from_slice(&page_body[body_offset..body_offset + len]);
                         body_offset += len;
 
                         if seg_len < 255 {
@@ -316,11 +327,10 @@ pub async fn process_ffmpeg_output(
                         warn!("Audio buffer too large, clearing");
                         buffer.clear();
                     }
-                    break; 
+                    break;
                 }
             }
         }
     }
     Ok(())
 }
-

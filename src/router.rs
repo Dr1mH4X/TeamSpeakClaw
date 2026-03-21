@@ -1,4 +1,3 @@
-use crate::adapter::command::cmd_send_text;
 use crate::adapter::{TextMessageEvent, TextMessageTarget, TsEvent, UnifiedAdapter};
 use crate::audit::AuditLog;
 use crate::cache::ClientCache;
@@ -279,9 +278,7 @@ impl EventRouter {
 
     // Helper for sending private text messages
     async fn send_text(&self, target_id: u32, content: &str) -> Result<()> {
-        self.adapter
-            .send_raw(&cmd_send_text(1, target_id, content))
-            .await?;
+        self.adapter.send_message(1, target_id, content).await?;
         Ok(())
     }
 }

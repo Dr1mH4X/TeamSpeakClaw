@@ -1,24 +1,23 @@
 //! TeamSpeak 包处理器
-//! 
+//!
 //! 处理 UDP 包的发送、接收、分片、重组和重传
 
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex, RwLock, broadcast};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::time::interval;
-use flate2::write::ZlibEncoder;
-use flate2::read::ZlibDecoder;
-use flate2::Compression;
-use std::io::{Read, Write};
 use tracing::{debug, trace, warn};
 
-use crate::headless::{
+use super::{
     crypto::TsCrypto,
     error::{HeadlessError, Result},
-    packet::{Packet, PacketFlags, PacketType, MAX_DATA_SIZE, needs_splitting},
+    packet::{needs_splitting, Packet, PacketFlags, PacketType, MAX_DATA_SIZE},
 };
 
 /// 包 ID 类型
@@ -39,22 +38,11 @@ const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// Ping 间隔
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
-/// 连接超时
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// 使用 zlib 压缩数据
 fn compress_zlib(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(data).unwrap_or_default();
     encoder.finish().unwrap_or_default()
-}
-
-/// 使用 zlib 解压数据
-fn decompress_zlib(data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut decoder = ZlibDecoder::new(data);
-    let mut output = Vec::new();
-    decoder.read_to_end(&mut output)?;
-    Ok(output)
 }
 
 /// 待确认包信息
@@ -200,18 +188,20 @@ impl RttEstimator {
             } else {
                 self.smoothed_rtt - sample
             };
-            
+
             self.rtt_var = Duration::from_secs_f64(
-                (1.0 - BETA) * self.rtt_var.as_secs_f64() + BETA * diff.as_secs_f64()
+                (1.0 - BETA) * self.rtt_var.as_secs_f64() + BETA * diff.as_secs_f64(),
             );
-            
+
             self.smoothed_rtt = Duration::from_secs_f64(
-                (1.0 - ALPHA) * self.smoothed_rtt.as_secs_f64() + ALPHA * sample.as_secs_f64()
+                (1.0 - ALPHA) * self.smoothed_rtt.as_secs_f64() + ALPHA * sample.as_secs_f64(),
             );
         }
 
         self.current_rto = self.smoothed_rtt + 4 * self.rtt_var;
-        self.current_rto = self.current_rto.clamp(MIN_RETRY_INTERVAL, MAX_RETRY_INTERVAL);
+        self.current_rto = self
+            .current_rto
+            .clamp(MIN_RETRY_INTERVAL, MAX_RETRY_INTERVAL);
     }
 
     /// 获取当前 RTO
@@ -226,10 +216,13 @@ impl PacketHandler {
         config: PacketHandlerConfig,
         crypto: TsCrypto,
     ) -> Result<(Self, mpsc::Receiver<Packet>)> {
-        let socket = UdpSocket::bind(config.local_addr).await
+        let socket = UdpSocket::bind(config.local_addr)
+            .await
             .map_err(|e| HeadlessError::ConnectionError(format!("Bind failed: {e}")))?;
-        
-        socket.connect(config.remote_addr).await
+
+        socket
+            .connect(config.remote_addr)
+            .await
             .map_err(|e| HeadlessError::ConnectionError(format!("Connect failed: {e}")))?;
 
         let (tx, rx) = mpsc::channel(1024);
@@ -281,8 +274,11 @@ impl PacketHandler {
     /// 发送包
     pub async fn send(&self, data: &[u8], packet_type: PacketType) -> Result<()> {
         let needs_split = needs_splitting(data.len());
-        
-        if needs_split && packet_type != PacketType::Voice && packet_type != PacketType::VoiceWhisper {
+
+        if needs_split
+            && packet_type != PacketType::Voice
+            && packet_type != PacketType::VoiceWhisper
+        {
             // 压缩后再分片发送
             let compressed = compress_zlib(data);
             if compressed.len() < data.len() {
@@ -312,7 +308,11 @@ impl PacketHandler {
             PacketType::Command | PacketType::CommandLow => {
                 packet.header.flags |= PacketFlags::NEW_PROTOCOL;
             }
-            PacketType::Voice | PacketType::VoiceWhisper | PacketType::Ping | PacketType::Pong | PacketType::Init1 => {
+            PacketType::Voice
+            | PacketType::VoiceWhisper
+            | PacketType::Ping
+            | PacketType::Pong
+            | PacketType::Init1 => {
                 packet.header.flags |= PacketFlags::UNENCRYPTED;
             }
             _ => {}
@@ -325,18 +325,23 @@ impl PacketHandler {
 
         // 发送
         let raw = packet.to_bytes();
-        self.socket.send(&raw).await
+        self.socket
+            .send(&raw)
+            .await
             .map_err(|e| HeadlessError::ConnectionError(format!("Send failed: {e}")))?;
 
         // 如果需要确认，添加到待确认列表
         if packet_type.needs_ack() {
             let mut pending = self.pending_acks.write().await;
-            pending.insert(packet_id, PendingPacket {
-                packet: packet.clone(),
-                first_send: Instant::now(),
-                last_send: Instant::now(),
-                retries: 0,
-            });
+            pending.insert(
+                packet_id,
+                PendingPacket {
+                    packet: packet.clone(),
+                    first_send: Instant::now(),
+                    last_send: Instant::now(),
+                    retries: 0,
+                },
+            );
         }
 
         trace!("Sent packet: {}", packet);
@@ -352,7 +357,7 @@ impl PacketHandler {
             if i == 0 {
                 flags |= PacketFlags::COMPRESSED; // 第一个分片标记
             }
-            
+
             self.send_single(chunk, packet_type, flags).await?;
         }
 
@@ -363,7 +368,8 @@ impl PacketHandler {
     pub async fn send_ping(&self) -> Result<()> {
         let (packet_id, _) = self.get_counter(PacketType::Ping).await;
         let data = packet_id.to_be_bytes().to_vec();
-        self.send_single(&data, PacketType::Ping, PacketFlags::UNENCRYPTED).await
+        self.send_single(&data, PacketType::Ping, PacketFlags::UNENCRYPTED)
+            .await
     }
 
     /// 发送 Ack
@@ -375,35 +381,8 @@ impl PacketHandler {
         };
 
         let data = ack_id.to_be_bytes().to_vec();
-        self.send_single(&data, ack_packet_type, PacketFlags::NONE).await
-    }
-
-    /// 内部发送 Ack
-    async fn send_ack_internal(
-        &self,
-        ack_id: PacketId,
-        packet_type: PacketType,
-    ) -> Result<()> {
-        let ack_packet_type = if packet_type == PacketType::CommandLow {
-            PacketType::AckLow
-        } else {
-            PacketType::Ack
-        };
-
-        let data = ack_id.to_be_bytes().to_vec();
-        let mut packet = Packet::new(ack_packet_type, 0, 0, data);
-        packet.header.flags |= PacketFlags::UNENCRYPTED;
-
-        let crypto = self.crypto.lock().await;
-        crypto.encrypt(&mut packet)?;
-        drop(crypto);
-
-        let raw = packet.to_bytes();
-        self.socket.send(&raw).await
-            .map_err(|e| HeadlessError::ConnectionError(format!("Ack send failed: {e}")))?;
-
-        trace!("Sent Ack for packet {}", ack_id);
-        Ok(())
+        self.send_single(&data, ack_packet_type, PacketFlags::NONE)
+            .await
     }
 
     /// 获取包计数器
@@ -411,7 +390,7 @@ impl PacketHandler {
         let counters = self.packet_counters.read().await;
         let generations = self.generation_counters.read().await;
         let idx = packet_type as usize;
-        
+
         if idx < counters.len() {
             (counters[idx], generations[idx])
         } else {
@@ -424,7 +403,7 @@ impl PacketHandler {
         let mut counters = self.packet_counters.write().await;
         let mut generations = self.generation_counters.write().await;
         let idx = packet_type as usize;
-        
+
         if idx < counters.len() {
             counters[idx] = counters[idx].wrapping_add(1);
             if counters[idx] == 0 {
@@ -527,13 +506,18 @@ impl PacketHandler {
 
         // 发送 Ack（如果需要）
         if packet.needs_ack() {
-            if let Err(e) = self.send_ack_internal(packet.header.packet_id, packet.header.packet_type).await {
+            if let Err(e) = self
+                .send_ack(packet.header.packet_id, packet.header.packet_type)
+                .await
+            {
                 warn!("Failed to send Ack: {e}");
             }
         }
 
         // 发送到接收通道
-        self.rx_tx.send(packet).await
+        self.rx_tx
+            .send(packet)
+            .await
             .map_err(|_| HeadlessError::ConnectionError("Channel closed".into()))?;
 
         Ok(())
@@ -572,7 +556,9 @@ impl PacketHandler {
 
                 // 如果接收完毕，重组并发送
                 if info.total > 0 && info.received >= info.total {
-                    let complete_data: Vec<u8> = info.fragments.iter()
+                    let complete_data: Vec<u8> = info
+                        .fragments
+                        .iter()
                         .flat_map(|f| f.iter())
                         .copied()
                         .collect();
@@ -583,7 +569,9 @@ impl PacketHandler {
 
                     buffer.remove(&packet_id);
 
-                    self.rx_tx.send(complete_packet).await
+                    self.rx_tx
+                        .send(complete_packet)
+                        .await
                         .map_err(|_| HeadlessError::ConnectionError("Channel closed".into()))?;
                 }
             }
@@ -612,7 +600,7 @@ impl PacketHandler {
                         let mut pending = self.pending_acks.write().await;
                         for (id, info) in pending.iter_mut() {
                             let elapsed = now.duration_since(info.last_send);
-                            
+
                             if elapsed >= rto {
                                 if info.retries >= MAX_RETRIES {
                                     to_remove.push(*id);
@@ -651,58 +639,12 @@ impl PacketHandler {
     /// Ping 循环
     async fn run_ping_loop(self, mut shutdown: broadcast::Receiver<()>) {
         let mut interval = interval(PING_INTERVAL);
-        
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // 获取计数
-                    let packet_type = PacketType::Ping;
-                    let idx = packet_type as usize;
-                    let (packet_id, generation_id) = {
-                        let counters = self.packet_counters.read().await;
-                        let generations = self.generation_counters.read().await;
-                        (counters[idx], generations[idx])
-                    };
-                    
-                    // 递增计数
-                    {
-                        let mut counters = self.packet_counters.write().await;
-                        let mut generations = self.generation_counters.write().await;
-                         counters[idx] = counters[idx].wrapping_add(1);
-                        if counters[idx] == 0 {
-                            generations[idx] = generations[idx].wrapping_add(1);
-                        }
-                    }
-
-                    let data = packet_id.to_be_bytes().to_vec();
-                    let mut packet = Packet::new(packet_type, packet_id, generation_id, data);
-                    packet.header.flags |= PacketFlags::UNENCRYPTED;
-
-                    // 加密 (Ping 不加密但需要 MAC)
-                    {
-                        let crypto_guard = self.crypto.lock().await;
-                        if let Err(e) = crypto_guard.encrypt(&mut packet) {
-                            warn!("Failed to encrypt ping: {}", e);
-                            continue;
-                        }
-                    }
-                    
-                    // 添加到待确认列表（用于计算 RTT）
-                    {
-                        let mut pending = self.pending_acks.write().await;
-                        pending.insert(packet_id, PendingPacket {
-                            packet: packet.clone(),
-                            first_send: Instant::now(),
-                            last_send: Instant::now(),
-                            retries: 0,
-                        });
-                    }
-
-                    let raw = packet.to_bytes();
-                    if let Err(e) = self.socket.send(&raw).await {
-                         warn!("Failed to send ping: {}", e);
-                    } else {
-                        trace!("Sent ping {}", packet_id);
+                    if let Err(e) = self.send_ping().await {
+                        warn!("Failed to send ping: {}", e);
                     }
                 }
                 _ = shutdown.recv() => {
@@ -711,12 +653,6 @@ impl PacketHandler {
                 }
             }
         }
-    }
-
-    /// 获取当前 RTT
-    pub async fn current_rtt(&self) -> Duration {
-        let estimator = self.rtt_estimator.lock().await;
-        estimator.rto()
     }
 
     /// 关闭包处理器
@@ -732,11 +668,11 @@ mod tests {
     #[test]
     fn test_receive_window() {
         let mut window = ReceiveWindow::new(256);
-        
+
         assert!(!window.is_received(0));
         window.mark_received(0);
         assert!(window.is_received(0));
-        
+
         assert!(!window.is_received(100));
         window.mark_received(100);
         assert!(window.is_received(100));
@@ -745,10 +681,10 @@ mod tests {
     #[test]
     fn test_rtt_estimator() {
         let mut estimator = RttEstimator::new();
-        
+
         estimator.update(Duration::from_millis(100));
         assert!(estimator.rto() >= Duration::from_millis(100));
-        
+
         estimator.update(Duration::from_millis(120));
         assert!(estimator.smoothed_rtt > Duration::from_millis(100));
     }

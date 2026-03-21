@@ -8,14 +8,6 @@ pub enum AppError {
     #[error("Permission denied: {reason}")]
     PermissionDenied { reason: String },
 
-    #[error("Rate limited")]
-    #[allow(dead_code)]
-    RateLimited,
-
-    #[error("Target not found: {name}")]
-    #[allow(dead_code)]
-    TargetNotFound { name: String },
-
     #[error("Target is protected")]
     TargetProtected,
 
@@ -32,7 +24,6 @@ pub enum AppError {
     Http(#[from] reqwest::Error),
 
     #[error("Config error: {0}")]
-    #[allow(dead_code)]
     ConfigError(String),
 }
 

@@ -1,4 +1,4 @@
-use crate::adapter::command::{cmd_ban, cmd_kick};
+use crate::adapter::serverquery::command::{cmd_ban, cmd_kick};
 use crate::error::{AppError, Result};
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;
@@ -32,7 +32,9 @@ impl Skill for KickClient {
 
         // Check if target is protected
         if let Some(target) = ctx.cache.get_client(clid) {
-            let caller_groups = ctx.cache.get_client(ctx.caller_id)
+            let caller_groups = ctx
+                .cache
+                .get_client(ctx.caller_id)
                 .map(|c| c.server_groups)
                 .unwrap_or_default();
             if !ctx.gate.can_target(&caller_groups, &target.server_groups) {
@@ -77,7 +79,9 @@ impl Skill for BanClient {
 
         // Check if target is protected
         if let Some(target) = ctx.cache.get_client(clid) {
-            let caller_groups = ctx.cache.get_client(ctx.caller_id)
+            let caller_groups = ctx
+                .cache
+                .get_client(ctx.caller_id)
                 .map(|c| c.server_groups)
                 .unwrap_or_default();
             if !ctx.gate.can_target(&caller_groups, &target.server_groups) {

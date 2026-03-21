@@ -8,7 +8,7 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::fmt;
 
-use crate::headless::error::{HeadlessError, Result};
+use super::error::{HeadlessError, Result};
 
 /// TeamSpeak 客户端身份
 #[derive(Clone)]
@@ -20,7 +20,7 @@ pub struct Identity {
     /// 安全级别偏移量
     pub key_offset: u64,
     /// 最后检查的偏移量
-    pub last_checked_offset: u64,
+
     /// 用户唯一标识符
     uid: String,
 }
@@ -46,26 +46,11 @@ impl Identity {
             private_key,
             public_key,
             key_offset: 0,
-            last_checked_offset: 0,
             uid,
         }
     }
 
     /// 从私钥字节创建身份
-    pub fn from_private_key_bytes(bytes: &[u8]) -> Result<Self> {
-        let private_key = SecretKey::from_slice(bytes)
-            .map_err(|e| HeadlessError::InvalidKey(format!("Invalid private key: {e}")))?;
-        let public_key = private_key.public_key();
-        let uid = Self::compute_uid(&public_key);
-
-        Ok(Self {
-            private_key,
-            public_key,
-            key_offset: 0,
-            last_checked_offset: 0,
-            uid,
-        })
-    }
 
     /// 从 TeamSpeak 格式的密钥导入
     ///
@@ -144,7 +129,6 @@ impl Identity {
                     private_key,
                     public_key,
                     key_offset: level,
-                    last_checked_offset: level,
                     uid,
                 });
             }
@@ -163,9 +147,6 @@ impl Identity {
     }
 
     /// 获取私钥字节
-    pub fn private_key_bytes(&self) -> [u8; 32] {
-        self.private_key.to_bytes().into()
-    }
 
     /// 获取公钥字节（未压缩格式）
     pub fn public_key_bytes(&self) -> Vec<u8> {

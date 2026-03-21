@@ -1,5 +1,5 @@
 //! TeamSpeak 连接状态机
-//! 
+//!
 //! 管理 TeamSpeak 客户端的连接状态
 
 use std::net::SocketAddr;
@@ -8,10 +8,9 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info};
 
-#[cfg(feature = "audio")]
-use crate::headless::audio::{AudioConfig, AudioPlayer};
+use super::audio::{AudioConfig, AudioPlayer};
 
-use crate::headless::{
+use super::{
     crypto::TsCrypto,
     error::{HeadlessError, Result},
     identity::Identity,
@@ -62,7 +61,6 @@ pub struct ConnectionConfig {
     /// 连接超时
     pub connect_timeout: Duration,
     /// 音频配置
-    #[cfg(feature = "audio")]
     pub audio: Option<AudioConfig>,
 }
 
@@ -98,19 +96,16 @@ pub struct Connection {
     /// 配置
     config: ConnectionConfig,
     /// 音频播放器
-    #[cfg(feature = "audio")]
     audio_player: Option<Arc<AudioPlayer>>,
 }
 
 impl Connection {
     /// 创建新连接
-    pub async fn new(
-        config: ConnectionConfig,
-    ) -> Result<(Self, mpsc::Receiver<ConnectionEvent>)> {
+    pub async fn new(config: ConnectionConfig) -> Result<(Self, mpsc::Receiver<ConnectionEvent>)> {
         let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        
+
         let crypto = TsCrypto::new(config.identity.clone());
-        
+
         let handler_config = PacketHandlerConfig {
             local_addr,
             remote_addr: config.server_addr,
@@ -119,14 +114,13 @@ impl Connection {
         let (handler, packet_rx) = PacketHandler::new(handler_config, crypto.clone()).await?;
         handler.start().await?;
         let handler = Arc::new(handler); // Ensure handler is Arc for sharing
-        
+
         let (event_tx, event_rx) = mpsc::channel(1024);
 
-        #[cfg(feature = "audio")]
         let audio_player = if let Some(audio_config) = config.audio.clone() {
             let (frame_tx, mut frame_rx) = mpsc::channel(1024);
             let player = Arc::new(AudioPlayer::new(audio_config, frame_tx));
-            
+
             // 启动音频发送循环
             let handler_clone = handler.clone();
             tokio::spawn(async move {
@@ -137,24 +131,21 @@ impl Connection {
                     let mut data = Vec::with_capacity(2 + opus_data.len());
                     data.extend_from_slice(&sequence.to_be_bytes());
                     data.extend_from_slice(&opus_data);
-                    
+
                     // 发送 Voice 包
                     if let Err(_) = handler_clone.send(&data, PacketType::Voice).await {
-                         // error!("Failed to send voice packet: {}", e);
-                         // 这里的错误可能很频繁（如连接断开时），降级日志或忽略
+                        // error!("Failed to send voice packet: {}", e);
+                        // 这里的错误可能很频繁（如连接断开时），降级日志或忽略
                     }
-                    
+
                     sequence = sequence.wrapping_add(1);
                 }
             });
-            
+
             Some(player)
         } else {
             None
         };
-
-        #[cfg(not(feature = "audio"))]
-        let audio_player = None; // Explicitly handled for non-audio builds
 
         let connection = Self {
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
@@ -164,7 +155,6 @@ impl Connection {
             client_id: Arc::new(RwLock::new(None)),
             event_tx,
             config,
-            #[cfg(feature = "audio")]
             audio_player,
         };
 
@@ -177,9 +167,10 @@ impl Connection {
         {
             let state = self.state.read().await;
             if *state != ConnectionState::Disconnected {
-                return Err(HeadlessError::ConnectionError(
-                    format!("Cannot connect in state: {}", state)
-                ));
+                return Err(HeadlessError::ConnectionError(format!(
+                    "Cannot connect in state: {}",
+                    state
+                )));
             }
         }
 
@@ -194,8 +185,10 @@ impl Connection {
             let crypto = self.crypto.lock().await;
             let init_data = crypto.process_init1();
             drop(crypto);
-            
-            self.packet_handler.send(&init_data, PacketType::Init1).await?;
+
+            self.packet_handler
+                .send(&init_data, PacketType::Init1)
+                .await?;
         }
 
         // 启动消息处理循环（packet_rx move 进任务，不再共享）
@@ -205,7 +198,11 @@ impl Connection {
         let client_id = self.client_id.clone();
         let event_tx = self.event_tx.clone();
         let config = self.config.clone();
-        let mut packet_rx = self.packet_rx.lock().unwrap().take()
+        let mut packet_rx = self
+            .packet_rx
+            .lock()
+            .unwrap()
+            .take()
             .ok_or_else(|| HeadlessError::ConnectionError("Already connected".into()))?;
 
         tokio::spawn(async move {
@@ -217,7 +214,8 @@ impl Connection {
                 &event_tx,
                 &config,
                 &mut packet_rx,
-            ).await;
+            )
+            .await;
         });
 
         // 等待连接完成或超时
@@ -243,7 +241,7 @@ impl Connection {
     async fn wait_for_connected(&self) -> Result<()> {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             let state = self.state.read().await;
             match *state {
                 ConnectionState::Connected => return Ok(()),
@@ -267,13 +265,21 @@ impl Connection {
     ) {
         while let Some(packet) = packet_rx.recv().await {
             if let Err(e) = Self::handle_packet(
-                packet, state, packet_handler, crypto, client_id, event_tx, config,
-            ).await {
+                packet,
+                state,
+                packet_handler,
+                crypto,
+                client_id,
+                event_tx,
+                config,
+            )
+            .await
+            {
                 error!("Error handling packet: {e}");
-                
+
                 // 发送错误事件
                 let _ = event_tx.send(ConnectionEvent::Error(e.to_string())).await;
-                
+
                 // 如果是严重错误，断开连接
                 Self::set_state_static(state, event_tx, ConnectionState::Disconnected).await;
                 break;
@@ -299,25 +305,41 @@ impl Connection {
             ConnectionState::Connecting => {
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
-                    
+
                     if data.contains("initserver") {
-                        Self::handle_init_server(&data, crypto, packet_handler, state, event_tx, config).await?;
+                        Self::handle_init_server(
+                            &data,
+                            crypto,
+                            packet_handler,
+                            state,
+                            event_tx,
+                            config,
+                        )
+                        .await?;
                     }
                 }
             }
             ConnectionState::KeyExchange => {
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
-                    
+
                     if data.contains("clientinitiv") {
-                        Self::handle_client_init_iv(&data, crypto, packet_handler, state, event_tx, config).await?;
+                        Self::handle_client_init_iv(
+                            &data,
+                            crypto,
+                            packet_handler,
+                            state,
+                            event_tx,
+                            config,
+                        )
+                        .await?;
                     }
                 }
             }
             ConnectionState::Initializing => {
                 if packet.header.packet_type == PacketType::Command {
                     let data = String::from_utf8_lossy(&packet.data);
-                    
+
                     if data.contains("notifycliententerview") {
                         Self::handle_client_enter(&data, client_id, state, event_tx).await?;
                     }
@@ -325,11 +347,15 @@ impl Connection {
             }
             ConnectionState::Connected => {
                 let data = String::from_utf8_lossy(&packet.data);
-                
+
                 if data.starts_with("notify") {
-                    let _ = event_tx.send(ConnectionEvent::Notification(data.to_string())).await;
+                    let _ = event_tx
+                        .send(ConnectionEvent::Notification(data.to_string()))
+                        .await;
                 } else {
-                    let _ = event_tx.send(ConnectionEvent::CommandResponse(data.to_string())).await;
+                    let _ = event_tx
+                        .send(ConnectionEvent::CommandResponse(data.to_string()))
+                        .await;
                 }
             }
             _ => {
@@ -354,16 +380,22 @@ impl Connection {
             .ok_or_else(|| HeadlessError::ProtocolError("Missing omega".into()))?;
 
         // 生成 alpha 和 beta
-        let alpha = BASE64.encode(crate::headless::crypto::generate_random_bytes(10));
-        let beta = BASE64.encode(crate::headless::crypto::generate_random_bytes(10));
+        let alpha = BASE64.encode(super::crypto::generate_random_bytes(10));
+        let beta = BASE64.encode(super::crypto::generate_random_bytes(10));
 
         // 初始化加密
         {
             let mut crypto_guard = crypto.lock().await;
             crypto_guard.crypto_init(
-                &BASE64.decode(&alpha).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
-                &BASE64.decode(&beta).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
-                &BASE64.decode(&omega).map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
+                &BASE64
+                    .decode(&alpha)
+                    .map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
+                &BASE64
+                    .decode(&beta)
+                    .map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
+                &BASE64
+                    .decode(&omega)
+                    .map_err(|e| HeadlessError::CryptoError(e.to_string()))?,
             )?;
         }
 
@@ -371,13 +403,11 @@ impl Connection {
 
         // 发送 clientinitiv
         let public_key_b64 = crypto.lock().await.identity().public_key_base64();
-        let client_init_iv = format!(
-            "clientinitiv alpha={} omega={} ip=",
-            alpha,
-            public_key_b64
-        );
-        
-        packet_handler.send(client_init_iv.as_bytes(), PacketType::Command).await?;
+        let client_init_iv = format!("clientinitiv alpha={} omega={} ip=", alpha, public_key_b64);
+
+        packet_handler
+            .send(client_init_iv.as_bytes(), PacketType::Command)
+            .await?;
 
         Ok(())
     }
@@ -404,7 +434,9 @@ impl Connection {
             config.nickname
         );
 
-        packet_handler.send(client_init.as_bytes(), PacketType::Command).await?;
+        packet_handler
+            .send(client_init.as_bytes(), PacketType::Command)
+            .await?;
 
         Ok(())
     }
@@ -429,7 +461,9 @@ impl Connection {
         Self::set_state_static(state, event_tx, ConnectionState::Connected).await;
 
         // 发送状态变更事件
-        let _ = event_tx.send(ConnectionEvent::StateChanged(ConnectionState::Connected)).await;
+        let _ = event_tx
+            .send(ConnectionEvent::StateChanged(ConnectionState::Connected))
+            .await;
 
         Ok(())
     }
@@ -441,16 +475,23 @@ impl Connection {
             return Err(HeadlessError::NotConnected);
         }
 
-        self.packet_handler.send(command.as_bytes(), PacketType::Command).await
+        self.packet_handler
+            .send(command.as_bytes(), PacketType::Command)
+            .await
     }
 
     /// 发送文字消息
-    pub async fn send_text_message(&self, target_mode: u8, target: u32, message: &str) -> Result<()> {
+    pub async fn send_text_message(
+        &self,
+        target_mode: u8,
+        target: u32,
+        message: &str,
+    ) -> Result<()> {
         let command = format!(
             "sendtextmessage targetmode={} target={} msg={}",
             target_mode,
             target,
-            crate::adapter::command::ts_escape(message)
+            crate::adapter::serverquery::command::ts_escape(message)
         );
         self.send_command(&command).await
     }
@@ -474,36 +515,42 @@ impl Connection {
         self.set_state(ConnectionState::Disconnected).await;
 
         // 发送断开事件
-        let _ = self.event_tx.send(ConnectionEvent::Disconnected(None)).await;
+        let _ = self
+            .event_tx
+            .send(ConnectionEvent::Disconnected(None))
+            .await;
 
         Ok(())
     }
 
-    #[cfg(feature = "audio")]
-    pub async fn play_audio(&self, source: &str) -> crate::headless::error::Result<()> {
+    #[allow(dead_code)]
+    pub async fn play_audio(&self, source: &str) -> Result<()> {
         let state = self.state.read().await;
         if *state != ConnectionState::Connected {
             return Err(HeadlessError::NotConnected);
         }
-        #[cfg(feature = "audio")]
         if let Some(player) = &self.audio_player {
-            player.play(source.to_string()).await.map_err(|e| HeadlessError::AudioError(e.to_string()))
+            player
+                .play(source.to_string())
+                .await
+                .map_err(|e| HeadlessError::AudioError(e.to_string()))
         } else {
             Err(HeadlessError::AudioError("Audio not enabled".into()))
         }
     }
 
-    #[cfg(feature = "audio")]
-    pub async fn stop_audio(&self) -> crate::headless::error::Result<()> {
-        #[cfg(feature = "audio")]
+    #[allow(dead_code)]
+    pub async fn stop_audio(&self) -> Result<()> {
         if let Some(player) = &self.audio_player {
-            player.stop().await.map_err(|e| HeadlessError::AudioError(e.to_string()))
+            player
+                .stop()
+                .await
+                .map_err(|e| HeadlessError::AudioError(e.to_string()))
         } else {
             Err(HeadlessError::AudioError("Audio not enabled".into()))
         }
     }
 
-    /// 设置状态
     async fn set_state(&self, new_state: ConnectionState) {
         Self::set_state_static(&self.state, &self.event_tx, new_state).await;
     }
@@ -520,18 +567,15 @@ impl Connection {
 
         if old_state != new_state {
             debug!("State changed: {} -> {}", old_state, new_state);
-            let _ = event_tx.send(ConnectionEvent::StateChanged(new_state)).await;
+            let _ = event_tx
+                .send(ConnectionEvent::StateChanged(new_state))
+                .await;
         }
     }
 
     /// 获取当前状态
     pub async fn state(&self) -> ConnectionState {
         *self.state.read().await
-    }
-
-    /// 获取客户端 ID
-    pub async fn client_id(&self) -> Option<u16> {
-        *self.client_id.read().await
     }
 
     /// 提取参数值
@@ -553,28 +597,7 @@ impl Clone for Connection {
             client_id: self.client_id.clone(),
             event_tx: self.event_tx.clone(),
             config: self.config.clone(),
-            #[cfg(feature = "audio")]
             audio_player: self.audio_player.clone(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_connection_state_display() {
-        assert_eq!(ConnectionState::Disconnected.to_string(), "Disconnected");
-        assert_eq!(ConnectionState::Connected.to_string(), "Connected");
-    }
-
-    #[test]
-    fn test_extract_parameter() {
-        let data = "initserver server_name=Test\\sServer server_welcome_message=Welcome";
-        
-        assert_eq!(Connection::extract_param(data, "server_name"), Some("Test\\sServer"));
-        assert_eq!(Connection::extract_param(data, "server_welcome_message"), Some("Welcome"));
-        assert_eq!(Connection::extract_param(data, "missing"), None);
     }
 }

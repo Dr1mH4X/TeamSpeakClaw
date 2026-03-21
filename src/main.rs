@@ -11,8 +11,6 @@ mod cache;
 mod cli;
 mod config;
 mod error;
-#[cfg(feature = "headless")]
-mod headless;
 mod llm;
 mod permission;
 mod router;
@@ -27,8 +25,8 @@ use crate::skills::{
     SkillRegistry,
 };
 use crate::{
-    adapter::UnifiedAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig, llm::LlmEngine,
-    permission::PermissionGate, router::EventRouter,
+    adapter::UnifiedAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig,
+    llm::LlmEngine, permission::PermissionGate, router::EventRouter,
 };
 
 #[tokio::main]
@@ -44,20 +42,11 @@ async fn main() -> Result<()> {
     }
 
     // 3. 初始化配置与日志
-    #[cfg_attr(not(feature = "headless"), allow(unused_mut))]
     let mut cfg = AppConfig::load("config/settings.toml")?;
     let _guard = init_tracing(&cfg, &args.log_level);
 
     // 应用 --mode CLI 参数覆盖
-    #[cfg(feature = "headless")]
-    if let Some(mode) = args.mode {
-        let mode_str = match mode {
-            crate::cli::ConnectionMode::Serverquery => "serverquery",
-            crate::cli::ConnectionMode::Headless => "headless",
-        };
-        cfg.teamspeak.connection_mode = mode_str.to_string();
-        info!("Connection mode overridden to: {}", mode_str);
-    }
+    args.apply_overrides(&mut cfg);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 

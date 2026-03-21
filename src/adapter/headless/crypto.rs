@@ -6,7 +6,7 @@ use aes::Aes128;
 use eax::{AeadInPlace, Eax, KeyInit, Nonce, Tag};
 use p256::PublicKey;
 
-use crate::headless::{
+use super::{
     error::{HeadlessError, Result},
     identity::{ts_hash256, Identity},
     packet::{Packet, PacketType},
@@ -64,24 +64,9 @@ impl TsCrypto {
         }
     }
 
-    /// 重置加密状态
-    pub fn reset(&mut self) {
-        self.crypto_init_complete = false;
-        self.shared_secret = None;
-        self.iv_struct = None;
-        self.cached_keys = [[0u8; 16]; PACKET_TYPE_KINDS];
-        self.cached_ivs = [[0u8; 16]; PACKET_TYPE_KINDS];
-        self.cached_generations = [0u32; PACKET_TYPE_KINDS];
-    }
-
     /// 获取客户端身份
     pub fn identity(&self) -> &Identity {
         &self.identity
-    }
-
-    /// 是否完成加密初始化
-    pub fn is_initialized(&self) -> bool {
-        self.crypto_init_complete
     }
 
     /// 初始化加密（处理 alpha, beta, omega）
@@ -219,22 +204,6 @@ impl TsCrypto {
         data
     }
 
-    /// 生成 clientinitiv 命令
-    pub fn create_client_init_iv(&self) -> Result<String> {
-        let public_key_base64 = self.identity.public_key_base64();
-
-        Ok(format!(
-            "clientinitiv alpha={public_key_base64} omega={public_key_base64} ip="
-        ))
-    }
-
-    /// 生成 clientinit 命令
-    pub fn create_client_init(&self, nickname: &str) -> String {
-        format!(
-            "clientinit client_nickname={nickname} client_version=3.5.0 client_platform=Linux client_input_hardware=1 client_output_hardware=1 client_default_channel client_meta_data client_version_sign= client_key_offset=0 client_nickname_phonetic client_default_token= client_badges"
-        )
-    }
-
     /// 加密包
     pub fn encrypt(&self, packet: &mut Packet) -> Result<()> {
         if !self.crypto_init_complete {
@@ -359,8 +328,7 @@ mod tests {
     #[test]
     fn test_crypto_new() {
         let identity = Identity::generate();
-        let crypto = TsCrypto::new(identity);
-        assert!(!crypto.is_initialized());
+        let _crypto = TsCrypto::new(identity);
     }
 
     #[test]

@@ -1,8 +1,11 @@
-use crate::{
-    adapter::{
-        command::{cmd_clientupdate_nick, cmd_clientlist_uid_groups, cmd_login, cmd_quit, cmd_register_event, cmd_use, cmd_whoami},
-        event::{parse_events, TsEvent},
+use super::{
+    command::{
+        cmd_clientlist_uid_groups, cmd_clientupdate_nick, cmd_login, cmd_quit, cmd_register_event,
+        cmd_send_text, cmd_use, cmd_whoami,
     },
+    event::{parse_events, TsEvent},
+};
+use crate::{
     config::{AppConfig, TsConfig},
     error::{AppError, Result},
 };
@@ -102,8 +105,8 @@ impl TsAdapter {
 
         // 获取自身 ID
         self.send_raw(&cmd_whoami()).await?;
-        
-        // 等待一下以确保 bot_clid 被更新 (虽然不是强一致性，但足够)
+
+        // 等待一下以确保 bot_clid 被更新
         sleep(Duration::from_millis(200)).await;
 
         info!("ServerQuery session initialized");
@@ -124,6 +127,11 @@ impl TsAdapter {
     pub async fn quit(&self) -> Result<()> {
         info!("Sending quit command to TeamSpeak server");
         self.send_raw(&cmd_quit()).await
+    }
+
+    pub async fn send_message(&self, target_mode: u8, target: u32, message: &str) -> Result<()> {
+        self.send_raw(&cmd_send_text(target_mode, target, message))
+            .await
     }
 
     pub async fn send_raw(&self, cmd: &str) -> Result<()> {
@@ -164,11 +172,14 @@ impl TsAdapter {
 
                     // Parse whoami response to get our own client_id
                     if trimmed.contains("client_id=") && trimmed.contains("virtualserver_status=") {
-                        if let Some(part) = trimmed.split_whitespace().find(|s| s.starts_with("client_id=")) {
-                             if let Ok(clid) = part[10..].parse::<u32>() {
-                                 self.bot_clid.store(clid, Ordering::Relaxed);
-                                 debug!("Updated bot_clid to {}", clid);
-                             }
+                        if let Some(part) = trimmed
+                            .split_whitespace()
+                            .find(|s| s.starts_with("client_id="))
+                        {
+                            if let Ok(clid) = part[10..].parse::<u32>() {
+                                self.bot_clid.store(clid, Ordering::Relaxed);
+                                debug!("Updated bot_clid to {}", clid);
+                            }
                         }
                     }
 

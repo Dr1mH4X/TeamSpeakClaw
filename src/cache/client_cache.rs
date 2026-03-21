@@ -1,4 +1,4 @@
-use crate::adapter::command::cmd_clientlist_uid_groups;
+use crate::adapter::serverquery::command::cmd_clientlist_uid_groups;
 use crate::adapter::UnifiedAdapter;
 use crate::config::AppConfig;
 use arc_swap::ArcSwap;
@@ -53,7 +53,8 @@ impl ClientCache {
             if ttl_secs > 0 {
                 let now = Instant::now();
                 let ttl = Duration::from_secs(ttl_secs);
-                self.clients.retain(|_, info| now.duration_since(info.last_seen) < ttl);
+                self.clients
+                    .retain(|_, info| now.duration_since(info.last_seen) < ttl);
             }
         }
     }

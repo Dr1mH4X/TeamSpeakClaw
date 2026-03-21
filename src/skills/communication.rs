@@ -1,4 +1,4 @@
-use crate::adapter::command::{cmd_poke, cmd_send_text};
+use crate::adapter::serverquery::command::{cmd_poke, cmd_send_text};
 use crate::error::Result;
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;

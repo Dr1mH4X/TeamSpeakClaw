@@ -1,15 +1,15 @@
 //! 自动重连模块
-//! 
+//!
 //! 提供连接断开后的自动重连功能
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
-use crate::headless::{
+use super::{
     connection::{Connection, ConnectionConfig, ConnectionState},
     error::{HeadlessError, Result},
 };
@@ -67,7 +67,7 @@ pub enum ReconnectEvent {
     /// 断开连接
     Disconnected(Option<String>),
     /// 重连尝试
-    ReconnectAttempt(u32),
+    ReconnectAttempt,
     /// 重连成功
     Reconnected,
     /// 重连失败
@@ -100,9 +100,11 @@ impl ReconnectManager {
     /// 启动连接
     pub async fn start(&self) -> Result<Arc<Connection>> {
         let connection = self.create_connection().await?;
-        
+
         // 连接到服务器
-        connection.connect().await
+        connection
+            .connect()
+            .await
             .map_err(|e| HeadlessError::ConnectionError(format!("Connect failed: {e}")))?;
 
         // 保存连接
@@ -121,9 +123,12 @@ impl ReconnectManager {
 
     /// 创建新连接
     async fn create_connection(&self) -> Result<Arc<Connection>> {
-        let (connection, _event_rx) = Connection::new(self.connection_config.clone()).await
-            .map_err(|e| HeadlessError::ConnectionError(format!("Create connection failed: {e}")))?;
-        
+        let (connection, _event_rx) = Connection::new(self.connection_config.clone())
+            .await
+            .map_err(|e| {
+                HeadlessError::ConnectionError(format!("Create connection failed: {e}"))
+            })?;
+
         Ok(Arc::new(connection))
     }
 
@@ -152,11 +157,11 @@ impl ReconnectManager {
                 } else {
                     false
                 };
-                
+
                 if should_reconnect {
                     // 释放读锁
                     drop(conn_guard);
-                    
+
                     // 检查是否已在重连
                     if *is_reconnecting.read().await {
                         continue;
@@ -173,14 +178,17 @@ impl ReconnectManager {
                         &event_tx,
                         &connection_config,
                         &reconnect_config,
-                    ).await;
+                    )
+                    .await;
 
                     match result {
                         Ok(_) => {
                             let _ = event_tx.send(ReconnectEvent::Reconnected).await;
                         }
                         Err(e) => {
-                            let _ = event_tx.send(ReconnectEvent::ReconnectFailed(e.to_string())).await;
+                            let _ = event_tx
+                                .send(ReconnectEvent::ReconnectFailed(e.to_string()))
+                                .await;
                         }
                     }
                 }
@@ -203,14 +211,14 @@ impl ReconnectManager {
 
         loop {
             attempt += 1;
-            
+
             if attempt > reconnect_config.max_retries {
                 let _ = event_tx.send(ReconnectEvent::MaxRetriesReached).await;
                 *is_reconnecting.write().await = false;
                 return Err(HeadlessError::ConnectionError("Max retries reached".into()));
             }
 
-            let _ = event_tx.send(ReconnectEvent::ReconnectAttempt(attempt)).await;
+            let _ = event_tx.send(ReconnectEvent::ReconnectAttempt).await;
             info!("Reconnect attempt {} (delay: {:?})", attempt, delay);
 
             sleep(delay).await;
@@ -225,11 +233,12 @@ impl ReconnectManager {
                 }
                 Err(e) => {
                     warn!("Reconnect attempt {} failed: {}", attempt, e);
-                    
+
                     // 计算下一次延迟
                     delay = Duration::from_millis(
-                        (delay.as_millis() as f64 * reconnect_config.backoff_multiplier) as u64
-                    ).min(Duration::from_millis(reconnect_config.max_delay_ms));
+                        (delay.as_millis() as f64 * reconnect_config.backoff_multiplier) as u64,
+                    )
+                    .min(Duration::from_millis(reconnect_config.max_delay_ms));
                 }
             }
         }
@@ -237,15 +246,18 @@ impl ReconnectManager {
 
     /// 尝试连接
     async fn try_connect(config: &ConnectionConfig) -> Result<Arc<Connection>> {
-        let (connection, _event_rx) = Connection::new(config.clone()).await
+        let (connection, _event_rx) = Connection::new(config.clone())
+            .await
             .map_err(|e| HeadlessError::ConnectionError(format!("Create failed: {e}")))?;
-        
+
         let connection = Arc::new(connection);
 
         // 设置连接超时
         match timeout(config.connect_timeout, connection.connect()).await {
             Ok(Ok(())) => Ok(connection),
-            Ok(Err(e)) => Err(HeadlessError::ConnectionError(format!("Connect failed: {e}"))),
+            Ok(Err(e)) => Err(HeadlessError::ConnectionError(format!(
+                "Connect failed: {e}"
+            ))),
             Err(_) => Err(HeadlessError::Timeout),
         }
     }
@@ -253,11 +265,6 @@ impl ReconnectManager {
     /// 获取当前连接
     pub async fn connection(&self) -> Option<Arc<Connection>> {
         self.connection.read().await.clone()
-    }
-
-    /// 是否正在重连
-    pub async fn is_reconnecting(&self) -> bool {
-        *self.is_reconnecting.read().await
     }
 
     /// 关闭重连管理器
@@ -285,7 +292,7 @@ impl AutoReconnectConnection {
         reconnect_config: ReconnectConfig,
     ) -> Result<(Self, mpsc::Receiver<ReconnectEvent>)> {
         let (manager, event_rx) = ReconnectManager::new(connection_config, reconnect_config);
-        
+
         let wrapper = Self {
             manager: Arc::new(manager),
         };
@@ -301,11 +308,6 @@ impl AutoReconnectConnection {
     /// 获取当前连接
     pub async fn connection(&self) -> Option<Arc<Connection>> {
         self.manager.connection().await
-    }
-
-    /// 是否正在重连
-    pub async fn is_reconnecting(&self) -> bool {
-        self.manager.is_reconnecting().await
     }
 
     /// 关闭
