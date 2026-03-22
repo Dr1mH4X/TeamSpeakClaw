@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -75,6 +75,7 @@ pub struct PacketHandler {
     shutdown_tx: broadcast::Sender<()>,
     started: Arc<std::sync::atomic::AtomicBool>,
     client_id: Arc<RwLock<u16>>,
+    last_activity: Arc<StdMutex<Instant>>,
 }
 
 struct ReceiveWindow {
@@ -196,6 +197,7 @@ impl PacketHandler {
                 shutdown_tx,
                 started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 client_id: Arc::new(RwLock::new(0)),
+                last_activity: Arc::new(StdMutex::new(Instant::now())),
             },
             rx,
         ))
@@ -381,6 +383,9 @@ impl PacketHandler {
     async fn handle_received(&self, data: &[u8]) -> Result<()> {
         let mut packet = Packet::from_raw(data, PacketDirection::S2C)?;
         trace!("Received raw packet: {}", packet);
+
+        // Update last_activity for every received packet, including keepalives
+        *self.last_activity.lock().expect("last_activity mutex poisoned") = Instant::now();
 
         let should_dedupe = matches!(
             packet.header.packet_type,
@@ -599,6 +604,10 @@ impl PacketHandler {
                 }
             }
         }
+    }
+
+    pub fn last_activity(&self) -> Instant {
+        *self.last_activity.lock().expect("last_activity mutex poisoned")
     }
 
     pub async fn shutdown(&self) {

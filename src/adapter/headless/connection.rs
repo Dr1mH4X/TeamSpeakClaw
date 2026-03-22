@@ -204,8 +204,11 @@ impl Connection {
         config: &ConnectionConfig,
         packet_rx: &mut mpsc::Receiver<Packet>,
     ) {
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(35);
+        const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
         loop {
-            match timeout(Duration::from_secs(35), packet_rx.recv()).await {
+            match timeout(IDLE_CHECK_INTERVAL, packet_rx.recv()).await {
                 Ok(Some(packet)) => {
                     if let Err(e) = Self::handle_packet(
                         packet,
@@ -236,12 +239,19 @@ impl Connection {
                     break;
                 }
                 Err(_) => {
-                    warn!("Message loop timed out (35s)");
-                    Self::set_state_static(state, event_tx, ConnectionState::Disconnected).await;
-                    let _ = event_tx
-                        .send(ConnectionEvent::Disconnected(Some("Timeout".into())))
-                        .await;
-                    break;
+                    // No application-level packet arrived within the check interval.
+                    // Only disconnect if no network activity at all (including keepalives)
+                    // has been seen for IDLE_TIMEOUT, so that ping/pong traffic keeps
+                    // the connection alive.
+                    if packet_handler.last_activity().elapsed() >= IDLE_TIMEOUT {
+                        warn!("Connection idle for {}s (no activity including keepalives), disconnecting", IDLE_TIMEOUT.as_secs());
+                        Self::set_state_static(state, event_tx, ConnectionState::Disconnected)
+                            .await;
+                        let _ = event_tx
+                            .send(ConnectionEvent::Disconnected(Some("Timeout".into())))
+                            .await;
+                        break;
+                    }
                 }
             }
         }
