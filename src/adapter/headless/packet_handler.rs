@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -75,7 +76,10 @@ pub struct PacketHandler {
     shutdown_tx: broadcast::Sender<()>,
     started: Arc<std::sync::atomic::AtomicBool>,
     client_id: Arc<RwLock<u16>>,
-    last_activity: Arc<StdMutex<Instant>>,
+    /// Reference point for computing last_activity offsets.
+    activity_epoch: Arc<Instant>,
+    /// Nanoseconds elapsed since `activity_epoch` at the time of the last received packet.
+    last_activity_ns: Arc<AtomicU64>,
 }
 
 struct ReceiveWindow {
@@ -197,7 +201,8 @@ impl PacketHandler {
                 shutdown_tx,
                 started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 client_id: Arc::new(RwLock::new(0)),
-                last_activity: Arc::new(StdMutex::new(Instant::now())),
+                activity_epoch: Arc::new(Instant::now()),
+                last_activity_ns: Arc::new(AtomicU64::new(0)),
             },
             rx,
         ))
@@ -384,8 +389,13 @@ impl PacketHandler {
         let mut packet = Packet::from_raw(data, PacketDirection::S2C)?;
         trace!("Received raw packet: {}", packet);
 
-        // Update last_activity for every received packet, including keepalives
-        *self.last_activity.lock().expect("last_activity mutex poisoned") = Instant::now();
+        // Update last_activity for every received packet, including keepalives.
+        // Lock-free: store nanoseconds elapsed since the fixed epoch (saturating to u64::MAX
+        // on overflow, which would only occur after ~584 years of uptime).
+        self.last_activity_ns.store(
+            self.activity_epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Release,
+        );
 
         let should_dedupe = matches!(
             packet.header.packet_type,
@@ -607,7 +617,8 @@ impl PacketHandler {
     }
 
     pub fn last_activity(&self) -> Instant {
-        *self.last_activity.lock().expect("last_activity mutex poisoned")
+        let ns = self.last_activity_ns.load(Ordering::Acquire);
+        *self.activity_epoch + Duration::from_nanos(ns)
     }
 
     pub async fn shutdown(&self) {
