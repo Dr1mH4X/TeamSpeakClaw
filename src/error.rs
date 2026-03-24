@@ -9,15 +9,12 @@ pub enum AppError {
     PermissionDenied { reason: String },
 
     #[error("Rate limited")]
-    #[allow(dead_code)]
     RateLimited,
 
     #[error("Target not found: {name}")]
-    #[allow(dead_code)]
     TargetNotFound { name: String },
 
     #[error("Target is protected")]
-    #[allow(dead_code)]
     TargetProtected,
 
     #[error("LLM error: {0}")]
