@@ -1,20 +1,18 @@
 use crate::config::AppConfig;
 use crate::llm::provider::{LlmProvider, LlmResponse, OpenAiProvider};
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use serde_json::Value;
 use std::sync::Arc;
 
 pub struct LlmEngine {
-    config: Arc<ArcSwap<AppConfig>>,
     provider: Box<dyn LlmProvider>,
 }
 
 impl LlmEngine {
-    pub fn new(config: Arc<ArcSwap<AppConfig>>) -> Self {
-        let cfg = config.load();
+    pub fn new(config: Arc<AppConfig>) -> Self {
+        let cfg = &config;
         let provider = Box::new(OpenAiProvider::new(cfg.llm.clone()));
-        Self { config, provider }
+        Self { provider }
     }
 
     pub async fn chat(&self, messages: Vec<Value>, tools: Vec<Value>) -> Result<LlmResponse> {

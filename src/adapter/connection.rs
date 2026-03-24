@@ -6,7 +6,6 @@ use crate::{
     config::{AppConfig, TsConfig},
 };
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -24,8 +23,8 @@ pub struct TsAdapter {
 }
 
 impl TsAdapter {
-    pub async fn connect(config: Arc<ArcSwap<AppConfig>>) -> Result<Arc<Self>> {
-        let cfg = config.load();
+    pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
+        let cfg = &config;
         let addr = format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port);
         info!("Connecting to TeamSpeak ServerQuery at {addr}");
 
