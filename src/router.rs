@@ -1,6 +1,5 @@
 use crate::adapter::command::cmd_send_text;
 use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
-use crate::audit::AuditLog;
 use crate::cache::ClientCache;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
@@ -20,7 +19,6 @@ pub struct EventRouter {
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
-    audit: Arc<AuditLog>,
 }
 
 impl EventRouter {
@@ -32,7 +30,6 @@ impl EventRouter {
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
-        audit: Arc<AuditLog>,
     ) -> Self {
         Self {
             config,
@@ -42,7 +39,6 @@ impl EventRouter {
             gate,
             llm,
             registry,
-            audit,
         }
     }
 
@@ -92,16 +88,9 @@ impl EventRouter {
         }
 
         info!(
-            "Handling message from {}: {}",
-            event.invoker_name, msg_content
+            "消息接收: {} (clid: {}, content: {})",
+            event.invoker_name, event.invoker_id, msg_content
         );
-        
-        // 记录消息接收
-        self.audit.log("message_received", json!({
-            "invoker": event.invoker_name,
-            "clid": event.invoker_id,
-            "content": msg_content
-        }));
 
         let groups = if let Some(client) = self.cache.get_client(event.invoker_id) {
             client.server_groups
@@ -176,22 +165,24 @@ impl EventRouter {
                         };
                         match skill.execute(call.arguments.clone(), &ctx).await {
                             Ok(val) => {
-                                self.audit.log("skill_executed", json!({
-                                    "skill": call.name,
-                                    "caller": event.invoker_name,
-                                    "args": call.arguments,
-                                    "result": val
-                                }));
+                                info!(
+                                    skill = %call.name,
+                                    caller = %event.invoker_name,
+                                    args = %call.arguments,
+                                    result = %val,
+                                    "技能执行成功"
+                                );
                                 val.to_string()
                             },
                             Err(e) => {
                                 let err_msg = format!("Error: {e}");
-                                self.audit.log("skill_failed", json!({
-                                    "skill": call.name,
-                                    "caller": event.invoker_name,
-                                    "args": call.arguments,
-                                    "error": err_msg
-                                }));
+                                error!(
+                                    skill = %call.name,
+                                    caller = %event.invoker_name,
+                                    args = %call.arguments,
+                                    error = %err_msg,
+                                    "技能执行失败"
+                                );
                                 err_msg
                             },
                         }
