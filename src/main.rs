@@ -10,7 +10,6 @@ mod audit;
 mod cache;
 mod cli;
 mod config;
-mod error;
 mod llm;
 mod permission;
 mod router;

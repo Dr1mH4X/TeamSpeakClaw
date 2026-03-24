@@ -4,8 +4,8 @@ use crate::{
         event::{parse_events, TsEvent},
     },
     config::{AppConfig, TsConfig},
-    error::{AppError, Result},
 };
+use anyhow::Result;
 use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{sync::Arc, time::Duration};
@@ -79,10 +79,7 @@ impl TsAdapter {
                 }
             }
         }
-        Err(AppError::TsError {
-            code: 999,
-            message: "Max reconnect attempts reached".into(),
-        })
+        Err(anyhow::anyhow!("Max reconnect attempts reached (code 999)"))
     }
 
     async fn init(&self, cfg: &TsConfig) -> Result<()> {
@@ -162,7 +159,7 @@ impl TsAdapter {
                         error!("TS3 Error: {trimmed}");
                     }
 
-                    // Parse whoami response to get our own client_id
+                    // 解析 whoami 响应以获取我们自己的 client_id
                     if trimmed.contains("client_id=") && trimmed.contains("virtualserver_status=") {
                         if let Some(part) = trimmed.split_whitespace().find(|s| s.starts_with("client_id=")) {
                              if let Ok(clid) = part[10..].parse::<u32>() {

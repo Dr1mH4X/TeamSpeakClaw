@@ -1,5 +1,5 @@
 use crate::config::AclConfig;
-use crate::error::{AppError, Result};
+use anyhow::Result;
 use tracing::debug;
 
 pub struct PermissionGate {
@@ -11,11 +11,11 @@ impl PermissionGate {
         Self { config }
     }
     pub fn check(&self, caller_groups: &[u32], skill_name: &str) -> Result<()> {
-        // Iterate rules top-to-bottom
+        // 从上到下遍历规则
         for rule in &self.config.rules {
-            // Check if rule applies to caller
+            // 检查规则是否适用于调用者
             let match_group = if rule.server_group_ids.is_empty() {
-                true // Empty group list matches everyone (default rule)
+                true // 空组列表匹配所有人（默认规则）
             } else {
                 rule.server_group_ids
                     .iter()
@@ -23,7 +23,7 @@ impl PermissionGate {
             };
 
             if match_group {
-                // Check if skill is allowed
+                // 检查技能是否被允许
                 let allowed = rule.allowed_skills.contains(&"*".to_string())
                     || rule.allowed_skills.iter().any(|s| s == skill_name);
 
@@ -38,17 +38,16 @@ impl PermissionGate {
                         "Access denied: Rule '{}' does not allow skill '{}'",
                         rule.name, skill_name
                     );
-                    return Err(AppError::PermissionDenied {
-                        reason: format!("Rule '{}' does not allow this skill", rule.name),
-                    });
+                    return Err(anyhow::anyhow!(
+                        "Rule '{}' does not allow this skill",
+                        rule.name
+                    ));
                 }
             }
         }
 
         // 拒绝
-        Err(AppError::PermissionDenied {
-            reason: "No matching permission rule found".into(),
-        })
+        Err(anyhow::anyhow!("No matching permission rule found"))
     }
 
     pub fn get_allowed_skills(&self, caller_groups: &[u32]) -> Vec<String> {
