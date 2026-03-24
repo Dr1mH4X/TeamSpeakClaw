@@ -32,7 +32,7 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         Self { client, config }
