@@ -8,7 +8,6 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
-    pub audit: AuditConfig,
     pub cache: CacheConfig,
 }
 
@@ -19,7 +18,6 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
-            audit: AuditConfig::default(),
             cache: CacheConfig::default(),
         }
     }
@@ -113,23 +111,6 @@ impl Default for RateLimitConfig {
         Self {
             requests_per_minute: 10,
             burst_size: 3,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AuditConfig {
-    pub enabled: bool,
-    pub log_dir: String,
-    pub log_file: String,
-}
-
-impl Default for AuditConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            log_dir: "./logs".to_string(),
-            log_file: "audit.jsonl".to_string(),
         }
     }
 }
@@ -269,11 +250,6 @@ max_concurrent_requests = 4
 # 每个用户的令牌桶限流设置
 requests_per_minute = 10
 burst_size = 3
-
-[audit]
-enabled = true
-log_dir = "./logs"
-log_file = "audit.jsonl"
 
 [cache]
 # 客户端列表刷新间隔（秒）
