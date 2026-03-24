@@ -10,17 +10,6 @@ impl PermissionGate {
     pub fn new(config: AclConfig) -> Self {
         Self { config }
     }
-
-    /// Check if a user (with given server groups) can execute a skill.
-    #[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
     pub fn check(&self, caller_groups: &[u32], skill_name: &str) -> Result<()> {
         // Iterate rules top-to-bottom
         for rule in &self.config.rules {
@@ -56,7 +45,7 @@ impl PermissionGate {
             }
         }
 
-        // No rule matched? Deny by default.
+        // 拒绝
         Err(AppError::PermissionDenied {
             reason: "No matching permission rule found".into(),
         })
@@ -80,23 +69,12 @@ impl PermissionGate {
                 skills.extend(rule.allowed_skills.clone());
             }
         }
-        // Deduplicate
         skills.sort();
         skills.dedup();
         skills
     }
 
-    #[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
     pub fn can_target(&self, caller_groups: &[u32], target_groups: &[u32]) -> bool {
-        // Check if target is protected
         let is_protected = target_groups
             .iter()
             .any(|gid| self.config.acl.protected_group_ids.contains(gid));
@@ -104,7 +82,6 @@ impl PermissionGate {
             return true;
         }
 
-        // Target is protected. Check if caller can target admins.
         for rule in &self.config.rules {
             let match_group = if rule.server_group_ids.is_empty() {
                 true

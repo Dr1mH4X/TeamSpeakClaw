@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -159,7 +157,7 @@ pub struct AclConfig {
 
 impl Default for AclConfig {
     fn default() -> Self {
-        // Note: The programmatic default here is minimal. 
+        // Note: The programmatic default here is minimal.
         // The file template (DEFAULT_ACL_TOML) contains the full default configuration.
         Self {
             rules: vec![],
@@ -363,7 +361,7 @@ impl AppConfig {
             std::fs::write(path, DEFAULT_SETTINGS_TOML)?;
             println!("Created default AppConfig at {:?}", path);
         }
-        
+
         let content = std::fs::read_to_string(path)?;
         let config: AppConfig = toml::from_str(&content)?;
         Ok(config)
@@ -380,7 +378,7 @@ impl AclConfig {
             std::fs::write(path, DEFAULT_ACL_TOML)?;
             println!("Created default AclConfig at {:?}", path);
         }
-        
+
         let content = std::fs::read_to_string(path)?;
         let config: AclConfig = toml::from_str(&content)?;
         Ok(config)
