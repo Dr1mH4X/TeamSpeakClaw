@@ -157,8 +157,8 @@ pub struct AclConfig {
 
 impl Default for AclConfig {
     fn default() -> Self {
-        // Note: The programmatic default here is minimal.
-        // The file template (DEFAULT_ACL_TOML) contains the full default configuration.
+        // 注意：这里的编程默认值是最小化的。
+        // 文件模板 (DEFAULT_ACL_TOML) 包含完整的默认配置。
         Self {
             rules: vec![],
             acl: AclSettings::default(),
@@ -219,9 +219,6 @@ impl Default for SystemPrompts {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ErrorPrompts {
     pub permission_denied: String,
-    pub rate_limited: String,
-    pub target_not_found: String,
-    pub target_protected: String,
     pub llm_error: String,
     pub ts_error: String,
 }
@@ -230,16 +227,13 @@ impl Default for ErrorPrompts {
     fn default() -> Self {
         Self {
             permission_denied: "你没有权限使用此命令。".to_string(),
-            rate_limited: "请求过多。请稍后再试。".to_string(),
-            target_not_found: "在服务器上找不到匹配 '{target}' 的用户。".to_string(),
-            target_protected: "该用户受到保护，无法使用此命令成为目标。".to_string(),
             llm_error: "AI 后端当前不可用。请稍后再试。".to_string(),
             ts_error: "TeamSpeak 命令执行失败: {detail}".to_string(),
         }
     }
 }
 
-// Default configuration file contents with Chinese comments
+// 包含中文注释的默认配置文件内容
 pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
 host = "127.0.0.1"
 port = 10011
@@ -344,9 +338,6 @@ content = """
 
 [error]
 permission_denied = "你没有权限使用此命令。"
-rate_limited = "请求过多。请稍后再试。"
-target_not_found = "在服务器上找不到匹配 '{target}' 的用户。"
-target_protected = "该用户受到保护，无法使用此命令成为目标。"
 llm_error = "AI 后端当前不可用。请稍后再试。"
 ts_error = "TeamSpeak 命令执行失败: {detail}"
 "#;
@@ -410,7 +401,7 @@ impl PromptsConfig {
 }
 
 pub async fn watch_config(config: std::sync::Arc<arc_swap::ArcSwap<AppConfig>>) -> Result<()> {
-    // TODO: Implement file watcher
+    // TODO: 实现文件监视器
     let _ = config;
     Ok(())
 }

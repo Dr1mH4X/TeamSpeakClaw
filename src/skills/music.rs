@@ -1,5 +1,5 @@
 use crate::adapter::command::cmd_send_text;
-use crate::error::Result;
+use anyhow::Result;
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;
 use serde_json::{json, Value};

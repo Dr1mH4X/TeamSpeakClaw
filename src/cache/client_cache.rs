@@ -41,7 +41,7 @@ impl ClientCache {
             }
             sleep(Duration::from_secs(interval)).await;
 
-            // Refresh client list
+            // 刷新客户端列表
             if let Err(e) = adapter.send_raw("clientlist -uid -groups").await {
                 tracing::error!("Failed to refresh client cache: {e}");
             }

@@ -1,5 +1,5 @@
 use crate::adapter::command::{cmd_poke, cmd_send_text};
-use crate::error::Result;
+use anyhow::Result;
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -61,7 +61,7 @@ impl Skill for SendPrivateMsg {
             .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
         let msg = args["msg"].as_str().unwrap_or("");
 
-        // targetmode=1 (private)
+        // targetmode=1 (私聊)
         ctx.adapter.send_raw(&cmd_send_text(1, clid, msg)).await?;
         Ok(json!({"status": "ok", "message": "Message sent"}))
     }

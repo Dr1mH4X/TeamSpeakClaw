@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::error::{AppError, Result};
+use anyhow::Result;
 
 /// 所有 ServerQuery 的响应错误都包含 `id=` 字段。
 pub fn check_ts_error(response: &str) -> Result<()> {
@@ -26,10 +26,11 @@ pub fn check_ts_error(response: &str) -> Result<()> {
         .find(|s| s.starts_with("msg="))
         .map(|s| ts_unescape(&s[4..]))
         .unwrap_or_else(|| "unknown error".into());
-    Err(AppError::TsError {
-        code: id,
-        message: msg,
-    })
+    Err(anyhow::anyhow!(
+        "TeamSpeak error {code}: {message}",
+        code = id,
+        message = msg
+    ))
 }
 
 fn ts_unescape(s: &str) -> String {
@@ -49,7 +50,7 @@ pub fn ts_escape(s: &str) -> String {
 
 /// 高层命令构建器：返回要发送的原始查询字符串。
 pub fn cmd_login(name: &str, pass: &str) -> String {
-    // Avoid "login {} {}" string literal which might trigger heuristics
+    // 避免 "login {} {}" 字符串字面量，可能会触发启发式规则
     let mut s = String::with_capacity(6 + name.len() + pass.len() + 2);
     s.push_str("login ");
     s.push_str(&ts_escape(name));

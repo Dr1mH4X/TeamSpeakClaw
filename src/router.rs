@@ -72,12 +72,12 @@ impl EventRouter {
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
-        // Ignore self by client ID
+        // 按客户端ID忽略自身
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
 
-        // Only respond to private messages or if triggered by prefix
+        // 只响应私信或由前缀触发的消息
         let is_private = event.target_mode == TextMessageTarget::Private;
         let msg_content = event.message.trim();
         let triggers = &self.config.load().bot.trigger_prefixes;
@@ -96,7 +96,7 @@ impl EventRouter {
             event.invoker_name, msg_content
         );
         
-        // Log the message reception
+        // 记录消息接收
         self.audit.log("message_received", json!({
             "invoker": event.invoker_name,
             "clid": event.invoker_id,
@@ -113,7 +113,7 @@ impl EventRouter {
             vec![]
         };
 
-        // 1. Prepare context
+        // 1. 准备上下文
         let system_prompt = &self.prompts.system.content;
         let user_ctx = format!(
             "User: {} (clid: {}, groups: {:?})",
@@ -126,14 +126,14 @@ impl EventRouter {
             json!({"role": "user", "content": msg_content}),
         ];
 
-        // 2. Get tools
+        // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
 
-        // 3. First LLM call
+        // 3. 第一次LLM调用
         match self.llm.chat(messages.clone(), tools.clone()).await {
             Ok(response) => {
-                // 4. Handle response
+                // 4. 处理响应
                 if response.tool_calls.is_empty() {
                     if let Some(content) = response.content {
                         let _ = self
@@ -144,7 +144,7 @@ impl EventRouter {
                     return;
                 }
 
-                // Prepare tool calls for history
+                // 准备历史记录中的工具调用
                 let assistant_tool_calls: Vec<_> = response
                     .tool_calls
                     .iter()
@@ -166,7 +166,7 @@ impl EventRouter {
                     "tool_calls": assistant_tool_calls
                 }));
 
-                // Execute tools
+                // 执行工具
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
                         let ctx = ExecutionContext {
@@ -207,7 +207,7 @@ impl EventRouter {
                     }));
                 }
 
-                // 5. Second LLM call (with tool results)
+                // 5. 第二次LLM调用（包含工具结果）
                 match self.llm.chat(messages, tools).await {
                     Ok(final_response) => {
                         if let Some(content) = final_response.content {

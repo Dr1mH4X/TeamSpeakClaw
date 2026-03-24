@@ -1,4 +1,4 @@
-use crate::error::Result;
+use anyhow::Result;
 use crate::skills::{ExecutionContext, Skill};
 use async_trait::async_trait;
 use serde_json::{json, Value};
