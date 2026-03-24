@@ -6,7 +6,6 @@ use tracing::{error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod adapter;
-mod audit;
 mod cache;
 mod cli;
 mod config;
@@ -24,7 +23,7 @@ use crate::skills::{
     SkillRegistry,
 };
 use crate::{
-    adapter::TsAdapter, audit::AuditLog, cache::ClientCache, config::AppConfig, llm::LlmEngine,
+    adapter::TsAdapter, cache::ClientCache, config::AppConfig, llm::LlmEngine,
     permission::PermissionGate, router::EventRouter,
 };
 
@@ -42,14 +41,13 @@ async fn main() -> Result<()> {
 
     // 3. 初始化配置与日志
     let cfg = AppConfig::load("config/settings.toml")?;
-    let _guard = init_tracing(&cfg, &args.log_level);
+    let _guard = init_tracing(&args.log_level);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(ArcSwap::new(Arc::new(cfg)));
 
     // 4. 初始化组件
-    let audit = Arc::new(AuditLog::new(&config.load().audit)?);
     let cache = Arc::new(ClientCache::new(config.clone()));
     let acl_config = crate::config::AclConfig::load("config/acl.toml")?;
     let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
@@ -95,7 +93,6 @@ async fn main() -> Result<()> {
         gate,
         llm,
         registry,
-        audit,
     );
 
     info!("Bot ready. Listening for events.");
@@ -138,7 +135,8 @@ fn print_banner() {
     println!("{:-<86}", "");
 }
 
-fn init_tracing(_cfg: &AppConfig, console_level: &str) -> WorkerGuard {
+fn init_tracing(console_level: &str) -> WorkerGuard {
+    use std::path::PathBuf;
     use tracing_subscriber::{
         fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
@@ -151,7 +149,15 @@ fn init_tracing(_cfg: &AppConfig, console_level: &str) -> WorkerGuard {
         .compact()
         .with_filter(console_filter);
 
-    let file_appender = tracing_appender::rolling::daily("logs", "teamspeakclaw.log");
+    // 使用可执行文件所在目录作为日志根目录
+    let log_dir: PathBuf = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = daily_file::DailyFileAppender::new(log_dir, "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = EnvFilter::new("trace");
@@ -167,4 +173,75 @@ fn init_tracing(_cfg: &AppConfig, console_level: &str) -> WorkerGuard {
         .init();
 
     guard
+}
+
+/// 按日滚动日志文件，文件名格式: `{prefix}-{yyyy-MM-dd}.log`
+mod daily_file {
+    use chrono::Local;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    pub struct DailyFileAppender {
+        dir: PathBuf,
+        prefix: String,
+        inner: Mutex<Inner>,
+    }
+
+    struct Inner {
+        file: Option<File>,
+        date_key: String, // "2026-03-24"
+    }
+
+    impl DailyFileAppender {
+        pub fn new(dir: PathBuf, prefix: &str) -> Self {
+            Self {
+                dir,
+                prefix: prefix.to_string(),
+                inner: Mutex::new(Inner {
+                    file: None,
+                    date_key: String::new(),
+                }),
+            }
+        }
+
+        fn file_path(dir: &PathBuf, prefix: &str, date_key: &str) -> PathBuf {
+            dir.join(format!("{prefix}-{date_key}.log"))
+        }
+
+        fn ensure_open(inner: &mut Inner, dir: &PathBuf, prefix: &str) -> io::Result<()> {
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            if inner.date_key != today || inner.file.is_none() {
+                let path = Self::file_path(dir, prefix, &today);
+                let file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                inner.file = Some(file);
+                inner.date_key = today;
+            }
+            Ok(())
+        }
+    }
+
+    impl Write for DailyFileAppender {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut inner = self.inner.lock().map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "日志锁被污染")
+            })?;
+            Self::ensure_open(&mut inner, &self.dir, &self.prefix)?;
+            inner.file.as_mut().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut inner = self.inner.lock().map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "日志锁被污染")
+            })?;
+            if let Some(ref mut file) = inner.file {
+                file.flush()?;
+            }
+            Ok(())
+        }
+    }
 }
