@@ -31,6 +31,24 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
+    pub fn with_defaults() -> Self {
+        use communication::{PokeClient, SendPrivateMsg};
+        use information::GetClientList;
+        use moderation::{BanClient, KickClient};
+        use music::MusicControl;
+        use tracing::info;
+
+        let registry = Self::default();
+        registry.register(Box::new(PokeClient));
+        registry.register(Box::new(SendPrivateMsg));
+        registry.register(Box::new(KickClient));
+        registry.register(Box::new(BanClient));
+        registry.register(Box::new(GetClientList));
+        registry.register(Box::new(MusicControl));
+        info!("已注册技能: {:?}", registry.list_skills());
+        registry
+    }
+
     pub fn register(&self, skill: Box<dyn Skill>) {
         self.skills.insert(skill.name().to_string(), skill);
     }

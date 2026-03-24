@@ -15,13 +15,7 @@ mod router;
 mod skills;
 
 use crate::cli::Args;
-use crate::skills::{
-    communication::{PokeClient, SendPrivateMsg},
-    information::GetClientList,
-    moderation::{BanClient, KickClient},
-    music::MusicControl,
-    SkillRegistry,
-};
+use crate::skills::SkillRegistry;
 use crate::{
     adapter::TsAdapter, cache::ClientCache, config::AppConfig, llm::LlmEngine,
     permission::PermissionGate, router::EventRouter,
@@ -54,13 +48,7 @@ async fn main() -> Result<()> {
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
 
-    let registry = Arc::new(SkillRegistry::default());
-    registry.register(Box::new(PokeClient));
-    registry.register(Box::new(SendPrivateMsg));
-    registry.register(Box::new(KickClient));
-    registry.register(Box::new(BanClient));
-    registry.register(Box::new(GetClientList));
-    registry.register(Box::new(MusicControl));
+    let registry = Arc::new(SkillRegistry::with_defaults());
 
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
@@ -75,13 +63,6 @@ async fn main() -> Result<()> {
     let adapter_clone = adapter.clone();
     tokio::spawn(async move {
         cache_clone.run_refresh_loop(adapter_clone).await;
-    });
-
-    let config_clone = config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::config::watch_config(config_clone).await {
-            error!("Config watcher error: {e}");
-        }
     });
 
     // 7. 事件路由循环
