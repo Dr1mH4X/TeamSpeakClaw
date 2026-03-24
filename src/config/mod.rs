@@ -33,9 +33,6 @@ pub struct TsConfig {
     pub login_pass: String,
     pub server_id: u32,
     pub bot_nickname: String,
-    pub keepalive_interval_secs: u64,
-    pub reconnect_max_retries: u32,
-    pub reconnect_base_delay_ms: u64,
 }
 
 impl Default for TsConfig {
@@ -49,9 +46,6 @@ impl Default for TsConfig {
             login_pass: "".to_string(),
             server_id: 1,
             bot_nickname: "TSClaw".to_string(),
-            keepalive_interval_secs: 180,
-            reconnect_max_retries: 10,
-            reconnect_base_delay_ms: 1000,
         }
     }
 }
@@ -63,9 +57,6 @@ pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
     pub max_tokens: u32,
-    pub timeout_secs: u64,
-    pub retry_max: u32,
-    pub retry_delay_ms: u64,
 }
 
 impl Default for LlmConfig {
@@ -76,9 +67,6 @@ impl Default for LlmConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
             max_tokens: 1024,
-            timeout_secs: 30,
-            retry_max: 3,
-            retry_delay_ms: 500,
         }
     }
 }
@@ -93,7 +81,11 @@ pub struct BotConfig {
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
-            trigger_prefixes: vec!["!tsclaw".to_string(), "!bot".to_string(), "@TSClaw".to_string()],
+            trigger_prefixes: vec![
+                "!tsclaw".to_string(),
+                "!bot".to_string(),
+                "@TSClaw".to_string(),
+            ],
             respond_to_private: true,
             max_concurrent_requests: 4,
         }
@@ -138,7 +130,6 @@ pub struct AclConfig {
 
 impl Default for AclConfig {
     fn default() -> Self {
-        // 注意：这里的编程默认值是最小化的。
         // 文件模板 (DEFAULT_ACL_TOML) 包含完整的默认配置。
         Self {
             rules: vec![],
@@ -224,9 +215,6 @@ login_name = "serveradmin"
 login_pass = ""           # 通过环境变量 TS_LOGIN_PASS 覆盖
 server_id = 1
 bot_nickname = "TSClaw"
-keepalive_interval_secs = 180
-reconnect_max_retries = 10
-reconnect_base_delay_ms = 1000
 
 [llm]
 provider = "openai"       # 可选: openai | anthropic | ollama
@@ -234,9 +222,6 @@ api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 max_tokens = 1024
-timeout_secs = 30
-retry_max = 3
-retry_delay_ms = 500
 
 [bot]
 # 在频道/服务器聊天中触发机器人的前缀
@@ -356,7 +341,7 @@ impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
-             if let Some(parent) = path.parent() {
+            if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, DEFAULT_PROMPTS_TOML)?;
@@ -368,7 +353,10 @@ impl PromptsConfig {
             Ok(c) => c,
             Err(e) => {
                 println!("Failed to parse prompts config from {:?}: {}", path, e);
-                println!("Content preview:\n{}", &content.chars().take(200).collect::<String>());
+                println!(
+                    "Content preview:\n{}",
+                    &content.chars().take(200).collect::<String>()
+                );
                 return Err(e.into());
             }
         };
