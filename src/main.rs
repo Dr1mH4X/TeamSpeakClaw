@@ -1,12 +1,10 @@
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod adapter;
-mod cache;
 mod cli;
 mod config;
 mod llm;
@@ -17,7 +15,7 @@ mod skills;
 use crate::cli::Args;
 use crate::skills::SkillRegistry;
 use crate::{
-    adapter::TsAdapter, cache::ClientCache, config::AppConfig, llm::LlmEngine,
+    adapter::TsAdapter, config::AppConfig, llm::LlmEngine,
     permission::PermissionGate, router::EventRouter,
 };
 
@@ -39,10 +37,9 @@ async fn main() -> Result<()> {
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
-    let config = Arc::new(ArcSwap::new(Arc::new(cfg)));
+    let config = Arc::new(cfg);
 
     // 4. 初始化组件
-    let cache = Arc::new(ClientCache::new(config.clone()));
     let acl_config = crate::config::AclConfig::load("config/acl.toml")?;
     let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
     let gate = Arc::new(PermissionGate::new(acl_config));
@@ -55,22 +52,14 @@ async fn main() -> Result<()> {
     // 5. 连接服务
     let adapter = TsAdapter::connect(config.clone()).await?;
     adapter
-        .set_nickname(&config.load().teamspeak.bot_nickname)
+        .set_nickname(&config.teamspeak.bot_nickname)
         .await?;
 
-    // 6. 后台任务
-    let cache_clone = cache.clone();
-    let adapter_clone = adapter.clone();
-    tokio::spawn(async move {
-        cache_clone.run_refresh_loop(adapter_clone).await;
-    });
-
-    // 7. 事件路由循环
+    // 6. 事件路由循环
     let router = EventRouter::new(
         config,
         prompts,
         adapter.clone(),
-        cache,
         gate,
         llm,
         registry,

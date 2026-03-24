@@ -8,7 +8,6 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
-    pub cache: CacheConfig,
 }
 
 impl Default for AppConfig {
@@ -18,7 +17,6 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
-            cache: CacheConfig::default(),
         }
     }
 }
@@ -103,21 +101,6 @@ impl Default for RateLimitConfig {
         Self {
             requests_per_minute: 10,
             burst_size: 3,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CacheConfig {
-    pub refresh_interval_secs: u64,
-    pub entry_ttl_secs: u64,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            refresh_interval_secs: 30,
-            entry_ttl_secs: 300,
         }
     }
 }
@@ -235,12 +218,6 @@ max_concurrent_requests = 4
 # 每个用户的令牌桶限流设置
 requests_per_minute = 10
 burst_size = 3
-
-[cache]
-# 客户端列表刷新间隔（秒）
-refresh_interval_secs = 30
-# 客户端离开后其缓存条目的存活时间（TTL）
-entry_ttl_secs = 300
 "#;
 
 pub const DEFAULT_ACL_TOML: &str = r#"# 权限规则从上到下评估；第一个匹配的生效。
