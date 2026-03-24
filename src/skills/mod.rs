@@ -5,7 +5,7 @@ pub mod music;
 
 use crate::adapter::TsAdapter;
 use crate::cache::ClientCache;
-use crate::error::Result;
+use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::Value;
@@ -14,7 +14,6 @@ use std::sync::Arc;
 pub struct ExecutionContext {
     pub adapter: Arc<TsAdapter>,
     pub cache: Arc<ClientCache>,
-    #[allow(dead_code)]
     pub caller_id: u32,
 }
 
@@ -40,7 +39,6 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
-    #[allow(dead_code)]
     pub fn list_skills(&self) -> Vec<String> {
         self.skills.iter().map(|s| s.key().clone()).collect()
     }

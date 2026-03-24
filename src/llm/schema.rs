@@ -1,1 +1,1 @@
-// Schema generation
+// 模式生成

@@ -1,5 +1,5 @@
 use crate::config::LlmConfig;
-use crate::error::Result;
+use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
