@@ -20,7 +20,6 @@ use tracing::{debug, error, info, warn};
 pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
     event_tx: broadcast::Sender<TsEvent>,
-    config: Arc<ArcSwap<AppConfig>>,
     bot_clid: AtomicU32,
 }
 
@@ -37,7 +36,6 @@ impl TsAdapter {
         let adapter = Arc::new(Self {
             writer: Mutex::new(writer),
             event_tx: tx,
-            config: config.clone(),
             bot_clid: AtomicU32::new(0),
         });
 
@@ -63,9 +61,12 @@ impl TsAdapter {
     }
 
     async fn connect_with_retry(cfg: &TsConfig) -> Result<TcpStream> {
+        const MAX_RETRIES: u32 = 10;
+        const BASE_DELAY_MS: u64 = 1000;
+
         let addr = format!("{}:{}", cfg.host, cfg.port);
-        let mut delay = Duration::from_millis(cfg.reconnect_base_delay_ms);
-        for attempt in 0..cfg.reconnect_max_retries {
+        let mut delay = Duration::from_millis(BASE_DELAY_MS);
+        for attempt in 0..MAX_RETRIES {
             match TcpStream::connect(&addr).await {
                 Ok(s) => {
                     // 跳过 TS 欢迎横幅（2 行）
@@ -99,8 +100,8 @@ impl TsAdapter {
 
         // 获取自身 ID
         self.send_raw("whoami").await?;
-        
-        // 等待一下以确保 bot_clid 被更新 (虽然不是强一致性，但足够)
+
+        // 等待一下以确保 bot_clid 被更新
         sleep(Duration::from_millis(200)).await;
 
         info!("ServerQuery session initialized");
@@ -161,11 +162,14 @@ impl TsAdapter {
 
                     // 解析 whoami 响应以获取我们自己的 client_id
                     if trimmed.contains("client_id=") && trimmed.contains("virtualserver_status=") {
-                        if let Some(part) = trimmed.split_whitespace().find(|s| s.starts_with("client_id=")) {
-                             if let Ok(clid) = part[10..].parse::<u32>() {
-                                 self.bot_clid.store(clid, Ordering::Relaxed);
-                                 debug!("Updated bot_clid to {}", clid);
-                             }
+                        if let Some(part) = trimmed
+                            .split_whitespace()
+                            .find(|s| s.starts_with("client_id="))
+                        {
+                            if let Ok(clid) = part[10..].parse::<u32>() {
+                                self.bot_clid.store(clid, Ordering::Relaxed);
+                                debug!("Updated bot_clid to {}", clid);
+                            }
                         }
                     }
 
@@ -184,9 +188,9 @@ impl TsAdapter {
     }
 
     async fn keepalive_loop(&self) {
+        const KEEPALIVE_INTERVAL_SECS: u64 = 180;
         loop {
-            let interval = self.config.load().teamspeak.keepalive_interval_secs;
-            sleep(Duration::from_secs(interval)).await;
+            sleep(Duration::from_secs(KEEPALIVE_INTERVAL_SECS)).await;
             if let Err(e) = self.send_raw("whoami").await {
                 error!("Keepalive failed: {e}");
             }
