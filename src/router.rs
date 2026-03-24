@@ -1,21 +1,28 @@
 use crate::adapter::command::cmd_send_text;
 use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
-use crate::cache::ClientCache;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::skills::{ExecutionContext, SkillRegistry};
 use anyhow::Result;
-use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub clid: u32,
+    pub cldbid: u32,
+    pub nickname: String,
+    pub server_groups: Vec<u32>,
+}
+
 pub struct EventRouter {
-    config: Arc<ArcSwap<AppConfig>>,
+    config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
     adapter: Arc<TsAdapter>,
-    cache: Arc<ClientCache>,
+    pub clients: DashMap<u32, ClientInfo>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
@@ -23,10 +30,9 @@ pub struct EventRouter {
 
 impl EventRouter {
     pub fn new(
-        config: Arc<ArcSwap<AppConfig>>,
+        config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
         adapter: Arc<TsAdapter>,
-        cache: Arc<ClientCache>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
@@ -35,7 +41,7 @@ impl EventRouter {
             config,
             prompts,
             adapter,
-            cache,
+            clients: DashMap::new(),
             gate,
             llm,
             registry,
@@ -51,15 +57,18 @@ impl EventRouter {
                     self.handle_message(msg).await;
                 }
                 TsEvent::ClientEnterView(e) => {
-                    self.cache.update_client(
+                    self.clients.insert(
                         e.clid,
-                        e.cldbid,
-                        e.client_nickname,
-                        e.client_server_groups,
+                        ClientInfo {
+                            clid: e.clid,
+                            cldbid: e.cldbid,
+                            nickname: e.client_nickname,
+                            server_groups: e.client_server_groups,
+                        },
                     );
                 }
                 TsEvent::ClientLeftView(e) => {
-                    self.cache.remove_client(e.clid);
+                    self.clients.remove(&e.clid);
                 }
                 _ => {}
             }
@@ -76,9 +85,9 @@ impl EventRouter {
         // 只响应私信或由前缀触发的消息
         let is_private = event.target_mode == TextMessageTarget::Private;
         let msg_content = event.message.trim();
-        let triggers = &self.config.load().bot.trigger_prefixes;
+        let triggers = &self.config.bot.trigger_prefixes;
 
-        let should_respond = is_private && self.config.load().bot.respond_to_private
+        let should_respond = is_private && self.config.bot.respond_to_private
             || triggers
                 .iter()
                 .any(|prefix| msg_content.starts_with(prefix));
@@ -92,11 +101,11 @@ impl EventRouter {
             event.invoker_name, event.invoker_id, msg_content
         );
 
-        let groups = if let Some(client) = self.cache.get_client(event.invoker_id) {
-            client.server_groups
+        let groups = if let Some(client) = self.clients.get(&event.invoker_id) {
+            client.server_groups.clone()
         } else {
             debug!(
-                "Client {} not in cache, assuming default permissions",
+                "Client {} not in store, assuming default permissions",
                 event.invoker_id
             );
             vec![]
@@ -160,7 +169,7 @@ impl EventRouter {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
                         let ctx = ExecutionContext {
                             adapter: self.adapter.clone(),
-                            cache: self.cache.clone(),
+                            clients: &self.clients,
                             caller_id: event.invoker_id,
                         };
                         match skill.execute(call.arguments.clone(), &ctx).await {

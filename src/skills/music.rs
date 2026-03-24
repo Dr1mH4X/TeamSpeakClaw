@@ -56,8 +56,8 @@ impl Skill for MusicControl {
             _ => return Err(anyhow::anyhow!("Unknown action: {}", action).into()),
         };
 
-        // 在缓存里找 TS3AudioBot 的 clid
-        let clients = ctx.cache.list_clients();
+        // 在内存中找 TS3AudioBot 的 clid
+        let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
         let audiobot = clients
             .iter()
             .find(|c| c.nickname == "TS3AudioBot")

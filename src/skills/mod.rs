@@ -4,16 +4,16 @@ pub mod moderation;
 pub mod music;
 
 use crate::adapter::TsAdapter;
-use crate::cache::ClientCache;
+use crate::router::ClientInfo;
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
 
-pub struct ExecutionContext {
+pub struct ExecutionContext<'a> {
     pub adapter: Arc<TsAdapter>,
-    pub cache: Arc<ClientCache>,
+    pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
 }
 

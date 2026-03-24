@@ -21,7 +21,7 @@ impl Skill for GetClientList {
         })
     }
     async fn execute(&self, _args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clients: Vec<_> = ctx.cache.list_clients();
+        let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
         let json_clients: Vec<_> = clients
             .iter()
             .map(|c| {
