@@ -363,9 +363,3 @@ impl PromptsConfig {
         Ok(config)
     }
 }
-
-pub async fn watch_config(config: std::sync::Arc<arc_swap::ArcSwap<AppConfig>>) -> Result<()> {
-    // TODO: 实现文件监视器
-    let _ = config;
-    Ok(())
-}
