@@ -106,10 +106,17 @@ fn edit_config() -> anyhow::Result<()> {
             .default(config.teamspeak.ssh_port)
             .interact_text()?;
 
-        config.teamspeak.use_ssh = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Use SSH?")
-            .default(config.teamspeak.use_ssh)
+        let methods = &["tcp", "ssh"];
+        let method_index = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Connection Method")
+            .items(methods)
+            .default(if config.teamspeak.method == "ssh" {
+                1
+            } else {
+                0
+            })
             .interact()?;
+        config.teamspeak.method = methods[method_index].to_string();
 
         config.teamspeak.login_name = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Query Login Name")
