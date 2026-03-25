@@ -97,8 +97,8 @@ impl EventRouter {
         }
 
         info!(
-            "消息接收: {} (clid: {}, content: {})",
-            event.invoker_name, event.invoker_id, msg_content
+            "消息接收: {} (clid: {}, uid: {}, content: {})",
+            event.invoker_name, event.invoker_id, event.invoker_uid, msg_content
         );
 
         let groups = if let Some(client) = self.clients.get(&event.invoker_id) {
