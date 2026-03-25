@@ -125,9 +125,9 @@ impl TsAdapter {
 
     pub async fn send_raw(&self, cmd: &str) -> Result<()> {
         if cmd.starts_with("login ") {
-            debug!(">> login [REDACTED]");
+            info!(">> login [REDACTED]");
         } else {
-            debug!(">> {cmd}");
+            info!(">> {cmd}");
         }
         let mut w = self.writer.lock().await;
         w.write_all(format!("{cmd}\n").as_bytes()).await?;
@@ -153,7 +153,7 @@ impl TsAdapter {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    debug!("<< {trimmed}");
+                    info!("<< {trimmed}");
 
                     if trimmed.starts_with("error id=") && !trimmed.contains("id=0") {
                         error!("TS3 Error: {trimmed}");
