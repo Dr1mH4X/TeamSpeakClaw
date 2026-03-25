@@ -26,7 +26,7 @@ pub struct TsConfig {
     pub host: String,
     pub port: u16,
     pub ssh_port: u16,
-    pub use_ssh: bool,
+    pub method: String,
     pub login_name: String,
     pub login_pass: String,
     pub server_id: u32,
@@ -39,7 +39,7 @@ impl Default for TsConfig {
             host: "127.0.0.1".to_string(),
             port: 10011,
             ssh_port: 10022,
-            use_ssh: false,
+            method: "tcp".to_string(),
             login_name: "serveradmin".to_string(),
             login_pass: "".to_string(),
             server_id: 1,
@@ -193,7 +193,7 @@ pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
-use_ssh = false
+method = "tcp"            # 连接方式: tcp 或 ssh
 login_name = "serveradmin"
 login_pass = ""           # 通过环境变量 TS_LOGIN_PASS 覆盖
 server_id = 1
