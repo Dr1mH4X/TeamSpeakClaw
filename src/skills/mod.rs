@@ -4,6 +4,7 @@ pub mod moderation;
 pub mod music;
 
 use crate::adapter::TsAdapter;
+use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -15,6 +16,8 @@ pub struct ExecutionContext<'a> {
     pub adapter: Arc<TsAdapter>,
     pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
+    pub caller_groups: Vec<u32>,
+    pub gate: Arc<PermissionGate>,
 }
 
 #[async_trait]

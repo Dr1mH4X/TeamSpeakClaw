@@ -30,6 +30,11 @@ impl Skill for PokeClient {
             .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
+        // 自操作防护
+        if clid == ctx.caller_id {
+            return Err(anyhow::anyhow!("不能戳自己"));
+        }
+
         ctx.adapter.send_raw(&cmd_poke(clid, msg)).await?;
         Ok(json!({"status": "ok", "message": "Poke sent"}))
     }
@@ -60,6 +65,11 @@ impl Skill for SendPrivateMsg {
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
         let msg = args["msg"].as_str().unwrap_or("");
+
+        // 自操作防护
+        if clid == ctx.caller_id {
+            return Err(anyhow::anyhow!("不能给自己发私信"));
+        }
 
         // targetmode=1 (私聊)
         ctx.adapter.send_raw(&cmd_send_text(1, clid, msg)).await?;
