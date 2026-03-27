@@ -1,0 +1,42 @@
+{
+  "homepage.tagline": {
+    "message": "Next-Gen LLM TeamSpeak Integration",
+    "description": "Tagline for the homepage"
+  },
+  "homepage.getStarted": {
+    "message": "GET STARTED",
+    "description": "Button text for getting started"
+  },
+  "homepage.features.naturalInteraction.title": {
+    "message": "NATURAL INTERACTION",
+    "description": "Title for the Natural Interaction feature"
+  },
+  "homepage.features.naturalInteraction.description": {
+    "message": "Control your server with natural language. No more commands to memorize.",
+    "description": "Description for the Natural Interaction feature"
+  },
+  "homepage.features.rbacSecurity.title": {
+    "message": "RBAC SECURITY",
+    "description": "Title for the RBAC Security feature"
+  },
+  "homepage.features.rbacSecurity.description": {
+    "message": "Role-based access control system. Secure, granular, and robust.",
+    "description": "Description for the RBAC Security feature"
+  },
+  "homepage.features.cloudMusic.title": {
+    "message": "CLOUD MUSIC",
+    "description": "Title for the Cloud Music feature"
+  },
+  "homepage.features.cloudMusic.description": {
+    "message": "Seamless NetEase Music integration for your high-quality channels.",
+    "description": "Description for the Cloud Music feature"
+  },
+  "homepage.title": {
+    "message": "Home",
+    "description": "Title of the homepage"
+  },
+  "homepage.description": {
+    "message": "Minimalist TS3 Bot",
+    "description": "Description of the homepage for SEO"
+  }
+}
