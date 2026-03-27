@@ -184,7 +184,7 @@ impl EventRouter {
                                     "技能执行成功"
                                 );
                                 val.to_string()
-                            },
+                            }
                             Err(e) => {
                                 let err_msg = format!("Error: {e}");
                                 error!(
@@ -195,7 +195,7 @@ impl EventRouter {
                                     "技能执行失败"
                                 );
                                 err_msg
-                            },
+                            }
                         }
                     } else {
                         "Error: Skill not found".to_string()

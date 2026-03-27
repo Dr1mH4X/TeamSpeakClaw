@@ -5,30 +5,173 @@ use crate::{
     },
     config::{AppConfig, TsConfig},
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::{broadcast, Mutex},
     time::sleep,
 };
 use tracing::{debug, error, info, warn};
 
+/// 支持的连接方法枚举
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsMethod {
+    Tcp,
+    Ssh,
+}
+
+impl TryFrom<&str> for TsMethod {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_lowercase().as_str() {
+            "ssh" => Ok(TsMethod::Ssh),
+            "tcp" => Ok(TsMethod::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported connection method: {}. Only 'tcp' or 'ssh' are allowed.",
+                s
+            )),
+        }
+    }
+}
+
+pub enum TsStream {
+    Tcp(tokio::net::TcpStream),
+    Ssh(russh::ChannelStream<russh::client::Msg>),
+}
+
+impl AsyncRead for TsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            TsStream::Ssh(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for TsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            TsStream::Ssh(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_flush(cx),
+            TsStream::Ssh(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            TsStream::Ssh(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+struct SshHandler {
+    host: String,
+    port: u16,
+}
+
+impl russh::client::Handler for SshHandler {
+    type Error = russh::Error;
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        let key_dir = PathBuf::from("config");
+        if !key_dir.exists() {
+            if let Err(e) = tokio::fs::create_dir_all(&key_dir).await {
+                error!("Failed to create config directory: {}", e);
+                return Ok(false);
+            }
+        }
+
+        let key_path = key_dir.join(format!("{}_{}.pub", self.host, self.port));
+
+        let current_key = match server_public_key.to_openssh() {
+            Ok(key) => key,
+            Err(e) => {
+                error!("Failed to serialize server public key: {}", e);
+                return Ok(false);
+            }
+        };
+
+        if key_path.exists() {
+            match tokio::fs::read_to_string(&key_path).await {
+                Ok(saved_key) => {
+                    if saved_key.trim() == current_key.trim() {
+                        Ok(true)
+                    } else {
+                        error!(
+                            "SSH Host key mismatch for {}:{}! Potential MITM attack.",
+                            self.host, self.port
+                        );
+                        Ok(false)
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to read known hosts key: {}", e);
+                    Ok(false)
+                }
+            }
+        } else {
+            info!(
+                "Trusting new SSH host key for {}:{} and saving to {:?}",
+                self.host, self.port, key_path
+            );
+
+            match tokio::fs::write(&key_path, current_key.trim()).await {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    error!("Failed to save SSH public key: {}", e);
+                    Ok(false)
+                }
+            }
+        }
+    }
+}
+
 pub struct TsAdapter {
-    writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
+    writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
 }
 
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
-        let cfg = &config;
-        let addr = format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port);
-        info!("Connecting to TeamSpeak ServerQuery at {addr}");
+        let cfg = &config.teamspeak;
+        let method = TsMethod::try_from(cfg.method.as_str())
+            .context("Invalid connection method in config")?;
 
-        let stream = Self::connect_with_retry(&cfg.teamspeak).await?;
+        let addr = match method {
+            TsMethod::Ssh => format!("{}:{}", cfg.host, cfg.ssh_port),
+            TsMethod::Tcp => format!("{}:{}", cfg.host, cfg.port),
+        };
+        info!(
+            "Connecting to TeamSpeak ServerQuery ({:?}) at {addr}",
+            method
+        );
+
+        let stream = Self::connect_with_retry(cfg, method).await?;
         let (reader, writer) = tokio::io::split(stream);
         let (tx, _) = broadcast::channel::<TsEvent>(256);
 
@@ -38,19 +181,16 @@ impl TsAdapter {
             bot_clid: AtomicU32::new(0),
         });
 
-        // 启动读取任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.reader_loop(BufReader::new(reader)).await;
         });
 
-        // 初始化：登录、选择虚拟服务器、注册事件
-        if let Err(e) = adapter.init(&cfg.teamspeak).await {
+        if let Err(e) = adapter.init(cfg).await {
             error!("Failed to initialize TeamSpeak session: {e}");
             return Err(e);
         }
 
-        // 启动保活任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.keepalive_loop().await;
@@ -59,19 +199,19 @@ impl TsAdapter {
         Ok(adapter)
     }
 
-    async fn connect_with_retry(cfg: &TsConfig) -> Result<TcpStream> {
+    async fn connect_with_retry(cfg: &TsConfig, method: TsMethod) -> Result<TsStream> {
         const MAX_RETRIES: u32 = 10;
         const BASE_DELAY_MS: u64 = 1000;
 
-        let addr = format!("{}:{}", cfg.host, cfg.port);
         let mut delay = Duration::from_millis(BASE_DELAY_MS);
         for attempt in 0..MAX_RETRIES {
-            match TcpStream::connect(&addr).await {
-                Ok(s) => {
-                    // 跳过 TS 欢迎横幅（2 行）
-                    // 交由读取循环处理
-                    return Ok(s);
-                }
+            let res = match method {
+                TsMethod::Ssh => Self::connect_ssh(cfg).await,
+                TsMethod::Tcp => Self::connect_tcp(cfg).await,
+            };
+
+            match res {
+                Ok(s) => return Ok(s),
                 Err(e) => {
                     warn!("Connect attempt {attempt} failed: {e}. Retrying in {delay:?}");
                     sleep(delay).await;
@@ -82,8 +222,41 @@ impl TsAdapter {
         Err(anyhow::anyhow!("Max reconnect attempts reached (code 999)"))
     }
 
+    async fn connect_tcp(cfg: &TsConfig) -> Result<TsStream> {
+        let addr = format!("{}:{}", cfg.host, cfg.port);
+        let stream = TcpStream::connect(&addr).await?;
+        Ok(TsStream::Tcp(stream))
+    }
+
+    async fn connect_ssh(cfg: &TsConfig) -> Result<TsStream> {
+        let config = Arc::new(russh::client::Config::default());
+        let addr = format!("{}:{}", cfg.host, cfg.ssh_port);
+
+        let handler = SshHandler {
+            host: cfg.host.clone(),
+            port: cfg.ssh_port,
+        };
+
+        let mut session = russh::client::connect(config, addr, handler)
+            .await
+            .context("Failed to establish SSH connection")?;
+
+        let auth_res = session
+            .authenticate_password(&cfg.login_name, &cfg.login_pass)
+            .await?;
+
+        if !matches!(auth_res, russh::client::AuthResult::Success) {
+            return Err(anyhow::anyhow!("SSH Authentication failed"));
+        }
+
+        let channel = session.channel_open_session().await?;
+        channel.request_shell(true).await?;
+
+        let stream = channel.into_stream();
+        Ok(TsStream::Ssh(stream))
+    }
+
     async fn init(&self, cfg: &TsConfig) -> Result<()> {
-        // 等待一小段时间，让欢迎横幅先被处理
         sleep(Duration::from_millis(500)).await;
 
         self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass))
@@ -139,7 +312,7 @@ impl TsAdapter {
         self.event_tx.subscribe()
     }
 
-    async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TcpStream>>) {
+    async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
         let mut line = String::new();
         loop {
             line.clear();
