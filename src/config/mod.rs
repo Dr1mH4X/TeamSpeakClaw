@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
+    pub music_backend: MusicBackendConfig,
 }
 
 impl Default for AppConfig {
@@ -17,6 +18,7 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            music_backend: MusicBackendConfig::default(),
         }
     }
 }
@@ -44,6 +46,23 @@ impl Default for TsConfig {
             login_pass: "".to_string(),
             server_id: 1,
             bot_nickname: "TSClaw".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MusicBackendConfig {
+    /// 后端选择: "ts3audiobot"（默认）或 "tsbot_backend"
+    pub backend: String,
+    /// tsbot-backend HTTP API 地址（仅 backend = "tsbot_backend" 时使用）
+    pub base_url: String,
+}
+
+impl Default for MusicBackendConfig {
+    fn default() -> Self {
+        Self {
+            backend: "ts3audiobot".to_string(),
+            base_url: "http://127.0.0.1:8000".to_string(),
         }
     }
 }
@@ -189,7 +208,8 @@ impl Default for ErrorPrompts {
 }
 
 // 包含中文注释的默认配置文件内容
-pub const DEFAULT_SETTINGS_TOML: &str = r#"[teamspeak]
+pub const DEFAULT_SETTINGS_TOML: &str = r#"
+[teamspeak]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
@@ -199,6 +219,10 @@ login_pass = ""           # 通过环境变量 TS_LOGIN_PASS 覆盖
 server_id = 1
 bot_nickname = "TSClaw"
 
+[music_backend]
+backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
+base_url = "http://127.0.0.1:8000"   # 仅 backend = "tsbot_backend" 时生效
+
 [llm]
 provider = "openai"       # 可选: openai | anthropic | ollama
 api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
@@ -207,16 +231,12 @@ model = "gpt-4o"
 max_tokens = 1024
 
 [bot]
-# 在频道/服务器聊天中触发机器人的前缀
-trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]
-# 私聊消息始终触发机器人
-respond_to_private = true
-# 最大并发 LLM 请求数
-max_concurrent_requests = 4
+trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
+respond_to_private = true       # 私聊消息始终触发机器人
+max_concurrent_requests = 4     # 最大并发 LLM 请求数
 
 [rate_limit]
-# 每个用户的令牌桶限流设置
-requests_per_minute = 10
+requests_per_minute = 10        # 每个用户的令牌桶限流设置
 burst_size = 3
 "#;
 
