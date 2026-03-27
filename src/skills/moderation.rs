@@ -1,6 +1,6 @@
 use crate::adapter::command::{cmd_ban, cmd_kick};
-use anyhow::Result;
 use crate::skills::{ExecutionContext, Skill};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -13,7 +13,8 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     }
 
     // 获取目标的组信息
-    let target_groups = ctx.clients
+    let target_groups = ctx
+        .clients
         .get(&clid)
         .map(|c| c.server_groups.clone())
         .unwrap_or_default();
