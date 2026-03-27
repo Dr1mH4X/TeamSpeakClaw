@@ -96,6 +96,18 @@ impl EventRouter {
             return;
         }
 
+        // 确定回复目标 (targetmode, target)
+        let (reply_mode, reply_target) = if is_private {
+            // 私聊触发始终私聊回复
+            (1u8, event.invoker_id)
+        } else {
+            match self.config.bot.default_reply_mode.as_str() {
+                "channel" => (2, 0),
+                "server" => (3, 0),
+                _ => (1, event.invoker_id),
+            }
+        };
+
         info!(
             "消息接收: {} (clid: {}, uid: {}, content: {})",
             event.invoker_name, event.invoker_id, event.invoker_uid, msg_content
@@ -136,7 +148,7 @@ impl EventRouter {
                     if let Some(content) = response.content {
                         let _ = self
                             .adapter
-                            .send_raw(&cmd_send_text(1, event.invoker_id, &content))
+                            .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
                             .await;
                     }
                     return;
@@ -216,7 +228,7 @@ impl EventRouter {
                         if let Some(content) = final_response.content {
                             let _ = self
                                 .adapter
-                                .send_raw(&cmd_send_text(1, event.invoker_id, &content))
+                                .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
                                 .await;
                         }
                     }
@@ -228,8 +240,8 @@ impl EventRouter {
                 let _ = self
                     .adapter
                     .send_raw(&cmd_send_text(
-                        1,
-                        event.invoker_id,
+                        reply_mode,
+                        reply_target,
                         "Sorry, I encountered an error processing your request.",
                     ))
                     .await;
