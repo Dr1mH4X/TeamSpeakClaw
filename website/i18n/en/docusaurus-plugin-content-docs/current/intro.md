@@ -4,24 +4,30 @@ sidebar_position: 1
 
 # Introduction
 
-TeamSpeakClaw is an LLM-powered TeamSpeak assistant.
+TeamSpeakClaw is an LLM-based (Large Language Model) intelligent assistant for TeamSpeak servers.
 
-It connects to your TeamSpeak server via ServerQuery, allowing users to interact with the server using natural language. Whether it's playing music, managing members, or querying information, you just need to "say" it in the channel, and TSClaw will understand your intent and execute the corresponding command automatically.
+Connecting via ServerQuery, it allows users to interact with the TeamSpeak server using natural language. Whether it's playing music, managing members, or querying information, you simply "say" it in the channel, and TSClaw will understand your intent and execute the corresponding operations automatically. It not only manages the server directly but also coordinates with other plugins (such as TS3AudioBot + NeteaseCloudmusic plugin) to provide a seamless voice server experience.
 
 ## ✨ Features
 
-- **🧠 Natural Language Interaction**: Say goodbye to complex command manuals. Just say "Play Jay Chou's songs" or "Kick that troublemaker out", and Claw will understand and execute.
-- **🛡️ Fine-grained Access Control (RBAC)**: Built-in powerful permission system. You can configure specific skill permissions for different TeamSpeak user groups (e.g., only admins can kick, regular users can only request songs).
+- **🧠 Natural Language Interaction**: Say goodbye to tedious command manuals. Simply say "Play some Jay Chou" or "Kick that troublemaker," and TSClaw will understand and execute.
+- **🛡️ Fine-grained Access Control (RBAC)**: Built-in robust permission system. You can configure specific skill permissions for different TeamSpeak user groups (e.g., allow only admins to kick users, while regular users are limited to requesting songs).
 - **🔌 Flexible Skill System**:
-    - **Music Control**: Seamless integration with TS3AudioBot NetEase Cloud Music plugin, supporting song requests, skipping, and playlist management.
-    - **Server Management**: Supports Kick, Ban, Move users, etc.
-    - **Information Query**: Get online user list, server status, etc.
+    - **Music Control**: Supports two modes — `ts3audiobot` backend (controlling [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via private messages) or `tsbot_backend` (controlling [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API). Features include requesting songs, skipping, searching, volume adjustment, and sound effect settings.
+    - **Server Management**: Supports operations such as Kick, Ban, and moving users.
+    - **Information Query**: Retrieve online user lists, server status, and more.
     - **Extensibility**: Easily write custom Skills to extend the bot's capabilities.
-- **🤖 Broad Model Support**: Compatible with OpenAI interface format, easily connecting to DeepSeek, Ollama, LocalAI, and other large models.
+- **🤖 Broad Model Support**: Compatible with OpenAI-style API formats, allowing easy integration with DeepSeek, ChatGPT, and various other large models.
 
-## 🙏 Credits
+## 🗺️ Roadmap
 
-This project is inspired by or uses code from the following projects:
+- Client-side implementation
+- TS3AudioBot plugin implementation
+
+## 🙏 Acknowledgments
+
+This project is inspired by or utilizes code from the following projects:
 
 - [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)
 - [TS3AudioBot-NetEaseCloudmusic-plugin](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin)
+- [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)

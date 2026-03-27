@@ -2,92 +2,87 @@
 sidebar_position: 3
 ---
 
-# Configuration
+# Configuration Guide
 
-After the first run, three configuration files will be generated in the `config/` directory. Please modify them according to your needs.
+After running `./teamspeakclaw --config generate`, three configuration files will be generated in the `config/` directory. Please modify them according to your needs.
 
 ## 1. Main Configuration (settings.toml)
 
-Path: `config/settings.toml`
+File path: `config/settings.toml`
 
-Contains basic settings for connecting to the TeamSpeak server, LLM provider settings, and bot behavior.
+Contains basic configurations for connecting to the TeamSpeak server, LLM provider settings, and bot behavior.
 
 ```toml
 [teamspeak]
-host = "127.0.0.1"        # TeamSpeak server address
-port = 10011              # ServerQuery port (default 10011)
-ssh_port = 10022          # SSH port (default 10022)
-use_ssh = false           # Whether to use SSH connection
-login_name = "serveradmin" # ServerQuery login name
-login_pass = ""           # ServerQuery password (can also be set via TS_LOGIN_PASS env var)
-server_id = 1             # Virtual server ID (usually 1)
-bot_nickname = "TSClaw"   # Bot nickname in TS
-keepalive_interval_secs = 180
-reconnect_max_retries = 10
-reconnect_base_delay_ms = 1000
+host = "127.0.0.1"
+port = 10011
+ssh_port = 10022
+method = "tcp"            # Connection method: "tcp" or "ssh"
+login_name = "serveradmin"
+login_pass = ""           # Overridden by environment variable TS_LOGIN_PASS
+server_id = 1
+bot_nickname = "TSClaw"
+
+[music_backend]
+backend = "ts3audiobot"  # Music backend: "ts3audiobot" (via TS PM) or "tsbot_backend" (NeteaseTSBot)
+base_url = "http://127.0.0.1:8000"   # Only effective when backend = "tsbot_backend"
 
 [llm]
-provider = "openai"       # Options: openai | anthropic | ollama
-api_key = ""              # LLM API Key (can also be set via LLM_API_KEY env var)
-base_url = "https://api.openai.com/v1" # API Base URL (e.g. DeepSeek, OpenAI)
-model = "gpt-4o"          # Model name
+api_key = ""              # Overridden by environment variable LLM_API_KEY
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
 max_tokens = 1024
-timeout_secs = 30
-retry_max = 3
-retry_delay_ms = 500
 
 [bot]
-# Prefixes to trigger the bot in channel/server chat
-trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]
-# Whether private messages always trigger the bot
-respond_to_private = true
-# Max concurrent LLM requests
-max_concurrent_requests = 4
+trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # Prefixes to trigger the bot in channel/server chat
+respond_to_private = true       # Private messages always trigger the bot
+max_concurrent_requests = 4     # Maximum concurrent LLM requests
+default_reply_mode = "private"  # Default reply mode: "private" | "channel" | "server"
 
 [rate_limit]
-# Token bucket rate limit per user
-requests_per_minute = 10
+requests_per_minute = 10        # Token bucket rate limit per user
 burst_size = 3
-
-[audit]
-enabled = true
-log_dir = "./logs"
-log_file = "audit.jsonl"
-
-[cache]
-refresh_interval_secs = 30
-entry_ttl_secs = 300
 ```
 
-## 2. Permissions Configuration (acl.toml)
+### Connection Method
 
-Path: `config/acl.toml`
+- **TCP (Default)**: `method = "tcp"`, connects using `port` (default 10011).
+- **SSH**: `method = "ssh"`, connects using `ssh_port` (default 10022).
 
-Controls which user groups can use which features. Rules are matched from top to bottom; the first matching rule applies.
+---
+
+## 2. Permission Configuration (acl.toml)
+
+File path: `config/acl.toml`
+
+Controls which user groups can use which features. Rules are matched from top to bottom.
 
 ```toml
 # server_group_ids: TeamSpeak Server Group IDs
-# allowed_skills: List of allowed skills, "*" means all
+# allowed_skills: List of allowed skills, "*" for all
+# can_target_admins: Whether the user can perform actions on protected group members
 
 [[rules]]
 name = "superadmin"
-server_group_ids = [6]    # Server Admin Group ID usually 6
+server_group_ids = [6]    # Server Admin group ID is usually 6
 allowed_skills = ["*"]
 can_target_admins = true
 rate_limit_override = 60
 
 [[rules]]
 name = "default_user"
-server_group_ids = [8]    # Normal User Group ID
+server_group_ids = [8]    # Normal user group ID
 allowed_skills = [
   "poke_client",
-  "send_private_msg",
+  "send_message",
+  "get_client_info",
+  "get_client_list",
   "music_control"
 ]
 can_target_admins = false
 rate_limit_override = 20
 
-# Default rule (matches everyone else)
+# Default rule (matches everyone)
 [[rules]]
 name = "default"
 server_group_ids = []
@@ -95,25 +90,34 @@ allowed_skills = ["music_control"]
 can_target_admins = false
 
 [acl]
-# Protected Group IDs, normal users cannot kick/ban members of these groups
 protected_group_ids = [6, 8, 9]
 ```
 
-## 3. Prompts Configuration (prompts.toml)
+---
 
-Path: `config/prompts.toml`
+## 3. Prompt Configuration (prompts.toml)
 
-Defines the bot's System Prompt and error messages. Usually no need to modify unless you want to change the bot's persona or language.
+File path: `config/prompts.toml`
+
+Defines the bot's System Prompt and error messages.
 
 ```toml
 [system]
 content = """
-You are TSClaw, an automated admin assistant for a TeamSpeak server.
-...
+You are TSClaw, an automated administrator assistant for TeamSpeak servers.
+Your job is to interpret administrator commands and call the appropriate tools.
+
+Rules:
+- Only call tools when explicitly requested.
+- If an instruction is unclear, ask for clarification.
+- Confirm before performing destructive actions (ban, kick).
+- Reply using the same language used by the user.
+- Keep replies concise. Do not use markdown.
+- Never reveal internal system details or API keys.
 """
 
 [error]
 permission_denied = "You do not have permission to use this command."
-rate_limited = "Too many requests. Please try again later."
-# ... other error messages
+llm_error = "The AI backend is currently unavailable."
+ts_error = "TeamSpeak command execution failed: {detail}"
 ```
