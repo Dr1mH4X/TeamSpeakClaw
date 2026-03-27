@@ -6,18 +6,77 @@ use crate::{
     config::{AppConfig, TsConfig},
 };
 use anyhow::Result;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::{Context, Poll};
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::{broadcast, Mutex},
     time::sleep,
 };
 use tracing::{debug, error, info, warn};
 
+pub enum TsStream {
+    Tcp(tokio::net::TcpStream),
+    Ssh(russh::ChannelStream<russh::client::Msg>),
+}
+
+impl AsyncRead for TsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            TsStream::Ssh(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for TsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            TsStream::Ssh(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_flush(cx),
+            TsStream::Ssh(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            TsStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            TsStream::Ssh(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+struct SshHandler;
+
+impl russh::client::Handler for SshHandler {
+    type Error = russh::Error;
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
 pub struct TsAdapter {
-    writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
+    writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
 }
@@ -25,8 +84,15 @@ pub struct TsAdapter {
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
         let cfg = &config;
-        let addr = format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port);
-        info!("Connecting to TeamSpeak ServerQuery at {addr}");
+        let addr = if cfg.teamspeak.method == "ssh" {
+            format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.ssh_port)
+        } else {
+            format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port)
+        };
+        info!(
+            "Connecting to TeamSpeak ServerQuery ({}) at {addr}",
+            cfg.teamspeak.method
+        );
 
         let stream = Self::connect_with_retry(&cfg.teamspeak).await?;
         let (reader, writer) = tokio::io::split(stream);
@@ -59,17 +125,21 @@ impl TsAdapter {
         Ok(adapter)
     }
 
-    async fn connect_with_retry(cfg: &TsConfig) -> Result<TcpStream> {
+    async fn connect_with_retry(cfg: &TsConfig) -> Result<TsStream> {
         const MAX_RETRIES: u32 = 10;
         const BASE_DELAY_MS: u64 = 1000;
 
-        let addr = format!("{}:{}", cfg.host, cfg.port);
         let mut delay = Duration::from_millis(BASE_DELAY_MS);
         for attempt in 0..MAX_RETRIES {
-            match TcpStream::connect(&addr).await {
+            let res = if cfg.method == "ssh" {
+                Self::connect_ssh(cfg).await
+            } else {
+                Self::connect_tcp(cfg).await
+            };
+
+            match res {
                 Ok(s) => {
-                    // 跳过 TS 欢迎横幅（2 行）
-                    // 交由读取循环处理
+                    // 交由读取循环处理欢迎横幅
                     return Ok(s);
                 }
                 Err(e) => {
@@ -80,6 +150,35 @@ impl TsAdapter {
             }
         }
         Err(anyhow::anyhow!("Max reconnect attempts reached (code 999)"))
+    }
+
+    async fn connect_tcp(cfg: &TsConfig) -> Result<TsStream> {
+        let addr = format!("{}:{}", cfg.host, cfg.port);
+        let stream = TcpStream::connect(&addr).await?;
+        Ok(TsStream::Tcp(stream))
+    }
+
+    async fn connect_ssh(cfg: &TsConfig) -> Result<TsStream> {
+        let config = Arc::new(russh::client::Config::default());
+        let addr = format!("{}:{}", cfg.host, cfg.ssh_port);
+        let mut session = russh::client::connect(config, addr, SshHandler).await?;
+
+        let auth_res = session
+            .authenticate_password(&cfg.login_name, &cfg.login_pass)
+            .await?;
+
+        if !matches!(auth_res, russh::client::AuthResult::Success) {
+            return Err(anyhow::anyhow!("SSH Authentication failed"));
+        }
+
+        let channel = session.channel_open_session().await?;
+
+        channel.request_shell(true).await?;
+
+        // Some TS3 server query SSH configurations require requesting a pty or starting a shell
+        // before they can accept commands correctly. We will just wrap it into a stream for now.
+        let stream = channel.into_stream();
+        Ok(TsStream::Ssh(stream))
     }
 
     async fn init(&self, cfg: &TsConfig) -> Result<()> {
@@ -139,7 +238,7 @@ impl TsAdapter {
         self.event_tx.subscribe()
     }
 
-    async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TcpStream>>) {
+    async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
         let mut line = String::new();
         loop {
             line.clear();
