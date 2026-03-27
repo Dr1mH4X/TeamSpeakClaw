@@ -161,6 +161,8 @@ impl Skill for MusicControl {
                 "fx_pan": { "type": "number", "description": "Stereo pan (-1.0 ~ 1.0)." },
                 "fx_bass_db": { "type": "number", "description": "Bass boost in dB." },
                 "fx_reverb_mix": { "type": "number", "description": "Reverb mix 0.0 ~ 1.0." },
+                // search
+                "limit": { "type": "integer", "description": "Search result limit for 'search' action." },
                 // TS3AudioBot 兼容参数
                 "value": {
                     "type": "string",
@@ -323,7 +325,7 @@ async fn execute_ts3audiobot(
 
     // 通用 action 映射到 TS3AudioBot 命令，方便 LLM 统一调用
     let bot_cmd = match action {
-        "next" | "ts_next" => "!yun next".to_string(),
+        "next" => "!yun next".to_string(),
         "ts_login" => "!yun login".to_string(),
         "play" | "ts_play" => format!("!yun play {value}"),
         "ts_add" => format!("!yun add {value}"),
@@ -347,6 +349,8 @@ async fn execute_ts3audiobot(
             };
             format!("!yun mode {mode_num}")
         }
+        "pause" => "!yun pause".to_string(),
+        "skip" => "!yun next".to_string(),
         // 无对应实现的操作
         other => {
             return Err(anyhow::anyhow!(
