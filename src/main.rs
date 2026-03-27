@@ -15,8 +15,8 @@ mod skills;
 use crate::cli::Args;
 use crate::skills::SkillRegistry;
 use crate::{
-    adapter::TsAdapter, config::AppConfig, llm::LlmEngine,
-    permission::PermissionGate, router::EventRouter,
+    adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
+    router::EventRouter,
 };
 
 #[tokio::main]
@@ -51,19 +51,10 @@ async fn main() -> Result<()> {
 
     // 5. 连接服务
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter
-        .set_nickname(&config.teamspeak.bot_nickname)
-        .await?;
+    adapter.set_nickname(&config.teamspeak.bot_nickname).await?;
 
     // 6. 事件路由循环
-    let router = EventRouter::new(
-        config,
-        prompts,
-        adapter.clone(),
-        gate,
-        llm,
-        registry,
-    );
+    let router = EventRouter::new(config, prompts, adapter.clone(), gate, llm, registry);
 
     info!("Bot ready. Listening for events.");
 
@@ -184,10 +175,7 @@ mod daily_file {
             let today = Local::now().format("%Y-%m-%d").to_string();
             if inner.date_key != today || inner.file.is_none() {
                 let path = Self::file_path(dir, prefix, &today);
-                let file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)?;
+                let file = OpenOptions::new().create(true).append(true).open(path)?;
                 inner.file = Some(file);
                 inner.date_key = today;
             }
@@ -197,17 +185,19 @@ mod daily_file {
 
     impl Write for DailyFileAppender {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut inner = self.inner.lock().map_err(|_| {
-                io::Error::new(io::ErrorKind::Other, "日志锁被污染")
-            })?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
             Self::ensure_open(&mut inner, &self.dir, &self.prefix)?;
             inner.file.as_mut().unwrap().write(buf)
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            let mut inner = self.inner.lock().map_err(|_| {
-                io::Error::new(io::ErrorKind::Other, "日志锁被污染")
-            })?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
             if let Some(ref mut file) = inner.file {
                 file.flush()?;
             }
