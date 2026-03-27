@@ -69,7 +69,6 @@ impl Default for MusicBackendConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LlmConfig {
-    pub provider: String,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
@@ -79,7 +78,6 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: "openai".to_string(),
             api_key: "".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
@@ -224,7 +222,6 @@ backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信�
 base_url = "http://127.0.0.1:8000"   # 仅 backend = "tsbot_backend" 时生效
 
 [llm]
-provider = "openai"       # 可选: openai | anthropic | ollama
 api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
