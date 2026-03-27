@@ -169,3 +169,4 @@ TeamSpeakClaw 支持两种音乐控制模式：
 
 - [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)
 - [TS3AudioBot-NetEaseCloudmusic-plugin](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin)
+- [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)
