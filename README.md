@@ -66,6 +66,9 @@ model = "gpt-4o"        # 使用的模型名称
 [music_backend]
 backend = "ts3audiobot"  # 或 "tsbot_backend"
 base_url = "http://127.0.0.1:8009"  # HTTP 后端地址 (仅 tsbot_backend 使用)
+
+[bot]
+default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播).仅当触发消息来自频道或广播时生效；私聊触发始终私聊回复
 ```
 
 ### `acl.toml` (权限控制)
@@ -82,7 +85,7 @@ can_target_admins = true # 允许对其他管理员操作
 [[rules]]
 name = "default"
 server_group_ids = []   # 空数组代表匹配所有人
-allowed_skills = ["music_control", "list_clients"] # 仅允许点歌和看列表
+allowed_skills = ["send_message", "music_control", "get_client_list"] # 仅允许发消息、点歌和看列表
 ```
 
 ### 🤖 LLM 接入指南 (LLM Setup)
