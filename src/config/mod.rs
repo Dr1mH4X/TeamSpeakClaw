@@ -91,6 +91,7 @@ pub struct BotConfig {
     pub trigger_prefixes: Vec<String>,
     pub respond_to_private: bool,
     pub max_concurrent_requests: u32,
+    pub default_reply_mode: String,
 }
 
 impl Default for BotConfig {
@@ -103,6 +104,7 @@ impl Default for BotConfig {
             ],
             respond_to_private: true,
             max_concurrent_requests: 4,
+            default_reply_mode: "private".to_string(),
         }
     }
 }
@@ -231,6 +233,7 @@ max_tokens = 1024
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
 respond_to_private = true       # 私聊消息始终触发机器人
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
+default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)，仅频道/广播触发时生效
 
 [rate_limit]
 requests_per_minute = 10        # 每个用户的令牌桶限流设置
@@ -255,9 +258,7 @@ name = "default_user"
 server_group_ids = [8]
 allowed_skills = [
   "poke_client",
-  "send_private_msg",
-  "send_channel_msg",
-  "send_server_msg",
+  "send_message",
   "get_client_info",
   "get_client_list",
   "get_server_info",
