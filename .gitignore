@@ -23,6 +23,27 @@ skills-lock.json
 # 日志
 logs/*.*
 
-
 # Added by cargo
 /target
+
+# Dependencies
+website/node_modules/
+
+# Production
+website/build/
+
+# Generated files
+website/.docusaurus
+website/.cache-loader
+website/.temp
+
+# Misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
