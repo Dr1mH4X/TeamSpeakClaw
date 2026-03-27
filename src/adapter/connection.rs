@@ -26,11 +26,17 @@ pub enum TsMethod {
     Ssh,
 }
 
-impl From<&str> for TsMethod {
-    fn from(s: &str) -> Self {
+impl TryFrom<&str> for TsMethod {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s.to_lowercase().as_str() {
-            "ssh" => TsMethod::Ssh,
-            _ => TsMethod::Tcp,
+            "ssh" => Ok(TsMethod::Ssh),
+            "tcp" => Ok(TsMethod::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported connection method: {}. Only 'tcp' or 'ssh' are allowed.",
+                s
+            )),
         }
     }
 }
@@ -93,7 +99,10 @@ impl russh::client::Handler for SshHandler {
     ) -> Result<bool, Self::Error> {
         let key_dir = PathBuf::from("config");
         if !key_dir.exists() {
-            let _ = std::fs::create_dir_all(&key_dir);
+            if let Err(e) = tokio::fs::create_dir_all(&key_dir).await {
+                error!("Failed to create config directory: {}", e);
+                return Ok(false);
+            }
         }
 
         let key_path = key_dir.join(format!("{}_{}.pub", self.host, self.port));
@@ -107,12 +116,15 @@ impl russh::client::Handler for SshHandler {
         };
 
         if key_path.exists() {
-            match std::fs::read_to_string(&key_path) {
+            match tokio::fs::read_to_string(&key_path).await {
                 Ok(saved_key) => {
                     if saved_key.trim() == current_key.trim() {
                         Ok(true)
                     } else {
-                        error!("SSH Host key mismatch for {}:{}", self.host, self.port);
+                        error!(
+                            "SSH Host key mismatch for {}:{}! Potential MITM attack.",
+                            self.host, self.port
+                        );
                         Ok(false)
                     }
                 }
@@ -122,7 +134,12 @@ impl russh::client::Handler for SshHandler {
                 }
             }
         } else {
-            match std::fs::write(&key_path, &current_key) {
+            info!(
+                "Trusting new SSH host key for {}:{} and saving to {:?}",
+                self.host, self.port, key_path
+            );
+
+            match tokio::fs::write(&key_path, current_key.trim()).await {
                 Ok(_) => Ok(true),
                 Err(e) => {
                     error!("Failed to save SSH public key: {}", e);
@@ -142,7 +159,8 @@ pub struct TsAdapter {
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
         let cfg = &config.teamspeak;
-        let method = TsMethod::from(cfg.method.as_str());
+        let method = TsMethod::try_from(cfg.method.as_str())
+            .context("Invalid connection method in config")?;
 
         let addr = match method {
             TsMethod::Ssh => format!("{}:{}", cfg.host, cfg.ssh_port),
@@ -239,7 +257,6 @@ impl TsAdapter {
     }
 
     async fn init(&self, cfg: &TsConfig) -> Result<()> {
-        // 等待一小段时间，让欢迎横幅先被处理
         sleep(Duration::from_millis(500)).await;
 
         self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass))
