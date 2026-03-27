@@ -1,0 +1,42 @@
+{
+  "link.title.Docs": {
+    "message": "Docs",
+    "description": "The title of the footer links column with title=Docs"
+  },
+  "link.title.Community": {
+    "message": "Community",
+    "description": "The title of the footer links column with title=Community"
+  },
+  "link.title.More": {
+    "message": "More",
+    "description": "The title of the footer links column with title=More"
+  },
+  "link.item.label.快速开始": {
+    "message": "Quick Start",
+    "description": "The label of footer link with label=快速开始"
+  },
+  "link.item.label.下载": {
+    "message": "Download",
+    "description": "The label of footer link with label=下载"
+  },
+  "link.item.label.配置": {
+    "message": "Configuration",
+    "description": "The label of footer link with label=配置"
+  },
+  "link.item.label.GitHub Issues": {
+    "message": "GitHub Issues",
+    "description": "The label of footer link with label=GitHub Issues"
+  },
+  "link.item.label.Blog": {
+    "message": "Blog",
+    "description": "The label of footer link with label=Blog"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub",
+    "description": "The label of footer link with label=GitHub"
+  },
+  "copyright": {
+    "message": "Copyright © 2026 TeamSpeakClaw. Built with Docusaurus.",
+    "description": "The footer copyright"
+  }
+}
