@@ -1,6 +1,6 @@
 use crate::{
     adapter::{
-        command::{cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
+        command::{check_ts_error, cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
         event::{parse_events, TsEvent},
     },
     config::{AppConfig, TsConfig},
@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
-    sync::{broadcast, Mutex},
+    sync::{broadcast, oneshot, Mutex},
     time::sleep,
 };
 use tracing::{debug, error, info, warn};
@@ -154,6 +154,7 @@ pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
+    query_tx: Mutex<Option<oneshot::Sender<String>>>,
 }
 
 impl TsAdapter {
@@ -179,6 +180,7 @@ impl TsAdapter {
             writer: Mutex::new(writer),
             event_tx: tx,
             bot_clid: AtomicU32::new(0),
+            query_tx: Mutex::new(None),
         });
 
         let adapter_clone = adapter.clone();
@@ -308,12 +310,38 @@ impl TsAdapter {
         Ok(())
     }
 
+    /// 发送命令并等待服务器响应（数据行 + error 行）。
+    pub async fn send_query(&self, cmd: &str) -> Result<String> {
+        if cmd.starts_with("login ") {
+            info!(">> login [REDACTED]");
+        } else {
+            info!(">> {cmd}");
+        }
+
+        let (tx, rx) = oneshot::channel::<String>();
+        {
+            let mut q = self.query_tx.lock().await;
+            *q = Some(tx);
+        }
+
+        {
+            let mut w = self.writer.lock().await;
+            w.write_all(format!("{cmd}\n").as_bytes()).await?;
+            w.flush().await?;
+        }
+
+        let response = rx.await.map_err(|_| anyhow::anyhow!("Query response channel closed"))?;
+        check_ts_error(&response)?;
+        Ok(response)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<TsEvent> {
         self.event_tx.subscribe()
     }
 
     async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
         let mut line = String::new();
+        let mut result_lines: Vec<String> = Vec::new();
         loop {
             line.clear();
             match reader.read_line(&mut line).await {
@@ -345,10 +373,27 @@ impl TsAdapter {
                         }
                     }
 
+                    // 广播事件通知
+                    let is_event = trimmed.starts_with("notify") || trimmed.starts_with("clid=");
                     for event in parse_events(trimmed) {
                         if let Err(e) = self.event_tx.send(event) {
                             debug!("No active subscribers for event: {e}");
                         }
+                    }
+
+                    // 收集查询响应数据行（非事件、非空行）
+                    if !is_event {
+                        result_lines.push(trimmed.to_string());
+                    }
+
+                    // error 行标志着当前查询响应结束
+                    if trimmed.starts_with("error id=") {
+                        let mut q = self.query_tx.lock().await;
+                        if let Some(tx) = q.take() {
+                            let response = result_lines.join("\n");
+                            let _ = tx.send(response);
+                        }
+                        result_lines.clear();
                     }
                 }
                 Err(e) => {
