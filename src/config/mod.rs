@@ -257,8 +257,9 @@ allowed_skills = [
   "poke_client",
   "send_private_msg",
   "send_channel_msg",
+  "send_server_msg",
   "get_client_info",
-  "list_clients",
+  "get_client_list",
   "get_server_info",
   "music_control"
 ]
