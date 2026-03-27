@@ -173,6 +173,7 @@ impl EventRouter {
                             caller_id: event.invoker_id,
                             caller_groups: groups.clone(),
                             gate: self.gate.clone(),
+                            config: self.config.clone(),
                         };
                         match skill.execute(call.arguments.clone(), &ctx).await {
                             Ok(val) => {
