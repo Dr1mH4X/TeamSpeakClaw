@@ -5,7 +5,8 @@ use crate::{
     },
     config::{AppConfig, TsConfig},
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
@@ -17,6 +18,22 @@ use tokio::{
     time::sleep,
 };
 use tracing::{debug, error, info, warn};
+
+/// 支持的连接方法枚举
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsMethod {
+    Tcp,
+    Ssh,
+}
+
+impl From<&str> for TsMethod {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "ssh" => TsMethod::Ssh,
+            _ => TsMethod::Tcp,
+        }
+    }
+}
 
 pub enum TsStream {
     Tcp(tokio::net::TcpStream),
@@ -63,15 +80,56 @@ impl AsyncWrite for TsStream {
     }
 }
 
-struct SshHandler;
+struct SshHandler {
+    host: String,
+    port: u16,
+}
 
 impl russh::client::Handler for SshHandler {
     type Error = russh::Error;
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        let key_dir = PathBuf::from("config");
+        if !key_dir.exists() {
+            let _ = std::fs::create_dir_all(&key_dir);
+        }
+
+        let key_path = key_dir.join(format!("{}_{}.pub", self.host, self.port));
+
+        let current_key = match server_public_key.to_openssh() {
+            Ok(key) => key,
+            Err(e) => {
+                error!("Failed to serialize server public key: {}", e);
+                return Ok(false);
+            }
+        };
+
+        if key_path.exists() {
+            match std::fs::read_to_string(&key_path) {
+                Ok(saved_key) => {
+                    if saved_key.trim() == current_key.trim() {
+                        Ok(true)
+                    } else {
+                        error!("SSH Host key mismatch for {}:{}", self.host, self.port);
+                        Ok(false)
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to read known hosts key: {}", e);
+                    Ok(false)
+                }
+            }
+        } else {
+            match std::fs::write(&key_path, &current_key) {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    error!("Failed to save SSH public key: {}", e);
+                    Ok(false)
+                }
+            }
+        }
     }
 }
 
@@ -83,18 +141,19 @@ pub struct TsAdapter {
 
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
-        let cfg = &config;
-        let addr = if cfg.teamspeak.method == "ssh" {
-            format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.ssh_port)
-        } else {
-            format!("{}:{}", cfg.teamspeak.host, cfg.teamspeak.port)
+        let cfg = &config.teamspeak;
+        let method = TsMethod::from(cfg.method.as_str());
+
+        let addr = match method {
+            TsMethod::Ssh => format!("{}:{}", cfg.host, cfg.ssh_port),
+            TsMethod::Tcp => format!("{}:{}", cfg.host, cfg.port),
         };
         info!(
-            "Connecting to TeamSpeak ServerQuery ({}) at {addr}",
-            cfg.teamspeak.method
+            "Connecting to TeamSpeak ServerQuery ({:?}) at {addr}",
+            method
         );
 
-        let stream = Self::connect_with_retry(&cfg.teamspeak).await?;
+        let stream = Self::connect_with_retry(cfg, method).await?;
         let (reader, writer) = tokio::io::split(stream);
         let (tx, _) = broadcast::channel::<TsEvent>(256);
 
@@ -104,19 +163,16 @@ impl TsAdapter {
             bot_clid: AtomicU32::new(0),
         });
 
-        // 启动读取任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.reader_loop(BufReader::new(reader)).await;
         });
 
-        // 初始化：登录、选择虚拟服务器、注册事件
-        if let Err(e) = adapter.init(&cfg.teamspeak).await {
+        if let Err(e) = adapter.init(cfg).await {
             error!("Failed to initialize TeamSpeak session: {e}");
             return Err(e);
         }
 
-        // 启动保活任务
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.keepalive_loop().await;
@@ -125,23 +181,19 @@ impl TsAdapter {
         Ok(adapter)
     }
 
-    async fn connect_with_retry(cfg: &TsConfig) -> Result<TsStream> {
+    async fn connect_with_retry(cfg: &TsConfig, method: TsMethod) -> Result<TsStream> {
         const MAX_RETRIES: u32 = 10;
         const BASE_DELAY_MS: u64 = 1000;
 
         let mut delay = Duration::from_millis(BASE_DELAY_MS);
         for attempt in 0..MAX_RETRIES {
-            let res = if cfg.method == "ssh" {
-                Self::connect_ssh(cfg).await
-            } else {
-                Self::connect_tcp(cfg).await
+            let res = match method {
+                TsMethod::Ssh => Self::connect_ssh(cfg).await,
+                TsMethod::Tcp => Self::connect_tcp(cfg).await,
             };
 
             match res {
-                Ok(s) => {
-                    // 交由读取循环处理欢迎横幅
-                    return Ok(s);
-                }
+                Ok(s) => return Ok(s),
                 Err(e) => {
                     warn!("Connect attempt {attempt} failed: {e}. Retrying in {delay:?}");
                     sleep(delay).await;
@@ -161,7 +213,15 @@ impl TsAdapter {
     async fn connect_ssh(cfg: &TsConfig) -> Result<TsStream> {
         let config = Arc::new(russh::client::Config::default());
         let addr = format!("{}:{}", cfg.host, cfg.ssh_port);
-        let mut session = russh::client::connect(config, addr, SshHandler).await?;
+
+        let handler = SshHandler {
+            host: cfg.host.clone(),
+            port: cfg.ssh_port,
+        };
+
+        let mut session = russh::client::connect(config, addr, handler)
+            .await
+            .context("Failed to establish SSH connection")?;
 
         let auth_res = session
             .authenticate_password(&cfg.login_name, &cfg.login_pass)
@@ -172,11 +232,8 @@ impl TsAdapter {
         }
 
         let channel = session.channel_open_session().await?;
-
         channel.request_shell(true).await?;
 
-        // Some TS3 server query SSH configurations require requesting a pty or starting a shell
-        // before they can accept commands correctly. We will just wrap it into a stream for now.
         let stream = channel.into_stream();
         Ok(TsStream::Ssh(stream))
     }
