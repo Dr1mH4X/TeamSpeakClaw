@@ -8,6 +8,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
@@ -22,10 +23,11 @@ pub struct EventRouter {
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
     adapter: Arc<TsAdapter>,
-    pub clients: DashMap<u32, ClientInfo>,
+    pub clients: Arc<DashMap<u32, ClientInfo>>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl EventRouter {
@@ -37,14 +39,28 @@ impl EventRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
     ) -> Self {
+        Self::new_with_clients(config, prompts, adapter, gate, llm, registry, Arc::new(DashMap::new()))
+    }
+
+    pub fn new_with_clients(
+        config: Arc<AppConfig>,
+        prompts: Arc<PromptsConfig>,
+        adapter: Arc<TsAdapter>,
+        gate: Arc<PermissionGate>,
+        llm: Arc<LlmEngine>,
+        registry: Arc<SkillRegistry>,
+        clients: Arc<DashMap<u32, ClientInfo>>,
+    ) -> Self {
+        let max_concurrent = config.bot.max_concurrent_requests;
         Self {
             config,
             prompts,
             adapter,
-            clients: DashMap::new(),
+            clients,
             gate,
             llm,
             registry,
+            semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
     }
 
@@ -54,7 +70,27 @@ impl EventRouter {
         while let Ok(event) = rx.recv().await {
             match event {
                 TsEvent::TextMessage(msg) => {
-                    self.handle_message(msg).await;
+                    let config = self.config.clone();
+                    let prompts = self.prompts.clone();
+                    let adapter = self.adapter.clone();
+                    let clients = self.clients.clone();
+                    let gate = self.gate.clone();
+                    let llm = self.llm.clone();
+                    let registry = self.registry.clone();
+                    let semaphore = self.semaphore.clone();
+
+                    tokio::spawn(async move {
+                        let _permit = match semaphore.acquire().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                error!("Failed to acquire semaphore: {}", e);
+                                return;
+                            }
+                        };
+
+                        let router = Self::new_with_clients(config, prompts, adapter, gate, llm, registry, clients);
+                        router.handle_message(msg).await;
+                    });
                 }
                 TsEvent::ClientEnterView(e) => {
                     self.clients.insert(
