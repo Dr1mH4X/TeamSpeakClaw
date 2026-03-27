@@ -153,19 +153,6 @@ fn edit_config() -> anyhow::Result<()> {
         .default(true)
         .interact()?
     {
-        let providers = vec!["openai", "anthropic", "ollama"];
-        let default_idx = providers
-            .iter()
-            .position(|&p| p == config.llm.provider)
-            .unwrap_or(0);
-
-        let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("LLM Provider")
-            .default(default_idx)
-            .items(&providers)
-            .interact()?;
-        config.llm.provider = providers[selection].to_string();
-
         config.llm.base_url = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Base URL")
             .default(config.llm.base_url)
