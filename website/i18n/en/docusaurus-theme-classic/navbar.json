@@ -10,5 +10,13 @@
   "item.label.博客": {
     "message": "Blog",
     "description": "Navbar item with label 博客"
+  },
+  "logo.alt": {
+    "message": "TeamSpeakClaw Logo",
+    "description": "The alt text of navbar logo"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub",
+    "description": "Navbar item with label GitHub"
   }
 }

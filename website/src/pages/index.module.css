@@ -92,3 +92,51 @@
     font-size: 0.95rem;
     line-height: 1.8;
 }
+
+[data-theme='light'] .heroBanner {
+    background-color: #f8f9fa;
+    color: #1a1a2e;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+[data-theme='light'] .heroBanner::before {
+    background-image:
+        linear-gradient(#e0e0e0 1px, transparent 1px),
+        linear-gradient(90deg, #e0e0e0 1px, transparent 1px);
+}
+
+[data-theme='light'] .hero__title {
+    color: #1a1a2e;
+}
+
+[data-theme='light'] .hero__subtitle {
+    color: #666;
+}
+
+[data-theme='light'] .getStartedButton {
+    background-color: #1a1a2e;
+    color: #fff !important;
+    border: 1px solid #1a1a2e;
+}
+
+[data-theme='light'] .getStartedButton:hover {
+    background-color: transparent;
+    color: #1a1a2e !important;
+}
+
+[data-theme='light'] .featuresSection {
+    background-color: #fff;
+    color: #1a1a2e;
+}
+
+[data-theme='light'] .featureCard {
+    border: 1px solid #e0e0e0;
+}
+
+[data-theme='light'] .featureCard:hover {
+    border-color: #1a1a2e;
+}
+
+[data-theme='light'] .featureCardDesc {
+    color: #555;
+}
