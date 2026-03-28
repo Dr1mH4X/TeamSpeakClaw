@@ -45,7 +45,60 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 
 详细配置说明请参考 [配置指南](/docs/configuration)。
 
-## 5. 启动服务
+## 5. Docker 部署（推荐）
+
+使用 Docker 部署是最简单的方式，无需手动安装依赖。
+
+### 使用 Docker Compose（推荐）
+
+1. 创建项目目录并下载配置文件：
+
+```bash
+mkdir teamspeakclaw && cd teamspeakclaw
+curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/.env.example
+mv .env.example .env
+```
+
+2. 编辑配置文件：
+
+在 `config/settings.toml` 中填入您的 TeamSpeak 和 LLM 配置：
+
+3. 启动服务：
+
+```bash
+docker compose up -d
+```
+
+4. 查看日志：
+
+```bash
+docker compose logs -f
+```
+
+### 使用 Docker 命令
+
+```bash
+# 拉取最新镜像
+docker pull ghcr.io/dr1mh4x/teamspeakclaw:latest
+
+# 创建目录
+mkdir -p config logs
+
+# 生成配置文件
+docker run --rm -v ./config:/app/config ghcr.io/dr1mh4x/teamspeakclaw --config generate
+
+# 编辑配置文件后运行容器
+docker run -d \
+  --name teamspeakclaw \
+  --restart unless-stopped \
+  -v ./config:/app/config:ro \
+  -v ./logs:/app/logs \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/dr1mh4x/teamspeakclaw:latest
+```
+
+## 6. 启动服务（传统方式）
 
 配置完成后，直接运行程序：
 
