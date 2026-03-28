@@ -1,9 +1,11 @@
-FROM alpine:3.19
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --create-home --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 
