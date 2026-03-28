@@ -1,0 +1,33 @@
+# Rust构建产物
+target/
+
+# 日志文件
+logs/
+
+# 网站文件
+website/
+
+# Git和版本控制
+.git/
+.github/
+
+# 编辑器和IDE配置
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境文件
+.env
+.env.*
+
+# 敏感配置
+config/secrets.toml
+
+# 其他
+.agents/
+.claude/
+*.md
+!README.md
