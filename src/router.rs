@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
@@ -67,17 +67,39 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
-        let snapshot = self.adapter.fetch_client_snapshot().await?;
-        let snapshot_count = snapshot.len();
-        for client in snapshot {
-            self.cache_client(
-                client.clid,
-                client.cldbid,
-                client.client_nickname,
-                client.client_server_groups,
-            );
+        let snapshot_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.adapter.fetch_client_snapshot(),
+        )
+        .await;
+
+        match snapshot_result {
+            Ok(Ok(snapshot)) => {
+                let snapshot_count = snapshot.len();
+                for client in snapshot {
+                    self.cache_client(
+                        client.clid,
+                        client.cldbid,
+                        client.client_nickname,
+                        client.client_server_groups,
+                    );
+                }
+                info!(
+                    "Prewarmed client cache with {} online clients",
+                    snapshot_count
+                );
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    "Failed to prewarm client cache from snapshot, continuing without cache prewarm: {err}"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out while prewarming client cache from snapshot, continuing without cache prewarm"
+                );
+            }
         }
-        info!("Prewarmed client cache with {} online clients", snapshot_count);
 
         while let Ok(event) = rx.recv().await {
             match event {
