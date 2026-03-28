@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
 
     // 3. 初始化配置与日志
     let cfg = AppConfig::load("config/settings.toml")?;
-    let _guard = init_tracing(&args.log_level);
+    let _guard = init_tracing(&args.log_level, &cfg.logging.file_level);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
@@ -102,14 +102,14 @@ fn print_banner() {
     println!("{:-<86}", "");
 }
 
-fn init_tracing(console_level: &str) -> WorkerGuard {
+fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     use std::path::PathBuf;
     use tracing_subscriber::{
         fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
 
-    let console_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(console_level));
+    let console_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{console_level},russh::client=off,russh=off")));
 
     let console_layer = fmt::layer()
         .with_target(true)
@@ -127,7 +127,7 @@ fn init_tracing(console_level: &str) -> WorkerGuard {
     let file_appender = daily_file::DailyFileAppender::new(log_dir, "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let file_filter = EnvFilter::new("trace");
+    let file_filter = EnvFilter::new(file_level);
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
