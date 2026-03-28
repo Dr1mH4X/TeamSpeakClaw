@@ -157,6 +157,7 @@ pub struct TsAdapter {
     query_tx: Mutex<Option<oneshot::Sender<String>>>,
     query_active: AtomicBool,
     include_event_lines_active: AtomicBool,
+    query_lock: Mutex<()>,
 }
 
 impl TsAdapter {
@@ -185,6 +186,7 @@ impl TsAdapter {
             query_tx: Mutex::new(None),
             query_active: AtomicBool::new(false),
             include_event_lines_active: AtomicBool::new(false),
+            query_lock: Mutex::new(()),
         });
 
         let adapter_clone = adapter.clone();
@@ -335,6 +337,8 @@ impl TsAdapter {
     }
 
     async fn send_query_internal(&self, cmd: &str, include_event_lines: bool) -> Result<String> {
+        let _guard = self.query_lock.lock().await;
+
         if cmd.starts_with("login ") {
             info!(">> login [REDACTED]");
         } else {
