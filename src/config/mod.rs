@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
     pub music_backend: MusicBackendConfig,
+    pub logging: LogConfig,
 }
 
 impl Default for AppConfig {
@@ -19,6 +20,20 @@ impl Default for AppConfig {
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
             music_backend: MusicBackendConfig::default(),
+            logging: LogConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LogConfig {
+    pub file_level: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            file_level: "debug".to_string(),
         }
     }
 }
@@ -144,6 +159,7 @@ impl Default for AclConfig {
 pub struct AclRule {
     pub name: String,
     pub server_group_ids: Vec<u32>,
+    pub channel_group_ids: Vec<u32>,
     pub allowed_skills: Vec<String>,
     pub can_target_admins: bool,
     pub rate_limit_override: Option<u32>,
