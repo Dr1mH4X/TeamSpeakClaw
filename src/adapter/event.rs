@@ -28,6 +28,7 @@ pub struct ClientEnterEvent {
     pub cldbid: u32,
     pub client_nickname: String,
     pub client_server_groups: Vec<u32>,
+    pub client_channel_group_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -102,12 +103,16 @@ fn parse_client_enter(line: &str) -> TsEvent {
         .split(',')
         .filter_map(|s| s.parse().ok())
         .collect();
+    let client_channel_group_id = kv(line, "client_channel_group_id")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     TsEvent::ClientEnterView(ClientEnterEvent {
         clid,
         cldbid,
         client_nickname,
         client_server_groups: groups,
+        client_channel_group_id,
     })
 }
 

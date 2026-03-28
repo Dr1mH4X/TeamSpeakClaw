@@ -384,10 +384,14 @@ impl TsAdapter {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    info!("<< {trimmed}");
+                    debug!("<< {trimmed}");
 
-                    if trimmed.starts_with("error id=") && !trimmed.contains("id=0") {
-                        error!("TS3 Error: {trimmed}");
+                    if trimmed.starts_with("error id=") {
+                        if trimmed.contains("id=0") {
+                            debug!("<< {trimmed}");
+                        } else {
+                            error!("TS3 Error: {trimmed}");
+                        }
                     }
 
                     // 解析 whoami 响应以获取我们自己的 client_id

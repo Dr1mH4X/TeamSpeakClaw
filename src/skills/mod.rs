@@ -18,6 +18,7 @@ pub struct ExecutionContext<'a> {
     pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
     pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
 }

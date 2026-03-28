@@ -17,6 +17,7 @@ pub struct ClientInfo {
     pub cldbid: u32,
     pub nickname: String,
     pub server_groups: Vec<u32>,
+    pub channel_group_id: u32,
 }
 
 pub struct EventRouter {
@@ -82,6 +83,7 @@ impl EventRouter {
                         client.cldbid,
                         client.client_nickname,
                         client.client_server_groups,
+                        client.client_channel_group_id,
                     );
                 }
                 info!(
@@ -127,7 +129,13 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
-                    self.cache_client(e.clid, e.cldbid, e.client_nickname, e.client_server_groups);
+                    self.cache_client(
+                        e.clid,
+                        e.cldbid,
+                        e.client_nickname,
+                        e.client_server_groups,
+                        e.client_channel_group_id,
+                    );
                 }
                 TsEvent::ClientLeftView(e) => {
                     self.clients.remove(&e.clid);
@@ -138,7 +146,14 @@ impl EventRouter {
         Ok(())
     }
 
-    fn cache_client(&self, clid: u32, cldbid: u32, nickname: String, server_groups: Vec<u32>) {
+    fn cache_client(
+        &self,
+        clid: u32,
+        cldbid: u32,
+        nickname: String,
+        server_groups: Vec<u32>,
+        channel_group_id: u32,
+    ) {
         self.clients.insert(
             clid,
             ClientInfo {
@@ -146,6 +161,7 @@ impl EventRouter {
                 cldbid,
                 nickname,
                 server_groups,
+                channel_group_id,
             },
         );
     }
@@ -187,21 +203,21 @@ impl EventRouter {
             event.invoker_name, event.invoker_id, event.invoker_uid, msg_content
         );
 
-        let groups = if let Some(client) = self.clients.get(&event.invoker_id) {
-            client.server_groups.clone()
+        let (groups, channel_group_id) = if let Some(client) = self.clients.get(&event.invoker_id) {
+            (client.server_groups.clone(), client.channel_group_id)
         } else {
             debug!(
                 "Client {} not in store, assuming default permissions",
                 event.invoker_id
             );
-            vec![]
+            (vec![], 0)
         };
 
         // 1. 准备上下文
         let system_prompt = &self.prompts.system.content;
         let user_ctx = format!(
-            "User: {} (clid: {}, groups: {:?})",
-            event.invoker_name, event.invoker_id, groups
+            "User: {} (clid: {}, groups: {:?}, channel_group: {})",
+            event.invoker_name, event.invoker_id, groups, channel_group_id
         );
 
         let mut messages = vec![
@@ -211,7 +227,7 @@ impl EventRouter {
         ];
 
         // 2. 获取工具
-        let allowed_skills = self.gate.get_allowed_skills(&groups);
+        let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
 
         // 3. 第一次LLM调用
@@ -258,6 +274,7 @@ impl EventRouter {
                             clients: &self.clients,
                             caller_id: event.invoker_id,
                             caller_groups: groups.clone(),
+                            caller_channel_group_id: channel_group_id,
                             gate: self.gate.clone(),
                             config: self.config.clone(),
                         };
