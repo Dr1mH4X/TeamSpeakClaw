@@ -10,8 +10,8 @@ services:
       - ./config:/app/config:ro
       # 日志目录
       - ./logs:/app/logs
-    env_file:
-      - .env
+    environment:
+      - TZ=Asia/Shanghai
     networks:
       - openteamspeak
 
