@@ -76,6 +76,8 @@ docker compose up -d
 docker compose logs -f
 ```
 
+如果日志出现 `exec /app/teamspeakclaw: no such file or directory`，通常是旧镜像缓存导致。请先执行 `docker compose pull` 再 `docker compose up -d`。
+
 ### 使用 Docker 命令
 
 ```bash
