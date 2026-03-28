@@ -148,6 +148,7 @@ jobs:
   docker:
     name: Build and Push Docker Image
     needs: [meta, build]
+    if: needs.meta.outputs.is-release == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
