@@ -58,24 +58,30 @@ async fn main() -> Result<()> {
 
     info!("Bot ready. Listening for events.");
 
-    tokio::select! {
+    let run_result: Result<()> = tokio::select! {
         res = router.run() => {
-            if let Err(e) = res {
-                error!("Event router exited with error: {}", e);
-            } else {
-                warn!("Event router exited unexpectedly");
+            match res {
+                Ok(()) => {
+                    warn!("Event router exited unexpectedly");
+                    Err(anyhow::anyhow!("Event router exited unexpectedly"))
+                }
+                Err(e) => {
+                    error!("Event router exited with error: {}", e);
+                    Err(e)
+                }
             }
         }
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down...");
+            Ok(())
         }
-    }
+    };
 
     if let Err(e) = adapter.quit().await {
         error!("Failed to send quit command: {}", e);
     }
 
-    Ok(())
+    run_result
 }
 
 fn print_banner() {
