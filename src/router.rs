@@ -67,6 +67,18 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
+        let snapshot = self.adapter.fetch_client_snapshot().await?;
+        let snapshot_count = snapshot.len();
+        for client in snapshot {
+            self.cache_client(
+                client.clid,
+                client.cldbid,
+                client.client_nickname,
+                client.client_server_groups,
+            );
+        }
+        info!("Prewarmed client cache with {} online clients", snapshot_count);
+
         while let Ok(event) = rx.recv().await {
             match event {
                 TsEvent::TextMessage(msg) => {
@@ -93,15 +105,7 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
-                    self.clients.insert(
-                        e.clid,
-                        ClientInfo {
-                            clid: e.clid,
-                            cldbid: e.cldbid,
-                            nickname: e.client_nickname,
-                            server_groups: e.client_server_groups,
-                        },
-                    );
+                    self.cache_client(e.clid, e.cldbid, e.client_nickname, e.client_server_groups);
                 }
                 TsEvent::ClientLeftView(e) => {
                     self.clients.remove(&e.clid);
@@ -110,6 +114,18 @@ impl EventRouter {
             }
         }
         Ok(())
+    }
+
+    fn cache_client(&self, clid: u32, cldbid: u32, nickname: String, server_groups: Vec<u32>) {
+        self.clients.insert(
+            clid,
+            ClientInfo {
+                clid,
+                cldbid,
+                nickname,
+                server_groups,
+            },
+        );
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
