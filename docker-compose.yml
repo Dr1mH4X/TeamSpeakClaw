@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  teamspeakclaw:
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest # 或使用 ghcr.nju.edu.cn
+    container_name: teamspeakclaw
+    restart: unless-stopped
+    volumes:
+      # 配置文件目录（必须）
+      - ./config:/app/config:ro
+      # 日志目录
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    networks:
+      - openteamspeak
+
+networks:
+  openteamspeak:
+    driver: bridge
