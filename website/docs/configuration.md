@@ -85,20 +85,41 @@ burst_size = 3
 
 ```toml
 # server_group_ids: TeamSpeak 服务器组 ID
+# channel_group_ids: TeamSpeak 频道组 ID，空数组表示不检查频道组
 # allowed_skills: 允许使用的技能列表，"*" 代表所有
 # can_target_admins: 是否允许对受保护组成员执行操作
 # rate_limit_override: 可选，覆盖全局速率限制
+#
+# 规则匹配逻辑：server_group_ids 和 channel_group_ids 只要有一个匹配即视为匹配
+# 如果两者都为空数组，则该规则匹配所有用户
 
 [[rules]]
 name = "superadmin"
 server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
+channel_group_ids = []
 allowed_skills = ["*"]
 can_target_admins = true
 rate_limit_override = 60
 
 [[rules]]
+name = "channel_admin"
+server_group_ids = []
+channel_group_ids = [5]   # 频道管理员组 ID
+allowed_skills = [
+  "poke_client",
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control",
+  "kick_client"
+]
+can_target_admins = false
+rate_limit_override = 20
+
+[[rules]]
 name = "default_user"
 server_group_ids = [8]    # 普通用户组 ID
+channel_group_ids = []
 allowed_skills = [
   "poke_client",
   "send_message",
@@ -113,6 +134,7 @@ rate_limit_override = 20
 [[rules]]
 name = "default"
 server_group_ids = []
+channel_group_ids = []
 allowed_skills = ["music_control"]
 can_target_admins = false
 

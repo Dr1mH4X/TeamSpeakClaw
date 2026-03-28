@@ -59,19 +59,41 @@ Controls which user groups can use which features. Rules are matched from top to
 
 ```toml
 # server_group_ids: TeamSpeak Server Group IDs
+# channel_group_ids: TeamSpeak Channel Group IDs, empty array means don't check channel group
 # allowed_skills: List of allowed skills, "*" for all
 # can_target_admins: Whether the user can perform actions on protected group members
+# rate_limit_override: Optional, overrides global rate limit
+#
+# Rule matching logic: server_group_ids and channel_group_ids match if either one matches
+# If both arrays are empty, the rule matches all users
 
 [[rules]]
 name = "superadmin"
 server_group_ids = [6]    # Server Admin group ID is usually 6
+channel_group_ids = []
 allowed_skills = ["*"]
 can_target_admins = true
 rate_limit_override = 60
 
 [[rules]]
+name = "channel_admin"
+server_group_ids = []
+channel_group_ids = [5]   # Channel Admin group ID
+allowed_skills = [
+  "poke_client",
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control",
+  "kick_client"
+]
+can_target_admins = false
+rate_limit_override = 20
+
+[[rules]]
 name = "default_user"
 server_group_ids = [8]    # Normal user group ID
+channel_group_ids = []
 allowed_skills = [
   "poke_client",
   "send_message",
@@ -86,9 +108,11 @@ rate_limit_override = 20
 [[rules]]
 name = "default"
 server_group_ids = []
+channel_group_ids = []
 allowed_skills = ["music_control"]
 can_target_admins = false
 
+# Protected group IDs, users with can_target_admins = false cannot kick/ban these group members
 [acl]
 protected_group_ids = [6, 8, 9]
 ```
