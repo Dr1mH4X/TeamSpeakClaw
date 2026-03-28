@@ -4,10 +4,11 @@ services:
   teamspeakclaw:
     image: ghcr.io/dr1mh4x/teamspeakclaw:latest # 或使用 ghcr.nju.edu.cn
     container_name: teamspeakclaw
+    user: "1000:10" #PUID:GUID
     restart: unless-stopped
     volumes:
       # 配置文件目录（必须）
-      - ./config:/app/config:ro
+      - ./config:/app/config
       # 日志目录
       - ./logs:/app/logs
     environment:
