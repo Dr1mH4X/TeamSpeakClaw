@@ -194,7 +194,7 @@ jobs:
             type=raw,value=dev,enable=${{ !needs.meta.outputs.is-release && github.event_name == 'push' }}
 
       - name: Build and push Docker image
-        if: steps.docker_meta.outputs.tags != ''
+        if: steps.meta.outputs.tags != ''
         uses: docker/build-push-action@v5
         with:
           context: .
