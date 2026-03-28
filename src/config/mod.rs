@@ -254,6 +254,9 @@ default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "chann
 [rate_limit]
 requests_per_minute = 10        # 每个用户的令牌桶限流设置
 burst_size = 3
+
+[logging]
+file_level = "debug"
 "#;
 
 pub const DEFAULT_ACL_TOML: &str = r#"# 权限规则从上到下评估；第一个匹配的生效。
