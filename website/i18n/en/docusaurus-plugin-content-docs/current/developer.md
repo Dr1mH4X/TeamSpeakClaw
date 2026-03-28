@@ -140,11 +140,13 @@ pub struct ToolCall {
 
 ### permission — Access Control
 
-Access control based on TeamSpeak Server Groups.
+Access control based on TeamSpeak Server Groups and Channel Groups.
 
 **Core Methods**:
-- `get_allowed_skills(&self, caller_groups: &[u32]) -> Vec<String>`: Returns a list of skills permitted for the user.
-- `can_target(&self, caller_groups: &[u32], target_groups: &[u32]) -> bool`: Prevents regular users from performing actions (kick/ban) on administrative groups.
+- `get_allowed_skills(&self, caller_groups: &[u32], caller_channel_group_id: u32) -> Vec<String>`: Returns a list of skills permitted for the user.
+- `can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, target_groups: &[u32]) -> bool`: Prevents regular users from performing actions (kick/ban) on administrative groups.
+
+**Rule Matching Logic**: Server groups and channel groups match if either one matches. If both arrays are empty, the rule matches all users.
 
 ### router — Event Router
 
@@ -154,7 +156,7 @@ Coordinates all modules to handle user messages, implementing the complete dialo
 
 1. Filter out self-messages.
 2. Determine response trigger (Private message or Prefix).
-3. Retrieve user server groups.
+3. Retrieve user server groups and channel group.
 4. Prepare LLM context.
 5. First LLM call.
 6. Execute tool calls (if any).
@@ -194,6 +196,7 @@ pub struct ExecutionContext<'a> {
     pub clients: &'a DashMap<u32, ClientInfo>,  // Online client list
     pub caller_id: u32,                         // Caller client ID
     pub caller_groups: Vec<u32>,                // Caller server groups
+    pub caller_channel_group_id: u32,           // Caller channel group ID
     pub gate: Arc<PermissionGate>,              // Permission gate
     pub config: Arc<AppConfig>,                 // Application config
 }
@@ -212,6 +215,34 @@ pub struct ExecutionContext<'a> {
 2. **Validation**: Validate required parameters within `execute`.
 3. **Error Handling**: Return meaningful error messages.
 4. **Target Check**: Use `ctx.gate.can_target()` to verify permissions for administrative actions.
+
+## Permission System
+
+### Configuration Structure
+
+`config/acl.toml` uses top-down rule matching:
+
+```toml
+[[rules]]
+name = "rule_name"
+server_group_ids = [6]          # Server group ID list, empty array matches everyone
+channel_group_ids = [5]         # Channel group ID list, empty array means don't check channel group
+allowed_skills = ["skill_name"] # Allowed skills, "*" means all
+can_target_admins = true        # Whether can target protected group members
+
+[acl]
+protected_group_ids = [6, 8, 9] # Protected server group IDs
+```
+
+### Permission Evaluation Flow
+
+1. Iterate through rule list
+2. Check if caller's server group matches (server_group_ids empty array matches everyone)
+3. Check if caller's channel group matches (channel_group_ids empty array matches everyone)
+4. Server group and channel group match if either one matches
+5. Collect allowed skills from matching rules
+6. If rule contains `"*"` immediately return all skills
+7. Before executing operation on target, call `can_target()` to check
 
 ## Code Standards
 
