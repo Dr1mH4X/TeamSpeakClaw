@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -154,7 +154,9 @@ pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
-    query_tx: Mutex<Option<(oneshot::Sender<String>, bool)>>,
+    query_tx: Mutex<Option<oneshot::Sender<String>>>,
+    query_active: AtomicBool,
+    include_event_lines_active: AtomicBool,
 }
 
 impl TsAdapter {
@@ -181,6 +183,8 @@ impl TsAdapter {
             event_tx: tx,
             bot_clid: AtomicU32::new(0),
             query_tx: Mutex::new(None),
+            query_active: AtomicBool::new(false),
+            include_event_lines_active: AtomicBool::new(false),
         });
 
         let adapter_clone = adapter.clone();
@@ -338,9 +342,12 @@ impl TsAdapter {
         }
 
         let (tx, rx) = oneshot::channel::<String>();
+        self.include_event_lines_active
+            .store(include_event_lines, Ordering::Relaxed);
+        self.query_active.store(true, Ordering::Relaxed);
         {
             let mut q = self.query_tx.lock().await;
-            *q = Some((tx, include_event_lines));
+            *q = Some(tx);
         }
 
         {
@@ -400,13 +407,9 @@ impl TsAdapter {
                         }
                     }
 
-                    let (query_active, include_event_lines) = {
-                        let q = self.query_tx.lock().await;
-                        match q.as_ref() {
-                            Some((_, include)) => (true, *include),
-                            None => (false, false),
-                        }
-                    };
+                    let query_active = self.query_active.load(Ordering::Relaxed);
+                    let include_event_lines =
+                        self.include_event_lines_active.load(Ordering::Relaxed);
 
                     // 收集查询响应数据行：默认忽略事件；按需保留事件行（例如 clientlist）
                     if query_active && (!is_event || include_event_lines) {
@@ -415,8 +418,9 @@ impl TsAdapter {
 
                     // error 行标志着当前查询响应结束
                     if trimmed.starts_with("error id=") {
+                        self.query_active.store(false, Ordering::Relaxed);
                         let mut q = self.query_tx.lock().await;
-                        if let Some((tx, _)) = q.take() {
+                        if let Some(tx) = q.take() {
                             let response = result_lines.join("\n");
                             let _ = tx.send(response);
                             result_lines.clear();
