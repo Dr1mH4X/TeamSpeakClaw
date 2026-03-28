@@ -1,12 +1,19 @@
 <div align="center">
   <h1>TeamSpeakClaw</h1>
-  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/releases">
-  <img src="https://img.shields.io/github/v/release/Dr1mH4X/TeamSpeakClaw?style=for-the-badge&color=blue&label=Latest%20Release" alt="TeamSpeakClaw Latest Release">
-  </a>
 
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/actions">
-  <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/build.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
+    <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/build.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
   </a>
+
+  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/releases">
+    <img src="https://img.shields.io/github/v/release/Dr1mH4X/TeamSpeakClaw?style=for-the-badge&color=blue&label=Latest%20Release" alt="TeamSpeakClaw Latest Release">
+  </a>
+
+  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/AGPL--3.0-red?style=for-the-badge" alt="License">
+  </a>
+
+  <img src="https://img.shields.io/badge/TeamSpeak-2580C3?style=for-the-badge&logo=teamspeak&logoColor=white" alt="TeamSpeak Support">
 </div>
 
 TeamSpeakClaw 是一个基于 LLM (大语言模型) 的 TeamSpeak 智能助手。
