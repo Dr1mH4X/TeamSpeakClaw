@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
@@ -67,6 +67,40 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
+        let snapshot_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.adapter.fetch_client_snapshot(),
+        )
+        .await;
+
+        match snapshot_result {
+            Ok(Ok(snapshot)) => {
+                let snapshot_count = snapshot.len();
+                for client in snapshot {
+                    self.cache_client(
+                        client.clid,
+                        client.cldbid,
+                        client.client_nickname,
+                        client.client_server_groups,
+                    );
+                }
+                info!(
+                    "Prewarmed client cache with {} online clients",
+                    snapshot_count
+                );
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    "Failed to prewarm client cache from snapshot, continuing without cache prewarm: {err}"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out while prewarming client cache from snapshot, continuing without cache prewarm"
+                );
+            }
+        }
+
         while let Ok(event) = rx.recv().await {
             match event {
                 TsEvent::TextMessage(msg) => {
@@ -93,15 +127,7 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
-                    self.clients.insert(
-                        e.clid,
-                        ClientInfo {
-                            clid: e.clid,
-                            cldbid: e.cldbid,
-                            nickname: e.client_nickname,
-                            server_groups: e.client_server_groups,
-                        },
-                    );
+                    self.cache_client(e.clid, e.cldbid, e.client_nickname, e.client_server_groups);
                 }
                 TsEvent::ClientLeftView(e) => {
                     self.clients.remove(&e.clid);
@@ -110,6 +136,18 @@ impl EventRouter {
             }
         }
         Ok(())
+    }
+
+    fn cache_client(&self, clid: u32, cldbid: u32, nickname: String, server_groups: Vec<u32>) {
+        self.clients.insert(
+            clid,
+            ClientInfo {
+                clid,
+                cldbid,
+                nickname,
+                server_groups,
+            },
+        );
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
