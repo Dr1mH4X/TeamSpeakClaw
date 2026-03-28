@@ -5,7 +5,7 @@
   </a>
 
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/actions">
-  <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/main.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
+  <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/build.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
   </a>
 </div>
 
