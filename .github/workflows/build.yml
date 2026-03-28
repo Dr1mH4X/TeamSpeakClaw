@@ -1,5 +1,10 @@
 name: build
 
+env:
+  BIN_NAME: teamspeakclaw
+  PROJECT_NAME: TeamSpeakClaw
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     tags:
@@ -15,10 +20,6 @@ on:
       - "main"
       - "master"
   workflow_dispatch:
-
-env:
-  BIN_NAME: teamspeakclaw
-  PROJECT_NAME: TeamSpeakClaw
 
 jobs:
   meta:
