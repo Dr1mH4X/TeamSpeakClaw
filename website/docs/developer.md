@@ -140,21 +140,23 @@ pub struct ToolCall {
 
 ### permission — 权限控制
 
-基于 TeamSpeak 服务器组的访问控制。
+基于 TeamSpeak 服务器组和频道组的访问控制。
 
-**核心方法**：`src/permission/gate.rs:12-33`
+**核心方法**：`src/permission/gate.rs:12-43`
 
 ```rust
-pub fn get_allowed_skills(&self, caller_groups: &[u32]) -> Vec<String>
+pub fn get_allowed_skills(&self, caller_groups: &[u32], caller_channel_group_id: u32) -> Vec<String>
 ```
 
-**目标保护**：`src/permission/gate.rs:35-58`
+**目标保护**：`src/permission/gate.rs:45-79`
 
 ```rust
-pub fn can_target(&self, caller_groups: &[u32], target_groups: &[u32]) -> bool
+pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, target_groups: &[u32]) -> bool
 ```
 
 防止普通用户对管理员组执行操作（踢出、封禁等）。
+
+**规则匹配逻辑**：服务器组和频道组只要有一个匹配即视为匹配。如果两者都为空数组，则该规则匹配所有用户。
 
 ### router — 事件路由
 
@@ -196,7 +198,7 @@ pub trait Skill: Send + Sync {
 
 ### ExecutionContext
 
-技能执行时可访问的上下文：`src/skills/mod.rs:16-23`
+技能执行时可访问的上下文：`src/skills/mod.rs:16-24`
 
 ```rust
 pub struct ExecutionContext<'a> {
@@ -204,6 +206,7 @@ pub struct ExecutionContext<'a> {
     pub clients: &'a DashMap<u32, ClientInfo>,  // 在线用户列表
     pub caller_id: u32,                  // 调用者客户端 ID
     pub caller_groups: Vec<u32>,         // 调用者服务器组
+    pub caller_channel_group_id: u32,    // 调用者频道组 ID
     pub gate: Arc<PermissionGate>,       // 权限门控
     pub config: Arc<AppConfig>,          // 应用配置
 }
@@ -347,6 +350,7 @@ pub fn new(config: Arc<AppConfig>) -> Self {
 [[rules]]
 name = "规则名称"
 server_group_ids = [6]          # 服务器组 ID 列表，空数组匹配所有人
+channel_group_ids = [5]         # 频道组 ID 列表，空数组表示不检查频道组
 allowed_skills = ["skill_name"] # 允许的技能，"*" 代表全部
 can_target_admins = true        # 是否可操作受保护组成员
 
@@ -357,10 +361,12 @@ protected_group_ids = [6, 8, 9] # 受保护的服务器组
 ### 权限评估流程
 
 1. 遍历规则列表
-2. 检查调用者服务器组是否匹配
-3. 收集匹配规则允许的技能
-4. 如果规则包含 `"*"`，立即返回全部技能
-5. 对目标执行操作前，调用 `can_target()` 检查
+2. 检查调用者服务器组是否匹配（server_group_ids 为空数组时匹配所有人）
+3. 检查调用者频道组是否匹配（channel_group_ids 为空数组时匹配所有人）
+4. 服务器组和频道组只要有一个匹配即视为匹配
+5. 收集匹配规则允许的技能
+6. 如果规则包含 `"*"`，立即返回全部技能
+7. 对目标执行操作前，调用 `can_target()` 检查
 
 ## 代码规范
 
