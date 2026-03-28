@@ -1,7 +1,7 @@
 use crate::{
     adapter::{
         command::{check_ts_error, cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
-        event::{parse_events, TsEvent},
+        event::{parse_events, ClientEnterEvent, TsEvent},
     },
     config::{AppConfig, TsConfig},
 };
@@ -154,7 +154,7 @@ pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
-    query_tx: Mutex<Option<oneshot::Sender<String>>>,
+    query_tx: Mutex<Option<(oneshot::Sender<String>, bool)>>,
 }
 
 impl TsAdapter {
@@ -269,9 +269,6 @@ impl TsAdapter {
         self.send_raw(&cmd_register_event("textserver")).await?;
         self.send_raw(&cmd_register_event("server")).await?;
 
-        // 拉取初始客户端列表
-        self.send_raw("clientlist -uid -groups").await?;
-
         // 获取自身 ID
         self.send_raw("whoami").await?;
 
@@ -312,6 +309,28 @@ impl TsAdapter {
 
     /// 发送命令并等待服务器响应（数据行 + error 行）。
     pub async fn send_query(&self, cmd: &str) -> Result<String> {
+        self.send_query_internal(cmd, false).await
+    }
+
+    /// 拉取当前在线客户端快照（用于启动阶段预热路由缓存）。
+    pub async fn fetch_client_snapshot(&self) -> Result<Vec<ClientEnterEvent>> {
+        let response = self
+            .send_query_internal("clientlist -uid -groups", true)
+            .await?;
+
+        let clients = response
+            .lines()
+            .flat_map(parse_events)
+            .filter_map(|event| match event {
+                TsEvent::ClientEnterView(client) if client.clid != 0 => Some(client),
+                _ => None,
+            })
+            .collect();
+
+        Ok(clients)
+    }
+
+    async fn send_query_internal(&self, cmd: &str, include_event_lines: bool) -> Result<String> {
         if cmd.starts_with("login ") {
             info!(">> login [REDACTED]");
         } else {
@@ -321,7 +340,7 @@ impl TsAdapter {
         let (tx, rx) = oneshot::channel::<String>();
         {
             let mut q = self.query_tx.lock().await;
-            *q = Some(tx);
+            *q = Some((tx, include_event_lines));
         }
 
         {
@@ -381,19 +400,27 @@ impl TsAdapter {
                         }
                     }
 
-                    // 收集查询响应数据行（非事件、非空行）
-                    if !is_event {
+                    let (query_active, include_event_lines) = {
+                        let q = self.query_tx.lock().await;
+                        match q.as_ref() {
+                            Some((_, include)) => (true, *include),
+                            None => (false, false),
+                        }
+                    };
+
+                    // 收集查询响应数据行：默认忽略事件；按需保留事件行（例如 clientlist）
+                    if query_active && (!is_event || include_event_lines) {
                         result_lines.push(trimmed.to_string());
                     }
 
                     // error 行标志着当前查询响应结束
                     if trimmed.starts_with("error id=") {
                         let mut q = self.query_tx.lock().await;
-                        if let Some(tx) = q.take() {
+                        if let Some((tx, _)) = q.take() {
                             let response = result_lines.join("\n");
                             let _ = tx.send(response);
+                            result_lines.clear();
                         }
-                        result_lines.clear();
                     }
                 }
                 Err(e) => {
