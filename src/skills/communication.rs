@@ -27,11 +27,13 @@ impl Skill for PokeClient {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
+            .ok_or_else(|| {
+                anyhow::anyhow!(ctx.error_prompts.missing_parameter.replace("{param}", "clid"))
+            })? as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
         if clid == ctx.caller_id {
-            return Err(anyhow::anyhow!("不能戳自己"));
+            return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
         }
 
         ctx.adapter.send_raw(&cmd_poke(clid, msg)).await?;
@@ -76,7 +78,7 @@ impl Skill for SendMessage {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let msg = args["msg"].as_str().unwrap_or("");
         if msg.is_empty() {
-            return Err(anyhow::anyhow!("消息内容不能为空"));
+            return Err(anyhow::anyhow!(ctx.error_prompts.empty_message.clone()));
         }
 
         let mode = args["mode"].as_str().unwrap_or("");
@@ -85,16 +87,18 @@ impl Skill for SendMessage {
             "private" => {
                 let clid = args["clid"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("发送私聊(private)必须提供 clid 参数"))? as u32;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(ctx.error_prompts.missing_parameter.replace("{param}", "clid"))
+                    })? as u32;
 
                 if clid == ctx.caller_id {
-                    return Err(anyhow::anyhow!("不能给自己发私信"));
+                    return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
                 }
                 (1, clid)
             },
             "channel" => (2, 0),
             "server" => (3, 0),
-            _ => return Err(anyhow::anyhow!("无效的模式，mode 必须是 private, channel 或 server")),
+            _ => return Err(anyhow::anyhow!(ctx.error_prompts.invalid_mode.replace("{allowed}", "private, channel, server"))),
         };
 
         ctx.adapter.send_raw(&cmd_send_text(targetmode, target, msg)).await?;

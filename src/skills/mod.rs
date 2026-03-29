@@ -4,7 +4,7 @@ pub mod moderation;
 pub mod music;
 
 use crate::adapter::TsAdapter;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ErrorPrompts};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use anyhow::Result;
@@ -21,6 +21,7 @@ pub struct ExecutionContext<'a> {
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
 }
 
 #[async_trait]
