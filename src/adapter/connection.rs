@@ -360,7 +360,9 @@ impl TsAdapter {
             w.flush().await?;
         }
 
-        let response = rx.await.map_err(|_| anyhow::anyhow!("Query response channel closed"))?;
+        let response = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Query response channel closed"))?;
         check_ts_error(&response)?;
         Ok(response)
     }

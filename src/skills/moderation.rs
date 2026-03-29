@@ -20,7 +20,11 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
         .unwrap_or_default();
 
     // 检查是否可以对目标执行操作
-    if !ctx.gate.can_target(&ctx.caller_groups, ctx.caller_channel_group_id, &target_groups) {
+    if !ctx.gate.can_target(
+        &ctx.caller_groups,
+        ctx.caller_channel_group_id,
+        &target_groups,
+    ) {
         return Err(anyhow::anyhow!(ctx.error_prompts.target_permission.clone()));
     }
 
