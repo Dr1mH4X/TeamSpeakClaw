@@ -61,11 +61,14 @@ impl Skill for GetClientInfo {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
+            .ok_or_else(|| {
+                anyhow::anyhow!(ctx.error_prompts.missing_parameter.replace("{param}", "clid"))
+            })? as u32;
 
         // 确认目标客户端在线
         if !ctx.clients.contains_key(&clid) {
-            return Ok(json!({"status": "error", "message": format!("Client {clid} not found or offline")}));
+            let msg = ctx.error_prompts.client_offline.replace("{clid}", &clid.to_string());
+            return Ok(json!({"status": "error", "message": msg}));
         }
 
         let response = ctx.adapter.send_query(&cmd_clientinfo(clid)).await?;

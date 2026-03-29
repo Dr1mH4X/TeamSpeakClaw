@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     // 自操作防护
     if clid == ctx.caller_id {
-        return Err(anyhow::anyhow!("不能对自己执行此操作"));
+        return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
     }
 
     // 获取目标的组信息
@@ -21,7 +21,7 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
 
     // 检查是否可以对目标执行操作
     if !ctx.gate.can_target(&ctx.caller_groups, ctx.caller_channel_group_id, &target_groups) {
-        return Err(anyhow::anyhow!("无权对该用户执行此操作"));
+        return Err(anyhow::anyhow!(ctx.error_prompts.target_permission.clone()));
     }
 
     Ok(target_groups)
