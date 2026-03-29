@@ -40,7 +40,15 @@ impl EventRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
     ) -> Self {
-        Self::new_with_clients(config, prompts, adapter, gate, llm, registry, Arc::new(DashMap::new()))
+        Self::new_with_clients(
+            config,
+            prompts,
+            adapter,
+            gate,
+            llm,
+            registry,
+            Arc::new(DashMap::new()),
+        )
     }
 
     pub fn new_with_clients(
@@ -124,7 +132,9 @@ impl EventRouter {
                             }
                         };
 
-                        let router = Self::new_with_clients(config, prompts, adapter, gate, llm, registry, clients);
+                        let router = Self::new_with_clients(
+                            config, prompts, adapter, gate, llm, registry, clients,
+                        );
                         router.handle_message(msg).await;
                     });
                 }
@@ -286,23 +296,32 @@ impl EventRouter {
                                     caller = %event.invoker_name,
                                     args = %call.arguments,
                                     result = %val,
-                                    "技能执行成功"
+                                    "Skill executed successfully"
                                 );
                                 val.to_string()
                             }
                             Err(e) => {
-                                let err_msg = self.prompts.error.skill_error.replace("{detail}", &e.to_string());
+                                let err_msg = self
+                                    .prompts
+                                    .error
+                                    .skill_error
+                                    .replace("{detail}", &e.to_string());
                                 error!(
                                     skill = %call.name,
                                     caller = %event.invoker_name,
                                     args = %call.arguments,
                                     error = %e,
-                                    "技能执行失败"
+                                    "Skill execution failed"
                                 );
                                 err_msg
                             }
                         }
                     } else {
+                        warn!(
+                            caller = %event.invoker_name,
+                            skill = %call.name,
+                            "Skill not found"
+                        );
                         self.prompts.error.skill_not_found.clone()
                     };
 

@@ -25,11 +25,12 @@ impl Skill for PokeClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| {
-                anyhow::anyhow!(ctx.error_prompts.missing_parameter.replace("{param}", "clid"))
-            })? as u32;
+        let clid = args["clid"].as_u64().ok_or_else(|| {
+            anyhow::anyhow!(ctx
+                .error_prompts
+                .missing_parameter
+                .replace("{param}", "clid"))
+        })? as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
         if clid == ctx.caller_id {
@@ -85,23 +86,31 @@ impl Skill for SendMessage {
 
         let (targetmode, target) = match mode {
             "private" => {
-                let clid = args["clid"]
-                    .as_u64()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(ctx.error_prompts.missing_parameter.replace("{param}", "clid"))
-                    })? as u32;
+                let clid = args["clid"].as_u64().ok_or_else(|| {
+                    anyhow::anyhow!(ctx
+                        .error_prompts
+                        .missing_parameter
+                        .replace("{param}", "clid"))
+                })? as u32;
 
                 if clid == ctx.caller_id {
                     return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
                 }
                 (1, clid)
-            },
+            }
             "channel" => (2, 0),
             "server" => (3, 0),
-            _ => return Err(anyhow::anyhow!(ctx.error_prompts.invalid_mode.replace("{allowed}", "private, channel, server"))),
+            _ => {
+                return Err(anyhow::anyhow!(ctx
+                    .error_prompts
+                    .invalid_mode
+                    .replace("{allowed}", "private, channel, server")))
+            }
         };
 
-        ctx.adapter.send_raw(&cmd_send_text(targetmode, target, msg)).await?;
+        ctx.adapter
+            .send_raw(&cmd_send_text(targetmode, target, msg))
+            .await?;
 
         Ok(json!({
             "status": "ok",
