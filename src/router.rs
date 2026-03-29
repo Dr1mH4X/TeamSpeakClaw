@@ -277,6 +277,7 @@ impl EventRouter {
                             caller_channel_group_id: channel_group_id,
                             gate: self.gate.clone(),
                             config: self.config.clone(),
+                            error_prompts: &self.prompts.error,
                         };
                         match skill.execute(call.arguments.clone(), &ctx).await {
                             Ok(val) => {
@@ -290,19 +291,19 @@ impl EventRouter {
                                 val.to_string()
                             }
                             Err(e) => {
-                                let err_msg = format!("Error: {e}");
+                                let err_msg = self.prompts.error.skill_error.replace("{detail}", &e.to_string());
                                 error!(
                                     skill = %call.name,
                                     caller = %event.invoker_name,
                                     args = %call.arguments,
-                                    error = %err_msg,
+                                    error = %e,
                                     "技能执行失败"
                                 );
                                 err_msg
                             }
                         }
                     } else {
-                        "Error: Skill not found".to_string()
+                        self.prompts.error.skill_not_found.clone()
                     };
 
                     messages.push(json!({
@@ -323,7 +324,17 @@ impl EventRouter {
                                 .await;
                         }
                     }
-                    Err(e) => error!("LLM error (2nd turn): {e}"),
+                    Err(e) => {
+                        error!("LLM error (2nd turn): {e}");
+                        let _ = self
+                            .adapter
+                            .send_raw(&cmd_send_text(
+                                reply_mode,
+                                reply_target,
+                                &self.prompts.error.llm_error,
+                            ))
+                            .await;
+                    }
                 }
             }
             Err(e) => {
@@ -333,7 +344,7 @@ impl EventRouter {
                     .send_raw(&cmd_send_text(
                         reply_mode,
                         reply_target,
-                        "Sorry, I encountered an error processing your request.",
+                        &self.prompts.error.llm_error,
                     ))
                     .await;
             }
