@@ -105,17 +105,26 @@ jobs:
       - name: Prepare artifacts
         shell: bash
         run: |
-          mkdir -p dist
-          SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
-          DEST="dist/${{ env.PROJECT_NAME }}-v${{ needs.meta.outputs.version }}-${{ matrix.platform }}${{ matrix.bin_suffix }}"
+          VERSION="${{ needs.meta.outputs.version }}"
+          PLATFORM="${{ matrix.platform }}"
+          STAGING="staging"
 
+          mkdir -p "$STAGING/config"
+
+          SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
           if [ -f "$SRC" ]; then
-            cp "$SRC" "$DEST"
-            echo "Artifact prepared: $DEST"
+            cp "$SRC" "$STAGING/"
           else
             echo "Error: Binary not found at $SRC"
             exit 1
           fi
+          cp examples/settings.toml "$STAGING/config/"
+          cp examples/acl.toml "$STAGING/config/"
+          cp examples/prompts.toml "$STAGING/config/"
+          cd staging
+          ZIP_NAME="../dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
+          zip -9 -r "$ZIP_NAME" .
+          echo "Artifact prepared: $ZIP_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -231,7 +240,7 @@ jobs:
           body: |
             ${{ needs.changelog.outputs.release_body }}
 
-            ## Docker Image
+            ## 🐋 Docker Image
 
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ needs.meta.outputs.version }}
