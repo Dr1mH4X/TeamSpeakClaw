@@ -1,99 +1,71 @@
 use super::types::{Segment, Sender};
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub enum NcEvent {
     PrivateMessage(PrivateMessageEvent),
     GroupMessage(GroupMessageEvent),
-    // #[derive(Debug, Clone)]
-    // FriendRequest(FriendRequestEvent),
-    // GroupRequest(GroupRequestEvent),
-    // Notice(NcNoticeEvent),
-    // Lifecycle(LifecycleEvent),
     Heartbeat,
-    Unknown(Value),
 }
 
 #[derive(Debug, Clone)]
 pub struct PrivateMessageEvent {
-    pub message_id: i64,
     pub user_id: i64,
     pub message: Vec<Segment>,
     pub sender: Sender,
-    pub time: i64,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct GroupMessageEvent {
-    pub message_id: i64,
     pub group_id: i64,
     pub user_id: i64,
     pub message: Vec<Segment>,
     pub sender: Sender,
-    pub time: i64,
+    pub timestamp: u64,
 }
 
-// #[derive(Debug, Clone)]
-// pub struct FriendRequestEvent {
-//     pub user_id: i64,
-//     pub comment: String,
-//     pub flag: String,
-//     pub time: i64,
-// }
-//
-// #[derive(Debug, Clone)]
-// pub struct GroupRequestEvent {
-//     pub group_id: i64,
-//     pub user_id: i64,
-//     pub sub_type: String,
-//     pub comment: String,
-//     pub flag: String,
-//     pub time: i64,
-// }
-//
-// #[derive(Debug, Clone)]
-// pub enum NcNoticeEvent {
-//     GroupMemberIncrease { group_id: i64, user_id: i64, operator_id: i64, sub_type: String },
-//     GroupMemberDecrease { group_id: i64, user_id: i64, operator_id: i64, sub_type: String },
-//     GroupBan { group_id: i64, user_id: i64, operator_id: i64, duration: i64, sub_type: String },
-//     GroupRecall { group_id: i64, user_id: i64, operator_id: i64, message_id: i64 },
-//     FriendAdd { user_id: i64 },
-//     Other(Value),
-// }
-//
-// #[derive(Debug, Clone)]
-// pub struct LifecycleEvent {
-//     pub sub_type: String,
-//     pub self_id: i64,
-//     pub time: i64,
-// }
+impl PrivateMessageEvent {
+    pub fn timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+}
+
+impl GroupMessageEvent {
+    pub fn timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct RawEvent {
     post_type: Option<String>,
     meta_event_type: Option<String>,
     message_type: Option<String>,
-    message_id: Option<i64>,
     group_id: Option<i64>,
     user_id: Option<i64>,
     message: Option<Value>,
     sender: Option<Value>,
-    time: Option<i64>,
-    self_id: Option<i64>,
-    sub_type: Option<String>,
 }
 
 pub fn parse_event(raw: Value) -> NcEvent {
     let ev: RawEvent = match serde_json::from_value(raw.clone()) {
         Ok(v) => v,
-        Err(_) => return NcEvent::Unknown(raw),
+        Err(_) => return NcEvent::Heartbeat,
     };
 
     match ev.post_type.as_deref() {
         Some("message") => parse_message_event(ev),
-        Some("meta_event") => parse_meta_event(ev),
-        _ => NcEvent::Unknown(raw),
+        Some("meta_event") => NcEvent::Heartbeat,
+        _ => NcEvent::Heartbeat,
     }
 }
 
@@ -104,27 +76,18 @@ fn parse_message_event(ev: RawEvent) -> NcEvent {
 
     match ev.message_type.as_deref() {
         Some("private") => NcEvent::PrivateMessage(PrivateMessageEvent {
-            message_id: ev.message_id.unwrap_or(0),
             user_id,
             message,
             sender,
-            time: ev.time.unwrap_or(0),
+            timestamp: PrivateMessageEvent::timestamp(),
         }),
         Some("group") => NcEvent::GroupMessage(GroupMessageEvent {
-            message_id: ev.message_id.unwrap_or(0),
             group_id: ev.group_id.unwrap_or(0),
             user_id,
             message,
             sender,
-            time: ev.time.unwrap_or(0),
+            timestamp: GroupMessageEvent::timestamp(),
         }),
-        _ => NcEvent::Unknown(Value::Null),
-    }
-}
-
-fn parse_meta_event(ev: RawEvent) -> NcEvent {
-    match ev.meta_event_type.as_deref() {
-        Some("heartbeat") => NcEvent::Heartbeat,
         _ => NcEvent::Heartbeat,
     }
 }
