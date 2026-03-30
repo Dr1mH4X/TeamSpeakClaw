@@ -118,9 +118,9 @@ jobs:
             echo "Error: Binary not found at $SRC"
             exit 1
           fi
-          cp examples/settings.toml "$STAGING/config/"
-          cp examples/acl.toml "$STAGING/config/"
-          cp examples/prompts.toml "$STAGING/config/"
+          cp examples/config/settings.toml "$STAGING/config/"
+          cp examples/config/acl.toml "$STAGING/config/"
+          cp examples/config/prompts.toml "$STAGING/config/"
           cd staging
           ZIP_NAME="../dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
           zip -9 -r "$ZIP_NAME" .
