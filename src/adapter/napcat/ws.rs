@@ -23,11 +23,8 @@ type WsSink =
 pub struct NapCatAdapter {
     writer: Mutex<WsSink>,
     event_tx: broadcast::Sender<NcEvent>,
-    /// echo -> oneshot::Sender，用于请求/响应匹配
     pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
-    /// 机器人自身 QQ 号
     self_id: AtomicI64,
-    config: NapCatConfig,
 }
 
 impl NapCatAdapter {
@@ -80,7 +77,6 @@ impl NapCatAdapter {
             event_tx: tx,
             pending: pending.clone(),
             self_id: AtomicI64::new(0),
-            config,
         });
 
         // 启动读取循环
@@ -139,8 +135,7 @@ impl NapCatAdapter {
                                             status: "failed".into(),
                                             retcode: -1,
                                             data: Value::Null,
-                                            echo: echo.clone(),
-                                            message: None,
+                                            message: Some("parse error".to_string()),
                                         }
                                     });
                                 let _ = tx.send(resp);
@@ -151,13 +146,6 @@ impl NapCatAdapter {
 
                     // 否则作为事件处理
                     let event = parse_event(val);
-                    // 处理 Lifecycle connect，更新 self_id
-                    if let NcEvent::Lifecycle(ref lc) = event {
-                        if lc.sub_type == "connect" && lc.self_id != 0 {
-                            self.self_id.store(lc.self_id, Ordering::Relaxed);
-                            info!("NapCat lifecycle connect, self_id={}", lc.self_id);
-                        }
-                    }
                     if let Err(e) = self.event_tx.send(event) {
                         debug!("No NapCat event subscribers: {e}");
                     }
@@ -242,9 +230,5 @@ impl NapCatAdapter {
 
     pub fn subscribe(&self) -> broadcast::Receiver<NcEvent> {
         self.event_tx.subscribe()
-    }
-
-    pub fn config(&self) -> &NapCatConfig {
-        &self.config
     }
 }
