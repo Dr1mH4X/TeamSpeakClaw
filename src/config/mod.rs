@@ -8,13 +8,13 @@ pub mod prompts;
 pub mod rate_limit;
 pub mod serverquery;
 
-pub use acl::{AclConfig, AclRule, AclSettings};
+pub use acl::AclConfig;
 pub use bot::BotConfig;
 pub use llm::LlmConfig;
 pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use napcat::NapCatConfig;
-pub use prompts::{ErrorPrompts, PromptsConfig, SystemPrompts};
+pub use prompts::{ErrorPrompts, PromptsConfig};
 pub use rate_limit::RateLimitConfig;
 pub use serverquery::SqConfig;
 
@@ -28,15 +28,6 @@ pub fn config_dir() -> PathBuf {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("config")
-}
-
-pub fn toml_value(value: &impl serde::Serialize) -> String {
-    #[derive(Serialize)]
-    struct Wrapper<'a, T: Serialize> {
-        v: &'a T,
-    }
-    let doc = toml::to_string(&Wrapper { v: value }).unwrap();
-    doc.trim_start_matches("v = ").trim_end().to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -17,12 +17,6 @@ impl Default for PromptsConfig {
     }
 }
 
-impl PromptsConfig {
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap()
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SystemPrompts {
     pub content: String,

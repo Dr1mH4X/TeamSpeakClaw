@@ -1,4 +1,3 @@
-use super::toml_value;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -17,17 +16,5 @@ impl Default for LlmConfig {
             model: "gpt-4o".to_string(),
             max_tokens: 1024,
         }
-    }
-}
-
-impl LlmConfig {
-    pub fn to_toml(&self) -> String {
-        let mut output = String::new();
-        output.push_str("[llm]\n");
-        output.push_str(&format!("api_key = {}\n", toml_value(&self.api_key)));
-        output.push_str(&format!("base_url = {}\n", toml_value(&self.base_url)));
-        output.push_str(&format!("model = {}\n", toml_value(&self.model)));
-        output.push_str(&format!("max_tokens = {}\n", self.max_tokens));
-        output
     }
 }
