@@ -4,7 +4,16 @@ sidebar_position: 3
 
 # 配置指南
 
-运行 `./teamspeakclaw --config generate` 后，会在 `config/` 目录下生成三个配置文件。请根据您的需求修改它们。
+首次使用前，请从 `examples/config/` 目录复制配置文件到 `config/` 目录：
+
+```bash
+mkdir -p config
+cp examples/settings.toml config/
+cp examples/acl.toml config/
+cp examples/prompts.toml config/
+```
+
+请根据您的需求修改配置文件。
 
 ## 1. 主配置 (settings.toml)
 
