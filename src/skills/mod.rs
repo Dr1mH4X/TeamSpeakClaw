@@ -3,6 +3,7 @@ pub mod information;
 pub mod moderation;
 pub mod music;
 
+use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, ErrorPrompts};
 use crate::permission::PermissionGate;
@@ -12,6 +13,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
+
+// ─────────────────────────────────────────────
+// TeamSpeak 执行上下文（原有）
+// ─────────────────────────────────────────────
 
 pub struct ExecutionContext<'a> {
     pub adapter: Arc<TsAdapter>,
@@ -24,13 +29,45 @@ pub struct ExecutionContext<'a> {
     pub error_prompts: &'a ErrorPrompts,
 }
 
+// ─────────────────────────────────────────────
+// NapCat / QQ 执行上下文（新增）
+// ─────────────────────────────────────────────
+
+pub struct NcExecutionContext<'a> {
+    pub adapter: Arc<NapCatAdapter>,
+    pub caller_id: i64,
+    pub caller_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+
+// ─────────────────────────────────────────────
+// Skill trait
+// ─────────────────────────────────────────────
+
 #[async_trait]
 pub trait Skill: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
+
+    /// TeamSpeak 执行（原有）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
+
+    /// NapCat/QQ 执行（默认返回"不支持"，各 Skill 按需覆盖）
+    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support the NapCat platform",
+            self.name()
+        ))
+    }
 }
+
+// ─────────────────────────────────────────────
+// SkillRegistry
+// ─────────────────────────────────────────────
 
 #[derive(Default)]
 pub struct SkillRegistry {
