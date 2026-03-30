@@ -1,7 +1,7 @@
 # TeamSpeakClaw Configuration
 # Copy this file to config/settings.toml and modify the values below
 
-[teamspeak]
+[serverquery]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
