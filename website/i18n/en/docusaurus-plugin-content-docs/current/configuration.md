@@ -4,7 +4,9 @@ sidebar_position: 3
 
 # Configuration Guide
 
-After running `./teamspeakclaw --config generate`, three configuration files will be generated in the `config/` directory. Please modify them according to your needs.
+After downloading the Release, extract the zip file. It contains a `config/` directory. Simply modify the configuration files inside.
+
+Please modify the configuration files according to your needs.
 
 ## 1. Main Configuration (settings.toml)
 
