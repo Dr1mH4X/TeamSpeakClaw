@@ -1,8 +1,11 @@
 use crate::adapter::command::cmd_clientinfo;
-use crate::skills::{ExecutionContext, Skill};
+use crate::router::ClientInfo;
+use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde_json::{json, Value};
+use tracing::info;
 
 pub struct GetClientList;
 
@@ -36,6 +39,64 @@ impl Skill for GetClientList {
             .collect();
 
         Ok(json!({"status": "ok", "clients": json_clients}))
+    }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("GetClientList: unified execution, platform={:?}", ctx.platform);
+
+        match ctx.platform {
+            Platform::TeamSpeak => {
+                if let Some(ref ts_adapter) = ctx.ts_adapter {
+                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
+                    let ts_ctx = ExecutionContext {
+                        adapter: ts_adapter.clone(),
+                        clients: &empty_clients,
+                        caller_id: ctx.caller_id,
+                        caller_groups: ctx.caller_groups.clone(),
+                        caller_channel_group_id: ctx.caller_channel_group_id,
+                        gate: ctx.gate.clone(),
+                        config: ctx.config.clone(),
+                        error_prompts: ctx.error_prompts,
+                    };
+                    return self.execute(args.clone(), &ts_ctx).await;
+                }
+                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+            }
+            Platform::NapCat => {
+                // NC 请求查询 TS 在线列表
+                if let Some(ref ts_clients) = ctx.ts_clients {
+                    let clients: Vec<_> = ts_clients.iter().map(|r| r.value().clone()).collect();
+                    let json_clients: Vec<_> = clients
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "clid": c.clid,
+                                "nickname": c.nickname,
+                                "dbid": c.cldbid,
+                                "groups": c.server_groups
+                            })
+                        })
+                        .collect();
+
+                    let reply = if json_clients.is_empty() {
+                        "TS服务器当前没有在线用户".to_string()
+                    } else {
+                        let names: Vec<_> = json_clients.iter()
+                            .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
+                            .collect();
+                        format!("TS服务器在线用户 ({})：{}", names.len(), names.join(", "))
+                    };
+
+                    return Ok(json!({
+                        "status": "ok",
+                        "message": reply,
+                        "clients": json_clients,
+                        "platform": "teamspeak"
+                    }));
+                }
+                Err(anyhow::anyhow!("TeamSpeak clients list not available"))
+            }
+        }
     }
 }
 
@@ -80,6 +141,56 @@ impl Skill for GetClientInfo {
         // 解析 key=value 响应
         let info = parse_clientinfo_response(&response);
         Ok(json!({"status": "ok", "client_info": info}))
+    }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("GetClientInfo: unified execution, platform={:?}", ctx.platform);
+
+        match ctx.platform {
+            Platform::TeamSpeak => {
+                if let Some(ref ts_adapter) = ctx.ts_adapter {
+                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
+                    let ts_ctx = ExecutionContext {
+                        adapter: ts_adapter.clone(),
+                        clients: &empty_clients,
+                        caller_id: ctx.caller_id,
+                        caller_groups: ctx.caller_groups.clone(),
+                        caller_channel_group_id: ctx.caller_channel_group_id,
+                        gate: ctx.gate.clone(),
+                        config: ctx.config.clone(),
+                        error_prompts: ctx.error_prompts,
+                    };
+                    return self.execute(args.clone(), &ts_ctx).await;
+                }
+                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+            }
+            Platform::NapCat => {
+                // NC 请求查询 TS 指定用户信息
+                let clid = args["clid"].as_u64().map(|v| v as u32).unwrap_or(0);
+                
+                if let Some(ref ts_clients) = ctx.ts_clients {
+                    if !ts_clients.contains_key(&clid) {
+                        return Ok(json!({
+                            "status": "error",
+                            "message": format!("用户(clid={})不在线", clid)
+                        }));
+                    }
+
+                    let client = ts_clients.get(&clid).unwrap();
+                    let reply = format!(
+                        "TS用户信息 - 昵称:{}, ID:{}, 数据库ID:{}, 服务器分组:{:?}",
+                        client.nickname, client.clid, client.cldbid, client.server_groups
+                    );
+
+                    return Ok(json!({
+                        "status": "ok",
+                        "message": reply,
+                        "platform": "teamspeak"
+                    }));
+                }
+                Err(anyhow::anyhow!("TeamSpeak clients list not available"))
+            }
+        }
     }
 }
 
