@@ -121,6 +121,7 @@ jobs:
           cp examples/config/settings.toml "$STAGING/config/"
           cp examples/config/acl.toml "$STAGING/config/"
           cp examples/config/prompts.toml "$STAGING/config/"
+          mkdir -p dist
           cd staging
           ZIP_NAME="../dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
           zip -9 -r "$ZIP_NAME" .
