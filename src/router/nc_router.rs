@@ -29,6 +29,19 @@ pub struct NcRouter {
 }
 
 impl NcRouter {
+    fn is_trusted(&self, user_id: i64, group_id: Option<i64>) -> bool {
+        let nc = &self.config.napcat;
+        if nc.trusted_users.contains(&user_id) {
+            return true;
+        }
+        if let Some(gid) = group_id {
+            if nc.trusted_groups.contains(&gid) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn new(
         config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
@@ -72,9 +85,13 @@ impl NcRouter {
             match event {
                 NcEvent::PrivateMessage(msg) => {
                     if msg.user_id == self.adapter.get_self_id() {
-                        continue; // 忽略自身消息
+                        continue;
                     }
-                    if !self.config.napcat.respond_to_private {
+                    if !self.config.napcat.respond_to_private && !self.is_trusted(msg.user_id, None) {
+                        continue;
+                    }
+                    if !self.is_trusted(msg.user_id, None) {
+                        info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
                     self.spawn_handle_private(msg);
@@ -83,18 +100,20 @@ impl NcRouter {
                     if msg.user_id == self.adapter.get_self_id() {
                         continue;
                     }
-                    // 群组白名单过滤
                     let nc = &self.config.napcat;
+                    // 群组白名单过滤
                     if !nc.listen_groups.is_empty() && !nc.listen_groups.contains(&msg.group_id) {
+                        continue;
+                    }
+                    // 信任检查
+                    if !self.is_trusted(msg.user_id, Some(msg.group_id)) {
+                        info!("NC: Ignored untrusted user {} in group {}", msg.user_id, msg.group_id);
                         continue;
                     }
                     self.spawn_handle_group(msg);
                 }
                 NcEvent::Heartbeat => {
                     debug!("NapCat heartbeat");
-                }
-                NcEvent::Lifecycle(lc) => {
-                    info!("NapCat lifecycle: {:?}", lc.sub_type);
                 }
                 _ => {}
             }
@@ -327,20 +346,21 @@ impl NcRouter {
                 // 执行工具
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-                        // 构建统一执行上下文（包含 TS 和 NC 两个平台）
-                        let mut unified_ctx =
-                            UnifiedExecutionContext::from_nc(&NcExecutionContext {
-                                adapter: self.adapter.clone(),
-                                caller_id: user_id,
-                                caller_group_id: group_id,
-                                gate: self.gate.clone(),
-                                config: self.config.clone(),
-                                error_prompts: &self.prompts.error,
-                            });
-                        // 添加跨平台 adapter
-                        if let Some(ref ts_adapter) = self.ts_adapter {
-                            unified_ctx.ts_adapter = Some(ts_adapter.clone());
-                        }
+// 构建统一执行上下文（包含 TS 和 NC 两个平台）
+                        let nc_ctx = NcExecutionContext {
+                            adapter: self.adapter.clone(),
+                            caller_id: user_id,
+                            caller_group_id: group_id,
+                            gate: self.gate.clone(),
+                            config: self.config.clone(),
+                            error_prompts: &self.prompts.error,
+                        };
+                        let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
+                            .with_cross_adapters(
+                                self.ts_adapter.clone(),
+                                self.ts_clients.as_ref().map(|c| c.as_ref()),
+                                Some(self.adapter.clone()),
+                            );
                         if let Some(ref ts_clients) = self.ts_clients {
                             unified_ctx.ts_clients = Some(ts_clients.as_ref());
                         }
@@ -357,7 +377,7 @@ impl NcRouter {
                                 );
                                 val.to_string()
                             }
-                            Err(unified_err) => {
+                            Err(_unified_err) => {
                                 // 2. 回退到 NC 平台特定执行
                                 let nc_ctx = NcExecutionContext {
                                     adapter: self.adapter.clone(),

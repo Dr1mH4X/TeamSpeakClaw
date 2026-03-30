@@ -8,6 +8,8 @@ pub struct NapCatConfig {
     pub respond_to_private: bool,
     pub listen_groups: Vec<i64>,
     pub trigger_prefixes: Vec<String>,
+    pub trusted_groups: Vec<i64>,
+    pub trusted_users: Vec<i64>,
 }
 
 impl Default for NapCatConfig {
@@ -19,6 +21,8 @@ impl Default for NapCatConfig {
             respond_to_private: true,
             listen_groups: vec![],
             trigger_prefixes: vec!["!claw".to_string(), "!bot".to_string()],
+            trusted_groups: vec![],
+            trusted_users: vec![],
         }
     }
 }
