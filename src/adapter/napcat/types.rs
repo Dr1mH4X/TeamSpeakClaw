@@ -72,12 +72,7 @@ pub fn segments_to_text(segments: &[Segment]) -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Sender {
-    pub user_id: i64,
     pub nickname: String,
-    #[serde(default)]
-    pub card: String, // 群名片（私聊为空）
-    #[serde(default)]
-    pub role: Option<String>, // owner / admin / member
 }
 
 // ─────────────────────────────────────────────
@@ -93,12 +88,9 @@ pub struct NcAction {
 
 #[derive(Debug, Deserialize)]
 pub struct NcApiResponse {
-    pub status: String, // "ok" | "failed"
+    pub status: String,
     pub retcode: i64,
-    #[serde(default)]
     pub data: Value,
-    #[serde(default)]
-    pub echo: String,
     #[serde(default)]
     pub message: Option<String>,
 }
