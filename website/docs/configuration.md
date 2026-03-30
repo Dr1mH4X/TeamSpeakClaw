@@ -15,7 +15,7 @@ sidebar_position: 3
 包含连接 TeamSpeak 服务器、LLM 提供商设置和机器人行为的基本配置。
 
 ```toml
-[teamspeak]
+[serverquery]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
