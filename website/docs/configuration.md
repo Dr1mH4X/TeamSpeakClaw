@@ -4,14 +4,7 @@ sidebar_position: 3
 
 # 配置指南
 
-首次使用前，请从 `examples/config/` 目录复制配置文件到 `config/` 目录：
-
-```bash
-mkdir -p config
-cp examples/settings.toml config/
-cp examples/acl.toml config/
-cp examples/prompts.toml config/
-```
+下载 Release 后，解压 zip 文件，内含 `config/` 目录。直接修改其中的配置文件即可。
 
 请根据您的需求修改配置文件。
 
