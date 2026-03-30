@@ -14,16 +14,3 @@ impl Default for RateLimitConfig {
         }
     }
 }
-
-impl RateLimitConfig {
-    pub fn to_toml(&self) -> String {
-        let mut output = String::new();
-        output.push_str("[rate_limit]\n");
-        output.push_str(&format!(
-            "requests_per_minute = {}\n",
-            self.requests_per_minute
-        ));
-        output.push_str(&format!("burst_size = {}\n", self.burst_size));
-        output
-    }
-}
