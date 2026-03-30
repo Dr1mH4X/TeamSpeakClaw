@@ -15,6 +15,24 @@ use serde_json::Value;
 use std::sync::Arc;
 
 // ─────────────────────────────────────────────
+// 平台类型枚举
+// ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    TeamSpeak,
+    NapCat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossPlatformIntent {
+    None,
+    QueryTsChannel,
+    NotifyNcGroup,
+    NotifyNcPrivate,
+}
+
+// ─────────────────────────────────────────────
 // TeamSpeak 执行上下文（原有）
 // ─────────────────────────────────────────────
 
@@ -43,6 +61,81 @@ pub struct NcExecutionContext<'a> {
 }
 
 // ─────────────────────────────────────────────
+// 统一执行上下文（跨平台）
+// ─────────────────────────────────────────────
+
+pub struct UnifiedExecutionContext<'a> {
+    pub platform: Platform,
+    pub ts_adapter: Option<Arc<TsAdapter>>,
+    pub ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+    pub nc_adapter: Option<Arc<NapCatAdapter>>,
+    pub caller_id: u32,
+    pub caller_id_nc: i64,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub nc_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+
+impl<'a> UnifiedExecutionContext<'a> {
+    pub fn from_ts(ctx: &ExecutionContext<'a>) -> Self {
+        Self {
+            platform: Platform::TeamSpeak,
+            ts_adapter: Some(ctx.adapter.clone()),
+            ts_clients: Some(ctx.clients),
+            nc_adapter: None,
+            caller_id: ctx.caller_id,
+            caller_id_nc: 0,
+            caller_groups: ctx.caller_groups.clone(),
+            caller_channel_group_id: ctx.caller_channel_group_id,
+            nc_group_id: None,
+            gate: ctx.gate.clone(),
+            config: ctx.config.clone(),
+            error_prompts: ctx.error_prompts,
+        }
+    }
+
+    pub fn from_nc(ctx: &NcExecutionContext<'a>) -> Self {
+        Self {
+            platform: Platform::NapCat,
+            ts_adapter: None,
+            ts_clients: None,
+            nc_adapter: Some(ctx.adapter.clone()),
+            caller_id: 0,
+            caller_id_nc: ctx.caller_id,
+            caller_groups: vec![],
+            caller_channel_group_id: 0,
+            nc_group_id: ctx.caller_group_id,
+            gate: ctx.gate.clone(),
+            config: ctx.config.clone(),
+            error_prompts: ctx.error_prompts,
+        }
+    }
+
+    pub fn with_cross_adapters(
+        mut self,
+        ts_adapter: Option<Arc<TsAdapter>>,
+        ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+        nc_adapter: Option<Arc<NapCatAdapter>>,
+    ) -> Self {
+        self.ts_adapter = ts_adapter;
+        self.ts_clients = ts_clients;
+        self.nc_adapter = nc_adapter;
+        self
+    }
+
+    pub fn is_ts(&self) -> bool {
+        self.platform == Platform::TeamSpeak
+    }
+
+    pub fn is_nc(&self) -> bool {
+        self.platform == Platform::NapCat
+    }
+}
+
+// ─────────────────────────────────────────────
 // Skill trait
 // ─────────────────────────────────────────────
 
@@ -60,6 +153,15 @@ pub trait Skill: Send + Sync {
         let _ = args;
         Err(anyhow::anyhow!(
             "Skill '{}' does not support the NapCat platform",
+            self.name()
+        ))
+    }
+
+    /// 统一执行（支持跨平台，默认为 nil 表示不支持）
+    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support unified execution",
             self.name()
         ))
     }

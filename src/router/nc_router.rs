@@ -37,16 +37,7 @@ impl NcRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
     ) -> Self {
-        Self::new_with_ts(
-            config,
-            prompts,
-            adapter,
-            gate,
-            llm,
-            registry,
-            None,
-            None,
-        )
+        Self::new_with_ts(config, prompts, adapter, gate, llm, registry, None, None)
     }
 
     pub fn new_with_ts(
@@ -94,9 +85,7 @@ impl NcRouter {
                     }
                     // 群组白名单过滤
                     let nc = &self.config.napcat;
-                    if !nc.listen_groups.is_empty()
-                        && !nc.listen_groups.contains(&msg.group_id)
-                    {
+                    if !nc.listen_groups.is_empty() && !nc.listen_groups.contains(&msg.group_id) {
                         continue;
                     }
                     self.spawn_handle_group(msg);
@@ -201,22 +190,13 @@ impl NcRouter {
 
         let stripped = self.strip_prefix(text);
 
-        info!(
-            "[NC Private] user={} msg={}",
-            msg.sender.nickname, stripped
-        );
+        info!("[NC Private] user={} msg={}", msg.sender.nickname, stripped);
 
         // QQ 用户在权限层没有分组概念，使用空组列表（由 acl default 规则兜底）
         let allowed = self.gate.get_allowed_skills(&[], 0);
 
         let reply_text = self
-            .run_llm(
-                stripped,
-                &msg.sender.nickname,
-                msg.user_id,
-                None,
-                &allowed,
-            )
+            .run_llm(stripped, &msg.sender.nickname, msg.user_id, None, &allowed)
             .await;
 
         let segs = vec![Segment::text(&reply_text)];
@@ -348,14 +328,15 @@ impl NcRouter {
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
                         // 构建统一执行上下文（包含 TS 和 NC 两个平台）
-                        let mut unified_ctx = UnifiedExecutionContext::from_nc(&NcExecutionContext {
-                            adapter: self.adapter.clone(),
-                            caller_id: user_id,
-                            caller_group_id: group_id,
-                            gate: self.gate.clone(),
-                            config: self.config.clone(),
-                            error_prompts: &self.prompts.error,
-                        });
+                        let mut unified_ctx =
+                            UnifiedExecutionContext::from_nc(&NcExecutionContext {
+                                adapter: self.adapter.clone(),
+                                caller_id: user_id,
+                                caller_group_id: group_id,
+                                gate: self.gate.clone(),
+                                config: self.config.clone(),
+                                error_prompts: &self.prompts.error,
+                            });
                         // 添加跨平台 adapter
                         if let Some(ref ts_adapter) = self.ts_adapter {
                             unified_ctx.ts_adapter = Some(ts_adapter.clone());
@@ -376,7 +357,7 @@ impl NcRouter {
                                 );
                                 val.to_string()
                             }
-                            Err(_unified_err) => {
+                            Err(unified_err) => {
                                 // 2. 回退到 NC 平台特定执行
                                 let nc_ctx = NcExecutionContext {
                                     adapter: self.adapter.clone(),

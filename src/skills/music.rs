@@ -1,8 +1,11 @@
 use crate::adapter::command::cmd_send_text;
-use crate::skills::{ExecutionContext, Skill};
+use crate::router::ClientInfo;
+use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde_json::{json, Value};
+use tracing::info;
 
 pub struct MusicControl;
 
@@ -185,6 +188,82 @@ impl Skill for MusicControl {
             "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
             // 默认 / "ts3audiobot"
             _ => execute_ts3audiobot(action, &args, ctx).await,
+        }
+    }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("MusicControl: unified execution, platform={:?}", ctx.platform);
+
+        // 从配置中获取 music backend
+        let backend_cfg = &ctx.config.music_backend;
+
+        match ctx.platform {
+            // TeamSpeak 平台 - 使用 TS adapter
+            crate::skills::Platform::TeamSpeak => {
+                if let Some(ref ts_adapter) = ctx.ts_adapter {
+                    let action = args["action"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+
+                    // 创建空的 clients，因为 unified context 没有直接传递 clients 引用
+                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
+                    
+                    let ts_ctx = ExecutionContext {
+                        adapter: ts_adapter.clone(),
+                        clients: &empty_clients,
+                        caller_id: ctx.caller_id,
+                        caller_groups: ctx.caller_groups.clone(),
+                        caller_channel_group_id: ctx.caller_channel_group_id,
+                        gate: ctx.gate.clone(),
+                        config: ctx.config.clone(),
+                        error_prompts: ctx.error_prompts,
+                    };
+
+                    match backend_cfg.backend.as_str() {
+                        "tsbot_backend" => {
+                            execute_http(action, &args, &backend_cfg.base_url).await
+                        }
+                        _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
+                    }
+                } else {
+                    Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+                }
+            }
+            // NapCat 平台 - 需要处理跨平台
+            // 例如: NC 用户请求播放音乐 -> 需要转发到 TS 执行
+            crate::skills::Platform::NapCat => {
+                // 如果是 NC 平台但请求播放音乐，
+                // 检查 ts_adapter 是否可用，如果可用则转发到 TS 执行
+                if let Some(ref ts_adapter) = ctx.ts_adapter {
+                    info!("MusicControl: NC request转发到TS执行");
+                    let action = args["action"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+
+                    // 创建空的 clients
+                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
+                    
+                    let ts_ctx = ExecutionContext {
+                        adapter: ts_adapter.clone(),
+                        clients: &empty_clients,
+                        caller_id: ctx.caller_id,
+                        caller_groups: ctx.caller_groups.clone(),
+                        caller_channel_group_id: ctx.caller_channel_group_id,
+                        gate: ctx.gate.clone(),
+                        config: ctx.config.clone(),
+                        error_prompts: ctx.error_prompts,
+                    };
+
+                    match backend_cfg.backend.as_str() {
+                        "tsbot_backend" => {
+                            execute_http(action, &args, &backend_cfg.base_url).await
+                        }
+                        _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
+                    }
+                } else {
+                    Err(anyhow::anyhow!("TeamSpeak adapter not available, cannot execute music"))
+                }
+            }
         }
     }
 }
