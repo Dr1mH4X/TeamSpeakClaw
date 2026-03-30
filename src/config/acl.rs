@@ -17,12 +17,6 @@ impl Default for AclConfig {
     }
 }
 
-impl AclConfig {
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap()
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AclRule {
     pub name: String,
