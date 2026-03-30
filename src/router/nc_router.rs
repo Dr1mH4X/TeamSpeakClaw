@@ -3,11 +3,14 @@ use crate::adapter::napcat::{
     types::{segments_to_text, Segment},
     NapCatAdapter,
 };
+use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::{ExecutionContext as SkillCtx, NcExecutionContext, SkillRegistry};
+use crate::router::ClientInfo;
+use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
+use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -21,6 +24,8 @@ pub struct NcRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     semaphore: Arc<Semaphore>,
+    ts_adapter: Option<Arc<TsAdapter>>,
+    ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
 }
 
 impl NcRouter {
@@ -32,6 +37,28 @@ impl NcRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
     ) -> Self {
+        Self::new_with_ts(
+            config,
+            prompts,
+            adapter,
+            gate,
+            llm,
+            registry,
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_ts(
+        config: Arc<AppConfig>,
+        prompts: Arc<PromptsConfig>,
+        adapter: Arc<NapCatAdapter>,
+        gate: Arc<PermissionGate>,
+        llm: Arc<LlmEngine>,
+        registry: Arc<SkillRegistry>,
+        ts_adapter: Option<Arc<TsAdapter>>,
+        ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
+    ) -> Self {
         let max_concurrent = config.bot.max_concurrent_requests;
         Self {
             config,
@@ -41,6 +68,8 @@ impl NcRouter {
             llm,
             registry,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            ts_adapter,
+            ts_clients,
         }
     }
 
@@ -92,6 +121,8 @@ impl NcRouter {
         let llm = self.llm.clone();
         let registry = self.registry.clone();
         let semaphore = self.semaphore.clone();
+        let ts_adapter = self.ts_adapter.clone();
+        let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -109,6 +140,8 @@ impl NcRouter {
                 llm,
                 registry,
                 semaphore: Arc::new(Semaphore::new(1)),
+                ts_adapter,
+                ts_clients,
             };
             router.handle_private(msg).await;
         });
@@ -122,6 +155,8 @@ impl NcRouter {
         let llm = self.llm.clone();
         let registry = self.registry.clone();
         let semaphore = self.semaphore.clone();
+        let ts_adapter = self.ts_adapter.clone();
+        let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -139,6 +174,8 @@ impl NcRouter {
                 llm,
                 registry,
                 semaphore: Arc::new(Semaphore::new(1)),
+                ts_adapter,
+                ts_clients,
             };
             router.handle_group(msg).await;
         });
@@ -310,32 +347,65 @@ impl NcRouter {
                 // 执行工具
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-                        let ctx = NcExecutionContext {
+                        // 构建统一执行上下文（包含 TS 和 NC 两个平台）
+                        let mut unified_ctx = UnifiedExecutionContext::from_nc(&NcExecutionContext {
                             adapter: self.adapter.clone(),
                             caller_id: user_id,
                             caller_group_id: group_id,
                             gate: self.gate.clone(),
                             config: self.config.clone(),
                             error_prompts: &self.prompts.error,
-                        };
-                        match skill.execute_nc(call.arguments.clone(), &ctx).await {
+                        });
+                        // 添加跨平台 adapter
+                        if let Some(ref ts_adapter) = self.ts_adapter {
+                            unified_ctx.ts_adapter = Some(ts_adapter.clone());
+                        }
+                        if let Some(ref ts_clients) = self.ts_clients {
+                            unified_ctx.ts_clients = Some(ts_clients.as_ref());
+                        }
+
+                        // 1. 优先尝试统一执行（跨平台支持）
+                        let args = call.arguments.clone();
+                        match skill.execute_unified(args, &unified_ctx).await {
                             Ok(val) => {
                                 info!(
                                     skill = %call.name,
                                     caller = %sender_name,
                                     result = %val,
-                                    "NC Skill executed"
+                                    "NC Unified Skill executed"
                                 );
                                 val.to_string()
                             }
-                            Err(e) => {
-                                let msg = self
-                                    .prompts
-                                    .error
-                                    .skill_error
-                                    .replace("{detail}", &e.to_string());
-                                error!(skill = %call.name, error = %e, "NC Skill failed");
-                                msg
+                            Err(_unified_err) => {
+                                // 2. 回退到 NC 平台特定执行
+                                let nc_ctx = NcExecutionContext {
+                                    adapter: self.adapter.clone(),
+                                    caller_id: user_id,
+                                    caller_group_id: group_id,
+                                    gate: self.gate.clone(),
+                                    config: self.config.clone(),
+                                    error_prompts: &self.prompts.error,
+                                };
+                                match skill.execute_nc(call.arguments.clone(), &nc_ctx).await {
+                                    Ok(val) => {
+                                        info!(
+                                            skill = %call.name,
+                                            caller = %sender_name,
+                                            result = %val,
+                                            "NC Skill executed"
+                                        );
+                                        val.to_string()
+                                    }
+                                    Err(e) => {
+                                        let msg = self
+                                            .prompts
+                                            .error
+                                            .skill_error
+                                            .replace("{detail}", &e.to_string());
+                                        error!(skill = %call.name, error = %e, "NC Skill failed");
+                                        msg
+                                    }
+                                }
                             }
                         }
                     } else {
