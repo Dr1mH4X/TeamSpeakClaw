@@ -145,7 +145,12 @@ impl Skill for GetClientInfo {
             }
             Platform::NapCat => {
                 // NC 请求查询 TS 指定用户信息
-                let clid = args["clid"].as_u64().map(|v| v as u32).unwrap_or(0);
+                let clid = args["clid"].as_u64().ok_or_else(|| {
+                    anyhow::anyhow!(ctx
+                        .error_prompts
+                        .missing_parameter
+                        .replace("{param}", "clid"))
+                })? as u32;
 
                 if let Some(ref ts_clients) = ctx.ts_clients {
                     let Some(client) = ts_clients.get(&clid) else {
