@@ -8,6 +8,7 @@ RUN groupadd --gid 1001 appgroup && \
 WORKDIR /app
 
 COPY teamspeakclaw /app/teamspeakclaw
+COPY config-docker/ /app/config/
 RUN chmod +x /app/teamspeakclaw
 
 RUN mkdir -p /app/config /app/logs && \
