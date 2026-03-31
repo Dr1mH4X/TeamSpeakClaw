@@ -1,9 +1,10 @@
 # TeamSpeakClaw ACL Configuration
 # Copy this file to config/acl.toml and modify the rules below
 #
-# 规则匹配逻辑：server_group_ids 和 channel_group_ids 只要有一个匹配即视为匹配
-# 如果两者都为空数组，则该规则匹配所有用户
-# 规则从上到下匹配，第一个匹配的规则生效
+# 规则匹配逻辑：server_group_ids 和 channel_group_ids 需要「同时匹配」才算匹配；
+#   - 若某一侧数组为空（[]），表示对该侧不做限制，等价于“匹配所有该侧的用户”
+#   - 即：server_group_ids（若非空）与用户所属服务器组有交集，且 channel_group_ids（若非空）与用户所属频道组有交集
+# 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集），而不是只使用第一条匹配规则
 
 [[rules]]
 name = "superadmin"
