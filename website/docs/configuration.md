@@ -63,20 +63,6 @@ trusted_users = []
 - **TCP（默认）**：`method = "tcp"`，使用 `port`（默认 10011）连接。
 - **SSH**：`method = "ssh"`，使用 `ssh_port`（默认 10022）连接。
 
-### Docker 环境变量
-
-Docker 部署时，可通过 `.env` 文件设置以下环境变量：
-
-| 环境变量 | 说明 | 默认值 |
-|---|---|---|
-| `RUST_LOG` | 控制台日志级别（覆盖默认） | `info` |
-| `TS_LOGIN_PASS` | 覆盖 `serverquery.login_pass` | 无 |
-| `LLM_API_KEY` | 覆盖 `llm.api_key` | 无 |
-| `TZ` | 时区 | `Asia/Shanghai` |
-
-控制台日志优先级：`--log-level` CLI 参数 > `RUST_LOG` 环境变量 > 默认 `info`。
-文件日志由 `[logging].file_level` 控制。
-
 ### 音乐后端配置
 
 `[music_backend]` 区段控制音乐功能使用哪个后端：
