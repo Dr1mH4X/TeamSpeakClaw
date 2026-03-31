@@ -27,7 +27,7 @@ bot_nickname = "TSClaw"
 
 [music_backend]
 backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
-base_url = "http://127.0.0.1:8000"   # 仅 backend = "tsbot_backend" 时生效
+base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
 
 [llm]
 api_key = ""
@@ -40,6 +40,9 @@ trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊
 respond_to_private = true       # 私聊消息始终触发机器人
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
 default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)，仅频道/广播触发时生效
+
+[logging]
+file_level = "info"       # 文件日志级别: error | warn | info | debug | trace
 
 [rate_limit]
 requests_per_minute = 10        # 每个用户的令牌桶限流设置
@@ -67,10 +70,13 @@ Docker 部署时，可通过 `.env` 文件设置以下环境变量：
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
-| `RUST_LOG` | 控制台日志级别 | `info` |
+| `RUST_LOG` | 控制台日志级别（覆盖默认） | `info` |
+| `TS_LOGIN_PASS` | 覆盖 `serverquery.login_pass` | 无 |
+| `LLM_API_KEY` | 覆盖 `llm.api_key` | 无 |
 | `TZ` | 时区 | `Asia/Shanghai` |
 
-其他所有配置项请在 `config/settings.toml` 文件中修改。
+控制台日志优先级：`--log-level` CLI 参数 > `RUST_LOG` 环境变量 > 默认 `info`。
+文件日志由 `[logging].file_level` 控制。
 
 ### 音乐后端配置
 
@@ -95,17 +101,19 @@ Docker 部署时，可通过 `.env` 文件设置以下环境变量：
 
 文件路径: `config/acl.toml`
 
-控制哪些用户组可以使用哪些功能。规则从上到下匹配，第一个匹配的规则生效。
+控制哪些用户组可以使用哪些功能。**所有匹配规则的允许技能会合并收集**（非首个匹配），取并集。
 
 ```toml
-# server_group_ids: TeamSpeak 服务器组 ID
+# server_group_ids: TeamSpeak 服务器组 ID，空数组匹配所有服务器组
 # channel_group_ids: TeamSpeak 频道组 ID，空数组表示不检查频道组
 # allowed_skills: 允许使用的技能列表，"*" 代表所有
 # can_target_admins: 是否允许对受保护组成员执行操作
 # rate_limit_override: 可选，覆盖全局速率限制
 #
-# 规则匹配逻辑：server_group_ids 和 channel_group_ids 只要有一个匹配即视为匹配
-# 如果两者都为空数组，则该规则匹配所有用户
+# 规则匹配逻辑：遍历所有规则，收集所有匹配规则的 allowed_skills 取并集
+# 如果规则包含 "*"，立即返回全部技能
+# server_group_ids 为空 → 匹配所有服务器组
+# channel_group_ids 为空 → 跳过频道组检查（匹配所有人）
 
 [[rules]]
 name = "superadmin"
@@ -178,7 +186,7 @@ protected_group_ids = [6, 8, 9]
 
 ### NapCat 权限映射（ACL）
 
-NapCat 不存在 TeamSpeak 的服务器组/频道组概念，因此项目在权限检查时使用“虚拟组 ID”映射到 `acl.toml` 的 `server_group_ids`：
+NapCat 不存在 TeamSpeak 的服务器组/频道组概念，因此项目在权限检查时使用"虚拟组 ID"映射到 `acl.toml` 的 `server_group_ids`：
 
 - `9000`：任意 NapCat 用户
 - `9001`：NapCat 群聊上下文
@@ -213,4 +221,28 @@ content = """
 permission_denied = "你没有权限使用此命令。"
 llm_error = "AI 后端当前不可用。请稍后再试。"
 ts_error = "TeamSpeak 命令执行失败: {detail}"
+skill_error = "技能执行失败: {detail}"
+skill_not_found = "未找到指定的技能"
+self_target = "不能对自己执行此操作"
+target_permission = "无权对该用户执行此操作"
+empty_message = "消息内容不能为空"
+missing_parameter = "缺少必要参数: {param}"
+invalid_mode = "无效的模式，必须是 {allowed}"
+client_offline = "客户端 {clid} 在线或不存在"
 ```
+
+### 错误提示字段说明
+
+| 字段 | 说明 |
+|---|---|
+| `permission_denied` | 权限不足 |
+| `llm_error` | LLM API 不可用 |
+| `ts_error` | TeamSpeak 命令失败 |
+| `skill_error` | 技能执行失败 |
+| `skill_not_found` | 未找到技能 |
+| `self_target` | 不允许对自己操作 |
+| `target_permission` | 不允许对该目标操作 |
+| `empty_message` | 消息为空 |
+| `missing_parameter` | 缺少必要参数 |
+| `invalid_mode` | 无效模式 |
+| `client_offline` | 客户端不在线 |

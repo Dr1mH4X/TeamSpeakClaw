@@ -13,10 +13,9 @@ bot_nickname = "TSClaw"
 
 [music_backend]
 backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
-base_url = "http://127.0.0.1:8000"   # 仅 backend = "tsbot_backend" 时生效
+base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
 
 [llm]
-provider = "openai"       # 可选: openai | anthropic | ollama
 api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
@@ -37,6 +36,10 @@ burst_size = 3
 
 [napcat]
 enabled = false
-base_url = "ws://127.0.0.1:3000"
-api_key = ""
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
 respond_to_private = true
+listen_groups = []
+trigger_prefixes = ["!claw", "!bot"]
+trusted_groups = []
+trusted_users = []
