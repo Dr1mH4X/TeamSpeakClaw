@@ -41,6 +41,57 @@ impl Skill for PokeClient {
         ctx.adapter.send_raw(&cmd_poke(clid, msg)).await?;
         Ok(json!({"status": "ok", "message": "Poke sent"}))
     }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!(
+            "PokeClient: unified execution, platform={:?}",
+            ctx.platform
+        );
+
+        let msg = args["msg"].as_str().unwrap_or("Poke!");
+
+        match ctx.platform {
+            Platform::TeamSpeak => {
+                if let Some(ref ts_adapter) = ctx.ts_adapter {
+                    let ts_ctx = ExecutionContext {
+                        adapter: ts_adapter.clone(),
+                        clients: ctx.ts_clients.ok_or_else(|| {
+                            anyhow::anyhow!("TeamSpeak clients list not available")
+                        })?,
+                        caller_id: ctx.caller_id,
+                        caller_groups: ctx.caller_groups.clone(),
+                        caller_channel_group_id: ctx.caller_channel_group_id,
+                        gate: ctx.gate.clone(),
+                        config: ctx.config.clone(),
+                        error_prompts: ctx.error_prompts,
+                    };
+                    return self.execute(args.clone(), &ts_ctx).await;
+                }
+                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+            }
+            Platform::NapCat => {
+                let ts_adapter = ctx.ts_adapter.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("TeamSpeak adapter not available")
+                })?;
+
+                let clid = args["clid"].as_u64().ok_or_else(|| {
+                    anyhow::anyhow!(ctx
+                        .error_prompts
+                        .missing_parameter
+                        .replace("{param}", "clid"))
+                })? as u32;
+
+                ts_adapter.send_raw(&cmd_poke(clid, msg)).await?;
+
+                Ok(json!({
+                    "status": "ok",
+                    "message": format!("已在TS戳了用户 {}", clid),
+                    "platform": "teamspeak",
+                    "routed_by": "unified"
+                }))
+            }
+        }
+    }
 }
 
 pub struct SendMessage;

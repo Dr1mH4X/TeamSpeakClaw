@@ -5,7 +5,7 @@ use crate::adapter::napcat::{
 };
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::LlmEngine;
+use crate::llm::{LlmEngine, provider::ToolCall};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -311,7 +311,85 @@ impl NcRouter {
         text
     }
 
-    /// 调用 LLM + Skill 系统，返回最终文本回复
+    /// 执行单个工具调用，返回结果字符串
+    async fn execute_skill(
+        &self,
+        call: &ToolCall,
+        user_id: i64,
+        group_id: Option<i64>,
+        sender_name: &str,
+    ) -> String {
+        if let Some(skill) = self.registry.get(&call.name) {
+            // 构建统一执行上下文（包含 TS 和 NC 两个平台）
+            let nc_ctx = NcExecutionContext {
+                adapter: self.adapter.clone(),
+                caller_id: user_id,
+                caller_group_id: group_id,
+                gate: self.gate.clone(),
+                config: self.config.clone(),
+                error_prompts: &self.prompts.error,
+            };
+            let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
+                .with_cross_adapters(
+                    self.ts_adapter.clone(),
+                    self.ts_clients.as_ref().map(|c| c.as_ref()),
+                    Some(self.adapter.clone()),
+                );
+            if let Some(ref ts_clients) = self.ts_clients {
+                unified_ctx.ts_clients = Some(ts_clients.as_ref());
+            }
+
+            // 1. 优先尝试统一执行（跨平台支持）
+            let args = call.arguments.clone();
+            match skill.execute_unified(args, &unified_ctx).await {
+                Ok(val) => {
+                    info!(
+                        skill = %call.name,
+                        caller = %sender_name,
+                        result = %val,
+                        "NC Unified Skill executed"
+                    );
+                    val.to_string()
+                }
+                Err(_unified_err) => {
+                    // 2. 回退到 NC 平台特定执行
+                    let nc_ctx = NcExecutionContext {
+                        adapter: self.adapter.clone(),
+                        caller_id: user_id,
+                        caller_group_id: group_id,
+                        gate: self.gate.clone(),
+                        config: self.config.clone(),
+                        error_prompts: &self.prompts.error,
+                    };
+                    match skill.execute_nc(call.arguments.clone(), &nc_ctx).await {
+                        Ok(val) => {
+                            info!(
+                                skill = %call.name,
+                                caller = %sender_name,
+                                result = %val,
+                                "NC Skill executed"
+                            );
+                            val.to_string()
+                        }
+                        Err(e) => {
+                            let msg = self
+                                .prompts
+                                .error
+                                .skill_error
+                                .replace("{detail}", &e.to_string());
+                            error!(skill = %call.name, error = %e, "NC Skill failed");
+                            msg
+                        }
+                    }
+                }
+            }
+        } else {
+            warn!(skill = %call.name, "NC Skill not found");
+            self.prompts.error.skill_not_found.clone()
+        }
+    }
+
+    /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复
     async fn run_llm(
         &self,
         user_msg: &str,
@@ -321,6 +399,7 @@ impl NcRouter {
         allowed_skills: &[String],
     ) -> String {
         let error_msg = self.prompts.error.llm_error.clone();
+        let max_turns = self.config.bot.max_tool_turns;
 
         let system_prompt = &self.prompts.system.content;
         let user_ctx = match group_id {
@@ -334,133 +413,64 @@ impl NcRouter {
             json!({"role": "user", "content": user_msg}),
         ];
 
-        // 注意：NapCat Skill 没有 TS 客户端列表，使用专用上下文
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
-        match self.llm.chat(messages.clone(), tools.clone()).await {
-            Ok(response) => {
-                if response.tool_calls.is_empty() {
-                    return response.content.unwrap_or_default();
-                }
+        for turn in 0..max_turns {
+            debug!("[NC] LLM turn {}/{}", turn + 1, max_turns);
 
-                // 准备工具调用历史
-                let assistant_tool_calls: Vec<_> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| {
-                        json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments.to_string()
-                            }
-                        })
-                    })
-                    .collect();
+            match self.llm.chat(messages.clone(), tools.clone()).await {
+                Ok(response) => {
+                    // 没有工具调用，返回最终内容
+                    if response.tool_calls.is_empty() {
+                        let content = response.content.unwrap_or_default();
+                        info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
+                        return content;
+                    }
 
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": response.content,
-                    "tool_calls": assistant_tool_calls
-                }));
-
-                // 执行工具
-                for call in response.tool_calls {
-                    let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-                        // 构建统一执行上下文（包含 TS 和 NC 两个平台）
-                        let nc_ctx = NcExecutionContext {
-                            adapter: self.adapter.clone(),
-                            caller_id: user_id,
-                            caller_group_id: group_id,
-                            gate: self.gate.clone(),
-                            config: self.config.clone(),
-                            error_prompts: &self.prompts.error,
-                        };
-                        let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
-                            .with_cross_adapters(
-                                self.ts_adapter.clone(),
-                                self.ts_clients.as_ref().map(|c| c.as_ref()),
-                                Some(self.adapter.clone()),
-                            );
-                        if let Some(ref ts_clients) = self.ts_clients {
-                            unified_ctx.ts_clients = Some(ts_clients.as_ref());
-                        }
-
-                        // 1. 优先尝试统一执行（跨平台支持）
-                        let args = call.arguments.clone();
-                        match skill.execute_unified(args, &unified_ctx).await {
-                            Ok(val) => {
-                                info!(
-                                    skill = %call.name,
-                                    caller = %sender_name,
-                                    result = %val,
-                                    "NC Unified Skill executed"
-                                );
-                                val.to_string()
-                            }
-                            Err(_unified_err) => {
-                                // 2. 回退到 NC 平台特定执行
-                                let nc_ctx = NcExecutionContext {
-                                    adapter: self.adapter.clone(),
-                                    caller_id: user_id,
-                                    caller_group_id: group_id,
-                                    gate: self.gate.clone(),
-                                    config: self.config.clone(),
-                                    error_prompts: &self.prompts.error,
-                                };
-                                match skill.execute_nc(call.arguments.clone(), &nc_ctx).await {
-                                    Ok(val) => {
-                                        info!(
-                                            skill = %call.name,
-                                            caller = %sender_name,
-                                            result = %val,
-                                            "NC Skill executed"
-                                        );
-                                        val.to_string()
-                                    }
-                                    Err(e) => {
-                                        let msg = self
-                                            .prompts
-                                            .error
-                                            .skill_error
-                                            .replace("{detail}", &e.to_string());
-                                        error!(skill = %call.name, error = %e, "NC Skill failed");
-                                        msg
-                                    }
+                    // 准备工具调用历史
+                    let assistant_tool_calls: Vec<_> = response
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments.to_string()
                                 }
-                            }
-                        }
-                    } else {
-                        warn!(skill = %call.name, "NC Skill not found");
-                        self.prompts.error.skill_not_found.clone()
-                    };
+                            })
+                        })
+                        .collect();
 
                     messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "name": call.name,
-                        "content": tool_result
+                        "role": "assistant",
+                        "content": response.content,
+                        "tool_calls": assistant_tool_calls
                     }));
-                }
 
-                // 二轮 LLM
-                match self.llm.chat(messages, tools).await {
-                    Ok(final_resp) => {
-                        let content = final_resp.content.unwrap_or_default();
-                        info!("[NC] LLM final reply: {content}");
-                        content
+                    // 执行所有工具调用
+                    for call in &response.tool_calls {
+                        let tool_result = self.execute_skill(call, user_id, group_id, sender_name).await;
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": tool_result
+                        }));
                     }
-                    Err(e) => {
-                        error!("NC LLM 2nd turn error: {e}");
-                        error_msg
-                    }
+
+                    // 继续下一轮
                 }
-            }
-            Err(e) => {
-                error!("NC LLM error: {e}");
-                error_msg
+                Err(e) => {
+                    error!("NC LLM error (turn {}): {}", turn + 1, e);
+                    return error_msg;
+                }
             }
         }
+
+        // 达到最大轮数，尝试获取最后一个可用的回复
+        warn!("[NC] Reached max tool turns ({})", max_turns);
+        "操作超时，请稍后再试".to_string()
     }
 }
