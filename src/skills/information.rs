@@ -47,23 +47,8 @@ impl Skill for GetClientList {
 
         match ctx.platform {
             Platform::TeamSpeak => {
-                if let Some(ref ts_adapter) = ctx.ts_adapter {
-                    let ts_ctx = ExecutionContext {
-                        adapter: ts_adapter.clone(),
-                        clients: ctx.ts_clients.ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak clients list not available")
-                        })?,
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.caller_groups.clone(),
-                        caller_channel_group_id: ctx.caller_channel_group_id,
-                        gate: ctx.gate.clone(),
-                        config: ctx.config.clone(),
-                        error_prompts: ctx.error_prompts,
-                    };
-                    return self.execute(args.clone(), &ts_ctx).await;
-                }
-                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+                let ts_ctx = ctx.to_ts_ctx()?;
+                return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
                 // NC 请求查询 TS 在线列表
@@ -155,23 +140,8 @@ impl Skill for GetClientInfo {
 
         match ctx.platform {
             Platform::TeamSpeak => {
-                if let Some(ref ts_adapter) = ctx.ts_adapter {
-                    let ts_ctx = ExecutionContext {
-                        adapter: ts_adapter.clone(),
-                        clients: ctx.ts_clients.ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak clients list not available")
-                        })?,
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.caller_groups.clone(),
-                        caller_channel_group_id: ctx.caller_channel_group_id,
-                        gate: ctx.gate.clone(),
-                        config: ctx.config.clone(),
-                        error_prompts: ctx.error_prompts,
-                    };
-                    return self.execute(args.clone(), &ts_ctx).await;
-                }
-                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+                let ts_ctx = ctx.to_ts_ctx()?;
+                return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
                 // NC 请求查询 TS 指定用户信息
