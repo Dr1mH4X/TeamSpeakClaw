@@ -19,33 +19,19 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 1. 将下载的压缩包解压到一个文件夹中。
 2. 确保您拥有该文件夹的读写权限。
 
-## 3. 生成配置
+## 3. 配置
 
-在命令行运行以下命令，自动生成默认配置文件：
-
-```bash
-./teamspeakclaw --config generate
-```
-
-这将在 `config/` 目录下创建三个配置文件：
+解压后内含 `config/` 目录，包含以下配置文件：
 
 - `settings.toml` — 核心设置（连接、LLM、机器人行为）
 - `acl.toml` — 权限控制规则
 - `prompts.toml` — 系统提示词与错误消息
 
-## 4. 编辑配置
-
-您可以使用文本编辑器手动修改配置文件，或使用内置的交互式向导：
-
-```bash
-./teamspeakclaw --config edit
-```
-
-向导将引导您输入 TeamSpeak ServerQuery 账号密码以及 LLM API Key 等信息。
+使用文本编辑器修改 `config/settings.toml`，填入您的 TeamSpeak ServerQuery 账号密码以及 LLM API Key 等信息。
 
 详细配置说明请参考 [配置指南](/docs/configuration)。
 
-## 5. Docker 部署（推荐）
+## 4. Docker 部署（推荐）
 
 使用 Docker 部署是最简单的方式，无需手动安装依赖。
 
@@ -56,8 +42,6 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 ```bash
 mkdir teamspeakclaw && cd teamspeakclaw
 curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/.env.example
-mv .env.example .env
 ```
 
 2. 编辑配置文件：
@@ -87,8 +71,8 @@ docker pull ghcr.io/dr1mh4x/teamspeakclaw:latest
 # 创建目录
 mkdir -p config logs
 
-# 生成配置文件
-docker run --rm -v ./config:/app/config ghcr.io/dr1mh4x/teamspeakclaw --config generate
+# 复制示例配置并编辑
+# 从 examples/config/ 目录复制配置文件并修改
 
 # 编辑配置文件后运行容器
 docker run -d \
@@ -100,7 +84,7 @@ docker run -d \
   ghcr.io/dr1mh4x/teamspeakclaw:latest
 ```
 
-## 6. 启动服务（传统方式）
+## 5. 启动服务（传统方式）
 
 配置完成后，直接运行程序：
 

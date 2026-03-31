@@ -15,10 +15,8 @@ sidebar_position: 4
 如果配置正确，您应该会看到类似以下的日志：
 
 ```
-版本: v0.x.x
-GitHub: https://github.com/Dr1mH4X/TeamSpeakClaw
 INFO Starting TeamSpeakClaw v0.x.x
-INFO Bot ready. Listening for events.
+INFO Bot ready. Listening for TS + NapCat events.
 ```
 
 此时，机器人应该已经连接到您的 TeamSpeak 服务器。
@@ -26,8 +24,6 @@ INFO Bot ready. Listening for events.
 ## 命令行选项
 
 - `--log-level <LEVEL>`: 设置控制台日志级别（error, warn, info, debug, trace），默认为 info。
-- `--config generate`: 在 `config/` 目录下生成默认配置文件。
-- `--config edit`: 启动交互式配置向导。
 
 ## 交互方式
 
@@ -40,6 +36,8 @@ INFO Bot ready. Listening for events.
 2.  **私聊 (推荐)**: 双击机器人进行私聊。
     -   私聊通常不需要前缀（取决于 `respond_to_private` 设置）。
     -   例如: `踢掉那个叫 User123 的人`
+
+3.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
 
 ## 可用技能 (Skills)
 
@@ -58,22 +56,42 @@ TeamSpeakClaw 支持两种音乐后端：
 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)。需在 `settings.toml` 中配置 `backend = "tsbot_backend"` 和 `base_url`。
 
 支持的操作：
-- **点歌**: "播放 [歌名]"
-- **切歌**: "下一首", "切歌"
-- **暂停/继续**: "暂停音乐", "继续播放"
-- **搜索**: "搜索周杰伦的歌"
-- **音量**: "音量调到 50"
-- **音效**: 调节立体声、低音、混响等
+
+| 动作 | 说明 |
+|---|---|
+| `play` | 播放歌曲（搜索关键词） |
+| `pause` | 暂停 / 继续播放 |
+| `next` / `skip` | 切歌 |
+| `previous` | 上一首 |
+| `search` | 搜索并播放 |
+| `repeat` | 循环模式（none/one/all） |
+| `volume` | 调节音量 |
+| `fx` | 音效设置 |
+| `ts_play` | TS3AudioBot 专用播放 |
+| `ts_add` | TS3AudioBot 专用添加到队列 |
+| `ts_gedan` / `ts_gedanid` | TS3AudioBot 歌单操作 |
+| `ts_playid` / `ts_addid` | TS3AudioBot 按 ID 操作 |
+| `ts_mode` | TS3AudioBot 播放模式 |
+| `ts_login` | TS3AudioBot 登录 |
+| `queue_netease` | tsbot_backend: 网易云歌单入队 |
+| `queue_qqmusic` | tsbot_backend: QQ 音乐歌单入队 |
 
 ### 🛡️ 管理功能
 
 - **踢出用户** (kick_client): "把 UserA 踢出服务器"
 - **封禁用户** (ban_client): "封禁 UserB 10 分钟"
+- **移动用户** (move_client): "把 UserA 移动到频道 12"
 
 ### 💬 通讯功能
 
 - **戳一戳** (poke_client): "戳一下 UserA"
 - **发送消息** (send_message): "给 UserA 发私信说你好"
+
+#### `send_message` 跨平台路由说明
+
+- TeamSpeak 场景：支持 `mode=private|channel|server`。
+- NapCat 场景：默认走 NapCat 原生发送，支持 `mode=private|group`。
+- 若希望从 NapCat 显式转发到 TeamSpeak，请传入 `ts_route=true`，此时支持 `mode=private|channel|server`（`private` 需 `clid`）。
 
 ### ℹ️ 信息查询
 

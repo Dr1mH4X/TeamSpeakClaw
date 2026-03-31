@@ -18,6 +18,7 @@ use crate::{
     adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
     router::EventRouter,
 };
+use dashmap::DashMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,12 +28,9 @@ async fn main() -> Result<()> {
     // 2. 解析参数
     let args = Args::parse();
 
-    if let Some(action) = args.config {
-        return crate::cli::handle_config_action(action);
-    }
-
     // 3. 初始化配置与日志
-    let cfg = AppConfig::load("config/settings.toml")?;
+    let config_dir = crate::config::config_dir();
+    let cfg = AppConfig::load(config_dir.join("settings.toml"))?;
     let _guard = init_tracing(&args.log_level, &cfg.logging.file_level);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
@@ -40,8 +38,8 @@ async fn main() -> Result<()> {
     let config = Arc::new(cfg);
 
     // 4. 初始化组件
-    let acl_config = crate::config::AclConfig::load("config/acl.toml")?;
-    let prompts_config = crate::config::PromptsConfig::load("config/prompts.toml")?;
+    let acl_config = crate::config::AclConfig::load(config_dir.join("acl.toml"))?;
+    let prompts_config = crate::config::PromptsConfig::load(config_dir.join("prompts.toml"))?;
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
 
@@ -51,29 +49,103 @@ async fn main() -> Result<()> {
 
     // 5. 连接服务
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter.set_nickname(&config.teamspeak.bot_nickname).await?;
+    adapter
+        .set_nickname(&config.serverquery.bot_nickname)
+        .await?;
 
-    // 6. 事件路由循环
-    let router = EventRouter::new(config, prompts, adapter.clone(), gate, llm, registry);
+    // 6. NapCat 适配器（可选，需要在 ts_router 之前创建）
+    use crate::adapter::napcat::NapCatAdapter;
+    use crate::router::NcRouter;
 
-    info!("Bot ready. Listening for events.");
+    let nc_adapter: Option<Arc<NapCatAdapter>> = if config.napcat.enabled {
+        let nc = NapCatAdapter::connect(config.napcat.clone()).await?;
+        Some(nc)
+    } else {
+        None
+    };
 
-    let run_result: Result<()> = tokio::select! {
-        res = router.run() => {
-            match res {
-                Ok(()) => {
-                    warn!("Event router exited unexpectedly");
-                    Err(anyhow::anyhow!("Event router exited unexpectedly"))
-                }
-                Err(e) => {
-                    error!("Event router exited with error: {}", e);
-                    Err(e)
+    // 7. 事件路由循环（TeamSpeak）
+    let ts_router = EventRouter::new_with_clients(
+        config.clone(),
+        prompts.clone(),
+        adapter.clone(),
+        gate.clone(),
+        llm.clone(),
+        registry.clone(),
+        Arc::new(DashMap::new()),
+        nc_adapter.clone(),
+    );
+
+    let run_result: Result<()> = if let Some(nc_adapter) = nc_adapter {
+        let nc_router = NcRouter::new_with_ts(
+            config.clone(),
+            prompts.clone(),
+            nc_adapter,
+            gate.clone(),
+            llm.clone(),
+            registry.clone(),
+            Some(adapter.clone()),
+            Some(ts_router.clients.clone()),
+        );
+        let nc_future = tokio::spawn(async move { nc_router.run().await });
+
+        info!("Bot ready. Listening for TS + NapCat events.");
+
+        tokio::select! {
+            res = ts_router.run() => {
+                match res {
+                    Ok(()) => {
+                        warn!("TS Event router exited unexpectedly");
+                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
+                    }
+                    Err(e) => {
+                        error!("TS Event router exited with error: {}", e);
+                        Err(e)
+                    }
                 }
             }
+            res = nc_future => {
+                match res {
+                    Ok(Ok(())) => {
+                        warn!("NC router exited unexpectedly");
+                        Err(anyhow::anyhow!("NC router exited unexpectedly"))
+                    }
+                    Ok(Err(e)) => {
+                        error!("NC router error: {e}");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        error!("NC router task panicked: {e}");
+                        Err(anyhow::anyhow!("NC router panicked"))
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+                Ok(())
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down...");
-            Ok(())
+    } else {
+        info!("NapCat adapter disabled, running in TeamSpeak-only mode");
+        info!("Bot ready. Listening for TeamSpeak events.");
+
+        tokio::select! {
+            res = ts_router.run() => {
+                match res {
+                    Ok(()) => {
+                        warn!("TS Event router exited unexpectedly");
+                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
+                    }
+                    Err(e) => {
+                        error!("TS Event router exited with error: {}", e);
+                        Err(e)
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+                Ok(())
+            }
         }
     };
 
@@ -105,7 +177,8 @@ fn print_banner() {
 fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     use std::path::PathBuf;
     use tracing_subscriber::{
-        fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+        fmt::{self, time::LocalTime},
+        layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
 
     let console_filter = EnvFilter::try_from_default_env()
@@ -114,6 +187,7 @@ fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     let console_layer = fmt::layer()
         .with_target(true)
         .compact()
+        .with_timer(LocalTime::rfc_3339())
         .with_filter(console_filter);
 
     // 使用可执行文件所在目录作为日志根目录
@@ -132,6 +206,7 @@ fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
+        .with_timer(LocalTime::rfc_3339())
         .with_filter(file_filter);
 
     tracing_subscriber::registry()

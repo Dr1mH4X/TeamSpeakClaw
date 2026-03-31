@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   teamspeakclaw:
-    image: ghcr.io/dr1mh4x/teamspeakclaw:latest # 或使用 ghcr.nju.edu.cn
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest
     container_name: teamspeakclaw
     user: "1000:10" #PUID:GUID
     restart: unless-stopped
