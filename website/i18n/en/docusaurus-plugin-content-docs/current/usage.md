@@ -69,11 +69,18 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
 
 - **Kick Client** (kick_client): "Kick UserA from the server"
 - **Ban Client** (ban_client): "Ban UserB for 10 minutes"
+- **Move Client** (move_client): "Move UserA to channel 12"
 
 ### 💬 Communication
 
 - **Poke Client** (poke_client): "Poke UserA"
 - **Send Message** (send_message): "Send a private message to UserA saying hello"
+
+#### `send_message` cross-platform routing
+
+- TeamSpeak context: supports `mode=private|channel|server`.
+- NapCat context: defaults to native NapCat sending, supports `mode=private|group`.
+- To explicitly route from NapCat to TeamSpeak, pass `ts_route=true`; then `mode=private|channel|server` is used (`private` requires `clid`).
 
 ### ℹ️ Information Query
 

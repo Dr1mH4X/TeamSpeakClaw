@@ -1,8 +1,15 @@
 use crate::adapter::command::cmd_send_text;
-use crate::skills::{ExecutionContext, Skill};
+use crate::adapter::serverquery::event::{TextMessageTarget, TsEvent};
+use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tracing::{debug, info};
+
+static TS3AUDIOBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub struct MusicControl;
 
@@ -187,6 +194,47 @@ impl Skill for MusicControl {
             _ => execute_ts3audiobot(action, &args, ctx).await,
         }
     }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!(
+            "MusicControl: unified execution, platform={:?}",
+            ctx.platform
+        );
+
+        // 从配置中获取 music backend
+        let backend_cfg = &ctx.config.music_backend;
+
+        match ctx.platform {
+            // TeamSpeak 平台 - 使用 TS adapter
+            crate::skills::Platform::TeamSpeak => {
+                let action = args["action"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+
+                let ts_ctx = ctx.to_ts_ctx()?;
+
+                match backend_cfg.backend.as_str() {
+                    "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
+                    _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
+                }
+            }
+            // NapCat 平台 - 需要处理跨平台
+            // 例如: NC 用户请求播放音乐 -> 需要转发到 TS 执行
+            crate::skills::Platform::NapCat => {
+                let action = args["action"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+
+                let ts_ctx = ctx.to_ts_ctx()?;
+                info!("MusicControl: NC request转发到TS执行");
+
+                match backend_cfg.backend.as_str() {
+                    "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
+                    _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -367,13 +415,49 @@ async fn execute_ts3audiobot(
         .find(|c| c.nickname == "TS3AudioBot")
         .ok_or_else(|| anyhow::anyhow!("TS3AudioBot not found online"))?;
 
+    // 串行化 TS3AudioBot 交互，防止并发调用交叉消费 broadcast 事件
+    let _guard = TS3AUDIOBOT_LOCK.lock().await;
+
+    let mut ts_rx = ctx.adapter.subscribe();
+
     ctx.adapter
         .send_raw(&cmd_send_text(1, audiobot.clid, &bot_cmd))
         .await?;
 
-    Ok(json!({
-        "status": "ok",
-        "sent_to": "TS3AudioBot",
-        "command": bot_cmd
-    }))
+    // 等待 TS3AudioBot 的实际回复（最多 10 秒）
+    let reply = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match ts_rx.recv().await {
+                Ok(TsEvent::TextMessage(msg))
+                    if msg.invoker_name == "TS3AudioBot"
+                        && msg.target_mode == TextMessageTarget::Private =>
+                {
+                    return msg.message;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    debug!("TS event channel error while waiting for TS3AudioBot reply: {e}");
+                    return String::new();
+                }
+            }
+        }
+    })
+    .await;
+
+    drop(_guard);
+
+    match reply {
+        Ok(content) if !content.is_empty() => {
+            info!("TS3AudioBot replied: {content}");
+            Ok(content.into())
+        }
+        _ => {
+            // 超时降级：返回原始状态
+            Ok(json!({
+                "status": "ok",
+                "sent_to": "TS3AudioBot",
+                "command": bot_cmd
+            }))
+        }
+    }
 }

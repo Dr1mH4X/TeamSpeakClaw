@@ -1,0 +1,45 @@
+# TeamSpeakClaw Configuration
+# Copy this file to config/settings.toml and modify the values below
+
+[serverquery]
+host = "127.0.0.1"
+port = 10011
+ssh_port = 10022
+method = "tcp"            # 连接方式: tcp 或 ssh
+login_name = "serveradmin"
+login_pass = ""
+server_id = 1
+bot_nickname = "TSClaw"
+
+[music_backend]
+backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
+base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
+
+[llm]
+api_key = ""
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+max_tokens = 1024
+
+[bot]
+trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
+respond_to_private = true       # 私聊消息始终触发机器人
+max_concurrent_requests = 4     # 最大并发 LLM 请求数
+default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)
+max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
+
+[logging]
+file_level = "info"
+
+[rate_limit]
+requests_per_minute = 10        # 每个用户的令牌桶限流设置
+burst_size = 3
+
+[napcat]
+enabled = false
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
+listen_groups = []
+trigger_prefixes = ["!claw", "!bot"]
+trusted_groups = []
+trusted_users = []

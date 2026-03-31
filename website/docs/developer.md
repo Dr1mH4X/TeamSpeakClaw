@@ -25,13 +25,12 @@ cd TeamSpeakClaw
 cargo build
 
 # 运行（开发模式）
-cargo run -- --config generate   # 生成默认配置
-cargo run                        # 启动机器人
+cargo run
 ```
 
 ### 配置开发环境
 
-首次运行需生成配置文件，详见 [配置指南](/docs/configuration)
+首次运行前请手动创建配置文件，详见 [配置指南](/docs/configuration)
 
 ## 项目架构
 
@@ -39,58 +38,120 @@ cargo run                        # 启动机器人
 
 ```
 src/
-├── main.rs           # 入口：初始化组件，启动事件循环
-├── cli.rs            # 命令行参数解析与配置向导
-├── router.rs         # 事件路由：协调各模块处理用户消息
-├── adapter/          # TeamSpeak 适配器层
+├── main.rs                  # 入口：初始化组件，启动事件循环
+├── cli.rs                   # 命令行参数解析
+├── router.rs                # 模块重导出（→ router/）
+├── router/
+│   ├── sq_router.rs         # TeamSpeak 事件路由
+│   └── nc_router.rs         # NapCat/QQ 事件路由
+├── adapter/
 │   ├── mod.rs
-│   ├── connection.rs # 连接管理（TCP/SSH）
-│   ├── command.rs    # 命令构建
-│   └── event.rs      # 事件解析
-├── config/           # 配置加载与验证
-│   └── mod.rs
-├── llm/              # LLM 集成层
+│   ├── serverquery/         # TeamSpeak ServerQuery 适配器
+│   │   ├── mod.rs
+│   │   ├── connection.rs    # TCP/SSH 连接管理
+│   │   ├── command.rs       # 命令构建
+│   │   └── event.rs         # 事件解析
+│   └── napcat/              # NapCat OneBot 11 适配器
+│       ├── mod.rs
+│       ├── ws.rs            # WebSocket 连接与重连
+│       ├── api.rs           # OneBot API action 定义
+│       ├── event.rs         # 事件解析
+│       └── types.rs         # 消息段与响应类型
+├── config/
+│   ├── mod.rs               # AppConfig 聚合
+│   ├── serverquery.rs       # ServerQuery 配置
+│   ├── napcat.rs            # NapCat 配置
+│   ├── bot.rs               # 机器人行为配置
+│   ├── llm.rs               # LLM 配置
+│   ├── music_backend.rs     # 音乐后端配置
+│   ├── acl.rs               # 权限规则配置
+│   ├── logging.rs           # 日志配置
+│   ├── rate_limit.rs        # 限流配置
+│   └── prompts.rs           # 提示词与错误消息
+├── llm/
 │   ├── mod.rs
-│   ├── engine.rs     # LLM 引擎封装
-│   └── provider.rs   # 提供者 trait 与 OpenAI 实现
-├── permission/       # 权限控制
+│   ├── engine.rs            # LLM 引擎封装
+│   └── provider.rs          # 提供者 trait 与 OpenAI 实现
+├── permission/
 │   ├── mod.rs
-│   └── gate.rs       # 权限门控逻辑
-└── skills/           # 技能系统
-    ├── mod.rs        # 技能 trait 与注册表
-    ├── communication.rs
-    ├── information.rs
-    ├── moderation.rs
-    └── music.rs
+│   └── gate.rs              # 权限门控逻辑
+└── skills/
+    ├── mod.rs               # Skill trait、上下文类型与注册表
+    ├── communication.rs     # poke_client、send_message
+    ├── information.rs       # get_client_list、get_client_info
+    ├── moderation.rs        # kick_client、ban_client、move_client
+    └── music.rs             # music_control（双后端 + 跨平台）
 ```
 
 ### 数据流
 
+**TeamSpeak 路径**：
+
 ```
-用户消息 → TsAdapter → EventRouter → LlmEngine
-                                        ↓
-                                   工具调用请求
-                                        ↓
-                              PermissionGate (权限检查)
-                                        ↓
-                                  SkillRegistry → Skill.execute()
-                                        ↓
-                                   执行结果 → LlmEngine → TsAdapter → 回复用户
+用户消息 → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
+                                                ↓
+                                           工具调用请求
+                                                ↓
+                                    PermissionGate (权限检查)
+                                                ↓
+                                    SkillRegistry → Skill.execute()
+                                                ↓
+                                    执行结果 → LlmEngine → TsAdapter → 回复用户
 ```
+
+**NapCat / QQ 路径**：
+
+```
+用户消息 → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
+                                                      ↓
+                                                 工具调用请求
+                                                      ↓
+                                          PermissionGate (权限检查)
+                                                      ↓
+                                    SkillRegistry → Skill.execute_unified()
+                                          ↓              ↓
+                                    NC 原生执行    转发到 TS 执行
+                                          ↓              ↓
+                                    回复 NC 用户    回复 NC 用户
+```
+
+### 跨平台行为矩阵
+
+| Skill | TS 入口 | NC 入口（默认） | NC 入口 + `ts_route=true` |
+|---|---|---|---|
+| `poke_client` | ✅ TS 执行 | ❌ | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group`（NapCat 原生） | ✅ 路由到 TS |
+| `kick_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
+| `ban_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
+| `move_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
+| `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
+| `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
+| `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS，等待 TS3AudioBot 实际回复后回传 | 不适用 |
+
+说明：
+- NC 侧统一执行遵循"先 `execute_unified`，失败再回退 `execute_nc`"。
+- TS 侧统一执行遵循"先 `execute_unified`，失败回退 `execute`"。
+- NC 权限通过 ACL 虚拟组映射（`9000~9003`）实现，详见配置文档。
 
 ## 核心模块详解
 
-### adapter — TeamSpeak 适配器
+### adapter — 通信适配器
+
+#### TeamSpeak 适配器 (`adapter/serverquery/`)
 
 负责与 TeamSpeak 服务器的底层通信。
 
-**核心结构**：`src/adapter/connection.rs:153-158`
+**核心结构**：`src/adapter/serverquery/connection.rs`
 
 ```rust
 pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
+    query_tx: mpsc::Sender<String>,
+    query_active: AtomicBool,
+    include_event_lines_active: AtomicBool,
+    query_lock: Mutex<()>,
 }
 ```
 
@@ -98,13 +159,39 @@ pub struct TsAdapter {
 - TCP（默认）：`method = "tcp"`
 - SSH：`method = "ssh"`
 
-**事件类型**：`src/adapter/event.rs`
+**事件类型**：`src/adapter/serverquery/event.rs`
 
 | 事件 | 说明 |
 |---|---|
 | `TsEvent::TextMessage` | 收到文本消息 |
 | `TsEvent::ClientEnterView` | 用户进入可视范围 |
 | `TsEvent::ClientLeftView` | 用户离开可视范围 |
+
+#### NapCat 适配器 (`adapter/napcat/`)
+
+通过 WebSocket 连接 NapCat（OneBot 11 协议），支持断线自动重连。
+
+**核心结构**：`src/adapter/napcat/ws.rs`
+
+```rust
+pub struct NapCatAdapter {
+    writer: Mutex<Option<WsSink>>,   // None 表示断线中
+    event_tx: broadcast::Sender<NcEvent>,
+    pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
+    self_id: AtomicI64,
+    reconnect_tx: mpsc::Sender<()>,
+    config: NapCatConfig,
+}
+```
+
+**认证方式**：WebSocket 握手时同时携带 `Authorization: Bearer` header 和 `access_token` query parameter，兼容 OneBot 11 标准。
+
+**事件类型**：`src/adapter/napcat/event.rs`
+
+| 事件 | 说明 |
+|---|---|
+| `NcEvent::PrivateMessage` | 收到 QQ 私聊消息 |
+| `NcEvent::GroupMessage` | 收到 QQ 群消息 |
 
 ### llm — 大语言模型集成
 
@@ -138,6 +225,8 @@ pub struct ToolCall {
 }
 ```
 
+**集成方式**：`src/llm/engine.rs` 中 `LlmEngine::new()` 直接创建 `OpenAiProvider`，所有 OpenAI 兼容接口（DeepSeek、ChatGPT 等）均可通过 `base_url` 和 `model` 配置。
+
 ### permission — 权限控制
 
 基于 TeamSpeak 服务器组和频道组的访问控制。
@@ -156,59 +245,106 @@ pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, ta
 
 防止普通用户对管理员组执行操作（踢出、封禁等）。
 
-**规则匹配逻辑**：服务器组和频道组只要有一个匹配即视为匹配。如果两者都为空数组，则该规则匹配所有用户。
+**规则匹配逻辑**：遍历所有规则，收集所有匹配规则的 `allowed_skills` 取并集。空数组表示"匹配所有"。
 
 ### router — 事件路由
 
-协调所有模块处理用户消息，实现完整的对话流程。
+#### SqRouter（TeamSpeak）
 
-**消息处理流程**：`src/router.rs:115-286`
+`src/router/sq_router.rs` — 处理 TeamSpeak 文本消息事件。
 
+消息处理流程：
 1. 过滤自身消息
-2. 判断是否响应（私聊或前缀触发）
-3. 获取用户服务器组
-4. 准备 LLM 上下文
+2. 过滤 TS3AudioBot 自动回复
+3. 判断是否响应（私聊或前缀触发）
+4. 获取用户服务器组
 5. 第一次 LLM 调用
-6. 执行工具调用（如有）
+6. 执行工具调用（如有，通过 `UnifiedExecutionContext`）
 7. 第二次 LLM 调用（包含工具结果）
 8. 发送回复
+
+#### NcRouter（NapCat / QQ）
+
+`src/router/nc_router.rs` — 处理 NapCat 私聊和群消息事件。
+
+与 SqRouter 的关键差异：
+- 拥有 `ts_adapter` 和 `ts_clients`，可构造 `UnifiedExecutionContext::from_nc()` 实现跨平台工具调用
+- NC 用户的权限通过虚拟组 ID（`9000-9003`）映射
 
 ## 技能系统开发
 
 ### Skill trait
 
-所有技能必须实现 `Skill` trait：`src/skills/mod.rs:26-31`
+所有技能必须实现 `Skill` trait：`src/skills/mod.rs:126-152`
 
 ```rust
 #[async_trait]
 pub trait Skill: Send + Sync {
-    /// 技能名称（唯一标识）
     fn name(&self) -> &'static str;
-
-    /// 技能描述（供 LLM 理解用途）
     fn description(&self) -> &'static str;
-
-    /// 参数 JSON Schema
     fn parameters(&self) -> Value;
 
-    /// 执行逻辑
+    /// TeamSpeak 执行（必须实现）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
+
+    /// NapCat/QQ 执行（默认返回不支持，按需覆盖）
+    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value>;
+
+    /// 统一执行（跨平台，默认返回不支持，按需覆盖）
+    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value>;
 }
 ```
 
 ### ExecutionContext
 
-技能执行时可访问的上下文：`src/skills/mod.rs:16-24`
+TeamSpeak 技能执行时的上下文：`src/skills/mod.rs:31-40`
 
 ```rust
 pub struct ExecutionContext<'a> {
-    pub adapter: Arc<TsAdapter>,         // TeamSpeak 适配器
-    pub clients: &'a DashMap<u32, ClientInfo>,  // 在线用户列表
-    pub caller_id: u32,                  // 调用者客户端 ID
-    pub caller_groups: Vec<u32>,         // 调用者服务器组
-    pub caller_channel_group_id: u32,    // 调用者频道组 ID
-    pub gate: Arc<PermissionGate>,       // 权限门控
-    pub config: Arc<AppConfig>,          // 应用配置
+    pub adapter: Arc<TsAdapter>,
+    pub clients: &'a DashMap<u32, ClientInfo>,
+    pub caller_id: u32,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+### NcExecutionContext
+
+NapCat 技能执行时的上下文：`src/skills/mod.rs:46-53`
+
+```rust
+pub struct NcExecutionContext<'a> {
+    pub adapter: Arc<NapCatAdapter>,
+    pub caller_id: i64,
+    pub caller_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+### UnifiedExecutionContext
+
+跨平台统一上下文，由 `from_ts()` 或 `from_nc()` 构建，通过 `with_cross_adapters()` 注入对端适配器：`src/skills/mod.rs:59-120`
+
+```rust
+pub struct UnifiedExecutionContext<'a> {
+    pub platform: Platform,                      // TeamSpeak | NapCat
+    pub ts_adapter: Option<Arc<TsAdapter>>,
+    pub ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+    pub nc_adapter: Option<Arc<NapCatAdapter>>,
+    pub caller_id: u32,
+    pub caller_id_nc: i64,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub nc_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
@@ -218,10 +354,11 @@ pub struct ExecutionContext<'a> {
 
 ```rust
 // 示例：src/skills/example.rs
-use crate::skills::{ExecutionContext, Skill};
+use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use anyhow::Result;
+use tracing::info;
 
 pub struct ExampleSkill;
 
@@ -254,6 +391,13 @@ impl Skill for ExampleSkill {
             "message": format!("Hello, {}!", name)
         }))
     }
+
+    // 跨平台支持：使用 ctx.to_ts_ctx()? 简化上下文还原
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("ExampleSkill: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
+    }
 }
 ```
 
@@ -283,21 +427,24 @@ can_target_admins = false
 
 1. **命名规范**：使用 `snake_case`，如 `kick_client`、`get_client_list`
 2. **参数验证**：在 `execute` 中验证必填参数
-3. **错误处理**：返回有意义的错误消息
+3. **错误处理**：返回有意义的错误消息，使用 `ctx.error_prompts` 模板
 4. **权限检查**：使用 `ctx.gate.can_target()` 检查操作权限
-5. **返回值**：返回 JSON 对象，包含执行结果
+5. **返回值**：返回 JSON 对象，包含 `status: "ok"` 及执行结果
+6. **跨平台**：实现 `execute_unified()`，使用 `ctx.to_ts_ctx()?` 一行还原 TS 上下文
+7. **详细指南**：参见 [技能开发向导](/docs/skills-guide)
 
 ### 现有技能列表
 
 | 技能名 | 文件 | 说明 |
 |---|---|---|
 | `poke_client` | `communication.rs` | 戳一戳用户 |
-| `send_message` | `communication.rs` | 发送消息 |
+| `send_message` | `communication.rs` | 发送消息（跨平台） |
 | `kick_client` | `moderation.rs` | 踢出用户 |
 | `ban_client` | `moderation.rs` | 封禁用户 |
+| `move_client` | `moderation.rs` | 移动用户到指定频道 |
 | `get_client_list` | `information.rs` | 获取在线用户列表 |
 | `get_client_info` | `information.rs` | 获取用户详细信息 |
-| `music_control` | `music.rs` | 音乐控制 |
+| `music_control` | `music.rs` | 音乐控制（双后端 + 跨平台） |
 
 ## 扩展 LLM 提供者
 
@@ -328,14 +475,11 @@ impl LlmProvider for CustomProvider {
 
 ### 集成到引擎
 
-修改 `src/llm/engine.rs`，根据配置选择提供者：
+修改 `src/llm/engine.rs`，替换 `OpenAiProvider` 为你的实现：
 
 ```rust
 pub fn new(config: Arc<AppConfig>) -> Self {
-    let provider: Box<dyn LlmProvider> = match config.llm.provider.as_str() {
-        "custom" => Box::new(CustomProvider::new(config.llm.clone())),
-        _ => Box::new(OpenAiProvider::new(config.llm.clone())),
-    };
+    let provider: Box<dyn LlmProvider> = Box::new(CustomProvider::new(config.llm.clone()));
     Self { provider }
 }
 ```
@@ -344,7 +488,7 @@ pub fn new(config: Arc<AppConfig>) -> Self {
 
 ### 配置结构
 
-`config/acl.toml` 采用从上到下的规则匹配：
+`config/acl.toml` 遍历所有规则，收集匹配规则的技能取并集：
 
 ```toml
 [[rules]]
@@ -361,11 +505,11 @@ protected_group_ids = [6, 8, 9] # 受保护的服务器组
 ### 权限评估流程
 
 1. 遍历规则列表
-2. 检查调用者服务器组是否匹配（server_group_ids 为空数组时匹配所有人）
-3. 检查调用者频道组是否匹配（channel_group_ids 为空数组时匹配所有人）
-4. 服务器组和频道组只要有一个匹配即视为匹配
-5. 收集匹配规则允许的技能
-6. 如果规则包含 `"*"`，立即返回全部技能
+2. 检查调用者服务器组是否匹配（`server_group_ids` 为空数组时匹配所有服务器组）
+3. 检查调用者频道组是否匹配（`channel_group_ids` 为空数组时跳过频道组检查）
+4. 服务器组和频道组同时匹配才视为该规则匹配
+5. 收集所有匹配规则允许的技能，取并集
+6. 如果任一匹配规则包含 `"*"`，立即返回全部技能
 7. 对目标执行操作前，调用 `can_target()` 检查
 
 ## 代码规范
@@ -453,3 +597,5 @@ cargo run -- --log-level debug
 - [Rust 官方文档](https://doc.rust-lang.org/book/)
 - [TeamSpeak ServerQuery 手册](https://yat.qa/resources/)
 - [OpenAI API 文档](https://platform.openai.com/docs/api-reference)
+- [OneBot 11 标准](https://github.com/botuniverse/onebot-11)
+- [NapCat 文档](https://napneko.github.io/)

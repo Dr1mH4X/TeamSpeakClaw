@@ -78,6 +78,24 @@ User Message → TsAdapter → EventRouter → LlmEngine
                                   Result → LlmEngine → TsAdapter → Reply to User
 ```
 
+### Cross-platform Behavior Matrix (Current)
+
+| Skill | TS entry | NC entry (default) | NC entry + `ts_route=true` |
+|---|---|---|---|
+| `poke_client` | ✅ TS execution | ❌ (no NC implementation) | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (native NapCat sending) | ✅ routed to TS (`private/channel/server`) |
+| `kick_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
+| `ban_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
+| `move_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
+| `get_client_list` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
+| `get_client_info` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
+| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS | n/a |
+
+Notes:
+- NC routing prefers `execute_unified`, then falls back to `execute_nc` on failure.
+- TS routing prefers `execute_unified`, then falls back to `execute`.
+- NC permissions are enforced via ACL pseudo groups (`9000~9003`); see configuration docs.
+
 ## Core Modules Detail
 
 ### adapter — TeamSpeak Adapter
@@ -205,7 +223,7 @@ pub struct ExecutionContext<'a> {
 ### Adding a New Skill
 
 1. **Create the file**: Create a new file or extend an existing one in `src/skills/`.
-2. **Implement Skill**: Define your struct and implement the `Skill` trait.
+2. **Implement Skill**: Define your struct and implement the `Skill` trait. Use `ctx.to_ts_ctx()?` in `execute_unified` for cross-platform support.
 3. **Register**: Add the module declaration and register it in `src/skills/mod.rs`.
 4. **Configure ACL**: Add the skill to `config/acl.toml`.
 
@@ -213,8 +231,10 @@ pub struct ExecutionContext<'a> {
 
 1. **Naming**: Use `snake_case` (e.g., `kick_client`).
 2. **Validation**: Validate required parameters within `execute`.
-3. **Error Handling**: Return meaningful error messages.
+3. **Error Handling**: Return meaningful error messages using `ctx.error_prompts` templates.
 4. **Target Check**: Use `ctx.gate.can_target()` to verify permissions for administrative actions.
+5. **Cross-Platform**: Implement `execute_unified` using `ctx.to_ts_ctx()?` to restore the TS context in one line.
+6. **Detailed Guide**: See [Skills Development Guide](/docs/skills-guide).
 
 ## Permission System
 

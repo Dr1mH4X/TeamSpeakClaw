@@ -105,17 +105,31 @@ jobs:
       - name: Prepare artifacts
         shell: bash
         run: |
-          mkdir -p dist
-          SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
-          DEST="dist/${{ env.PROJECT_NAME }}-v${{ needs.meta.outputs.version }}-${{ matrix.platform }}${{ matrix.bin_suffix }}"
+          VERSION="${{ needs.meta.outputs.version }}"
+          PLATFORM="${{ matrix.platform }}"
+          STAGING="staging"
 
+          mkdir -p "$STAGING/config"
+
+          SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
           if [ -f "$SRC" ]; then
-            cp "$SRC" "$DEST"
-            echo "Artifact prepared: $DEST"
+            cp "$SRC" "$STAGING/"
           else
             echo "Error: Binary not found at $SRC"
             exit 1
           fi
+          cp examples/config/settings.toml "$STAGING/config/"
+          cp examples/config/acl.toml "$STAGING/config/"
+          cp examples/config/prompts.toml "$STAGING/config/"
+          mkdir -p dist
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
+            powershell -Command "Compress-Archive -Path 'staging/*' -DestinationPath '${ARCHIVE_NAME}'"
+          else
+            ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.tar.gz"
+            tar czf "$ARCHIVE_NAME" -C staging .
+          fi
+          echo "Artifact prepared: $ARCHIVE_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -167,7 +181,9 @@ jobs:
         shell: bash
         run: |
           ARTIFACT_PATH=$(find ./docker-artifact -name "TeamSpeakClaw-*" -type f)
-          cp "$ARTIFACT_PATH" ./teamspeakclaw
+          tar -xzf "$ARTIFACT_PATH" -C ./docker-artifact
+          cp ./docker-artifact/teamspeakclaw ./teamspeakclaw
+          cp -r ./docker-artifact/config ./config-docker
           chmod +x ./teamspeakclaw
 
       - name: Set up Docker Buildx
@@ -231,7 +247,7 @@ jobs:
           body: |
             ${{ needs.changelog.outputs.release_body }}
 
-            ## Docker Image
+            ## 🐋 Docker Image
 
             ```bash
             docker pull ghcr.io/${{ github.repository }}:${{ needs.meta.outputs.version }}
