@@ -26,6 +26,7 @@ trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊
 respond_to_private = true       # 私聊消息始终触发机器人
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
 default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)
+max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
 
 [logging]
 file_level = "info"
