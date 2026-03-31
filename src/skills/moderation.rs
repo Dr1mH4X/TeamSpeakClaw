@@ -1,8 +1,9 @@
 use crate::adapter::command::{cmd_ban, cmd_channellist, cmd_kick, cmd_move};
-use crate::skills::{ExecutionContext, Skill};
+use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tracing::info;
 
 /// 检查是否可以对目标执行操作
 /// 返回目标的组信息（如果存在）和权限检查结果
@@ -88,6 +89,12 @@ impl Skill for KickClient {
         ctx.adapter.send_raw(&cmd_kick(clid, reason)).await?;
         Ok(json!({"status": "ok", "message": "Client kicked"}))
     }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("KickClient: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
+    }
 }
 
 pub struct BanClient;
@@ -125,6 +132,12 @@ impl Skill for BanClient {
 
         ctx.adapter.send_raw(&cmd_ban(clid, time, reason)).await?;
         Ok(json!({"status": "ok", "message": "Client banned"}))
+    }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("BanClient: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
     }
 }
 
@@ -181,5 +194,11 @@ impl Skill for MoveClient {
             "status": "ok",
             "message": format!("Client {} moved to channel {}", clid, channel_id)
         }))
+    }
+
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("MoveClient: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
     }
 }

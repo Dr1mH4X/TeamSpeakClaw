@@ -122,6 +122,26 @@ impl<'a> UnifiedExecutionContext<'a> {
         self.nc_adapter = nc_adapter;
         self
     }
+
+    /// 从统一上下文还原 TeamSpeak 执行上下文
+    pub fn to_ts_ctx(&self) -> Result<ExecutionContext<'a>> {
+        Ok(ExecutionContext {
+            adapter: self
+                .ts_adapter
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?,
+            clients: self
+                .ts_clients
+                .ok_or_else(|| anyhow::anyhow!("TeamSpeak clients list not available"))?,
+            caller_id: self.caller_id,
+            caller_name: self.caller_name.clone(),
+            caller_groups: self.caller_groups.clone(),
+            caller_channel_group_id: self.caller_channel_group_id,
+            gate: self.gate.clone(),
+            config: self.config.clone(),
+            error_prompts: self.error_prompts,
+        })
+    }
 }
 
 // ─────────────────────────────────────────────

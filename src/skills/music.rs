@@ -203,66 +203,30 @@ impl Skill for MusicControl {
         match ctx.platform {
             // TeamSpeak 平台 - 使用 TS adapter
             crate::skills::Platform::TeamSpeak => {
-                if let Some(ref ts_adapter) = ctx.ts_adapter {
-                    let action = args["action"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+                let action = args["action"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-                    let ts_ctx = ExecutionContext {
-                        adapter: ts_adapter.clone(),
-                        clients: ctx.ts_clients.ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak clients list not available")
-                        })?,
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.caller_groups.clone(),
-                        caller_channel_group_id: ctx.caller_channel_group_id,
-                        gate: ctx.gate.clone(),
-                        config: ctx.config.clone(),
-                        error_prompts: ctx.error_prompts,
-                    };
+                let ts_ctx = ctx.to_ts_ctx()?;
 
-                    match backend_cfg.backend.as_str() {
-                        "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
-                        _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
-                    }
-                } else {
-                    Err(anyhow::anyhow!("TeamSpeak adapter not available"))
+                match backend_cfg.backend.as_str() {
+                    "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
+                    _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
                 }
             }
             // NapCat 平台 - 需要处理跨平台
             // 例如: NC 用户请求播放音乐 -> 需要转发到 TS 执行
             crate::skills::Platform::NapCat => {
-                // 如果是 NC 平台但请求播放音乐，
-                // 检查 ts_adapter 是否可用，如果可用则转发到 TS 执行
-                if let Some(ref ts_adapter) = ctx.ts_adapter {
-                    info!("MusicControl: NC request转发到TS执行");
-                    let action = args["action"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+                let action = args["action"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-                    let ts_ctx = ExecutionContext {
-                        adapter: ts_adapter.clone(),
-                        clients: ctx.ts_clients.ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak clients list not available")
-                        })?,
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.caller_groups.clone(),
-                        caller_channel_group_id: ctx.caller_channel_group_id,
-                        gate: ctx.gate.clone(),
-                        config: ctx.config.clone(),
-                        error_prompts: ctx.error_prompts,
-                    };
+                let ts_ctx = ctx.to_ts_ctx()?;
+                info!("MusicControl: NC request转发到TS执行");
 
-                    match backend_cfg.backend.as_str() {
-                        "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
-                        _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
-                    }
-                } else {
-                    Err(anyhow::anyhow!(
-                        "TeamSpeak adapter not available, cannot execute music"
-                    ))
+                match backend_cfg.backend.as_str() {
+                    "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
+                    _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
                 }
             }
         }
