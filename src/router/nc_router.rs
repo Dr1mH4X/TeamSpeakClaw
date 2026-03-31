@@ -29,6 +29,28 @@ pub struct NcRouter {
 }
 
 impl NcRouter {
+    fn resolve_nc_allowed_skills(&self, user_id: i64, group_id: Option<i64>) -> Vec<String> {
+        // NC -> ACL 映射使用虚拟 server_group_ids：
+        // 9000: 任意 NC 用户
+        // 9001: 群消息上下文
+        // 9002: trusted_users 中用户
+        // 9003: trusted_groups 中群成员
+        let mut pseudo_groups = vec![9000u32];
+        if group_id.is_some() {
+            pseudo_groups.push(9001);
+        }
+        if self.config.napcat.trusted_users.contains(&user_id) {
+            pseudo_groups.push(9002);
+        }
+        if group_id
+            .map(|gid| self.config.napcat.trusted_groups.contains(&gid))
+            .unwrap_or(false)
+        {
+            pseudo_groups.push(9003);
+        }
+        self.gate.get_allowed_skills(&pseudo_groups, 0)
+    }
+
     fn is_trusted(&self, user_id: i64, group_id: Option<i64>) -> bool {
         let nc = &self.config.napcat;
         if nc.trusted_users.contains(&user_id) {
@@ -40,17 +62,6 @@ impl NcRouter {
             }
         }
         false
-    }
-
-    pub fn new(
-        config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
-        adapter: Arc<NapCatAdapter>,
-        gate: Arc<PermissionGate>,
-        llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
-    ) -> Self {
-        Self::new_with_ts(config, prompts, adapter, gate, llm, registry, None, None)
     }
 
     pub fn new_with_ts(
@@ -87,10 +98,16 @@ impl NcRouter {
                     if msg.user_id == self.adapter.get_self_id() {
                         continue;
                     }
-                    if !self.config.napcat.respond_to_private && !self.is_trusted(msg.user_id, None) {
+                    let trusted_private = self.is_trusted(msg.user_id, None);
+                    if !self.config.napcat.respond_to_private && !trusted_private {
                         continue;
                     }
-                    if !self.is_trusted(msg.user_id, None) {
+                    if self.config.napcat.respond_to_private && !trusted_private {
+                        info!(
+                            "NC: Accepting private message from untrusted user {} due to respond_to_private=true",
+                            msg.user_id
+                        );
+                    } else if !trusted_private {
                         info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
@@ -107,7 +124,10 @@ impl NcRouter {
                     }
                     // 信任检查
                     if !self.is_trusted(msg.user_id, Some(msg.group_id)) {
-                        info!("NC: Ignored untrusted user {} in group {}", msg.user_id, msg.group_id);
+                        info!(
+                            "NC: Ignored untrusted user {} in group {}",
+                            msg.user_id, msg.group_id
+                        );
                         continue;
                     }
                     self.spawn_handle_group(msg);
@@ -115,7 +135,6 @@ impl NcRouter {
                 NcEvent::Heartbeat => {
                     debug!("NapCat heartbeat");
                 }
-                _ => {}
             }
         }
         Err(anyhow::anyhow!("NcRouter event stream ended"))
@@ -195,6 +214,7 @@ impl NcRouter {
         if text.is_empty() {
             return;
         }
+        debug!("NC private event timestamp={}", msg.timestamp);
 
         // 触发词检查（私聊可以不检查触发词，直接响应）
         let nc = &self.config.napcat;
@@ -211,8 +231,8 @@ impl NcRouter {
 
         info!("[NC Private] user={} msg={}", msg.sender.nickname, stripped);
 
-        // QQ 用户在权限层没有分组概念，使用空组列表（由 acl default 规则兜底）
-        let allowed = self.gate.get_allowed_skills(&[], 0);
+        let allowed = self.resolve_nc_allowed_skills(msg.user_id, None);
+        debug!("NC private allowed skills: {:?}", allowed);
 
         let reply_text = self
             .run_llm(stripped, &msg.sender.nickname, msg.user_id, None, &allowed)
@@ -230,6 +250,7 @@ impl NcRouter {
         if text.is_empty() {
             return;
         }
+        debug!("NC group event timestamp={}", msg.timestamp);
 
         if !self.is_triggered(text) {
             return;
@@ -242,7 +263,8 @@ impl NcRouter {
             msg.group_id, msg.sender.nickname, stripped
         );
 
-        let allowed = self.gate.get_allowed_skills(&[], 0);
+        let allowed = self.resolve_nc_allowed_skills(msg.user_id, Some(msg.group_id));
+        debug!("NC group allowed skills: {:?}", allowed);
 
         let reply_text = self
             .run_llm(
@@ -346,7 +368,7 @@ impl NcRouter {
                 // 执行工具
                 for call in response.tool_calls {
                     let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-// 构建统一执行上下文（包含 TS 和 NC 两个平台）
+                        // 构建统一执行上下文（包含 TS 和 NC 两个平台）
                         let nc_ctx = NcExecutionContext {
                             adapter: self.adapter.clone(),
                             caller_id: user_id,
