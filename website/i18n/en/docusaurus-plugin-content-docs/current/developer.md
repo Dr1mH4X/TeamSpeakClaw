@@ -78,6 +78,24 @@ User Message → TsAdapter → EventRouter → LlmEngine
                                   Result → LlmEngine → TsAdapter → Reply to User
 ```
 
+### Cross-platform Behavior Matrix (Current)
+
+| Skill | TS entry | NC entry (default) | NC entry + `ts_route=true` |
+|---|---|---|---|
+| `poke_client` | ✅ TS execution | ❌ (no NC implementation) | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (native NapCat sending) | ✅ routed to TS (`private/channel/server`) |
+| `kick_client` | ✅ TS execution | ❌ (no unified/NC implementation) | ❌ |
+| `ban_client` | ✅ TS execution | ❌ (no unified/NC implementation) | ❌ |
+| `move_client` | ✅ TS execution | ❌ (no unified/NC implementation) | ❌ |
+| `get_client_list` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
+| `get_client_info` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
+| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS | n/a |
+
+Notes:
+- NC routing prefers `execute_unified`, then falls back to `execute_nc` on failure.
+- TS routing prefers `execute_unified`, then falls back to `execute`.
+- NC permissions are enforced via ACL pseudo groups (`9000~9003`); see configuration docs.
+
 ## Core Modules Detail
 
 ### adapter — TeamSpeak Adapter
