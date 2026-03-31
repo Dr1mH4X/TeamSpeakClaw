@@ -275,10 +275,24 @@ impl NapCatAdapter {
             let mut guard = self.writer.lock().await;
             let w = guard
                 .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("NapCat WebSocket not connected"))?;
-            w.send(Message::Text(payload.into()))
+                .ok_or_else(|| anyhow::anyhow!("NapCat WebSocket not connected"));
+            let w = match w {
+                Ok(w) => w,
+                Err(e) => {
+                    // Remove pending entry if not connected
+                    self.pending.remove(&echo);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = w
+                .send(Message::Text(payload.into()))
                 .await
-                .context("NapCat WS write failed")?;
+                .context("NapCat WS write failed")
+            {
+                // Remove pending entry if write fails
+                self.pending.remove(&echo);
+                return Err(e);
+            }
         }
 
         let resp = tokio::time::timeout(Duration::from_secs(10), rx)
