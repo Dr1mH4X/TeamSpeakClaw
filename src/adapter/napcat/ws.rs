@@ -13,8 +13,15 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio_tungstenite::{
+    connect_async_tls_with_config,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::header::{HeaderValue, AUTHORIZATION},
+        Message,
+    },
+};
 use tracing::{debug, error, info, warn};
 
 type WsSink = futures_util::stream::SplitSink<
@@ -22,72 +29,122 @@ type WsSink = futures_util::stream::SplitSink<
     Message,
 >;
 
+type WsStream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
 pub struct NapCatAdapter {
-    writer: Mutex<WsSink>,
+    writer: Mutex<Option<WsSink>>,
     event_tx: broadcast::Sender<NcEvent>,
     pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
     self_id: AtomicI64,
+    reconnect_tx: mpsc::Sender<()>,
+    config: NapCatConfig,
 }
 
 impl NapCatAdapter {
-    /// 建立连接（带指数退避重连）
     pub async fn connect(config: NapCatConfig) -> Result<Arc<Self>> {
         const MAX_RETRIES: u32 = 10;
         const BASE_DELAY_MS: u64 = 1000;
 
         let mut delay = Duration::from_millis(BASE_DELAY_MS);
+        let mut result = None;
         for attempt in 0..MAX_RETRIES {
             match Self::try_connect(config.clone()).await {
-                Ok(adapter) => return Ok(adapter),
+                Ok(r) => {
+                    result = Some(r);
+                    break;
+                }
                 Err(e) => {
                     warn!(
-                        "NapCat connect attempt {} failed: {}. Retrying in {:?}",
-                        attempt, e, delay
+                        "[{}/{}] NapCat connect failed: {}",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e
                     );
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(60));
                 }
             }
         }
-        Err(anyhow::anyhow!(
-            "NapCat: max reconnect attempts reached ({MAX_RETRIES})"
-        ))
+        let (adapter, reconnect_rx) = result.ok_or_else(|| {
+            anyhow::anyhow!("NapCat: max reconnect attempts reached ({MAX_RETRIES})")
+        })?;
+
+        let weak = Arc::downgrade(&adapter);
+        tokio::spawn(Self::reconnect_loop(weak, reconnect_rx));
+
+        Ok(adapter)
     }
 
-    async fn try_connect(config: NapCatConfig) -> Result<Arc<Self>> {
-        let url = &config.ws_url;
-        info!("Connecting to NapCat at {url}");
+    async fn reconnect_loop(weak: std::sync::Weak<NapCatAdapter>, mut rx: mpsc::Receiver<()>) {
+        const MAX_RETRIES: u32 = 10;
+        while rx.recv().await.is_some() {
+            let Some(adapter) = weak.upgrade() else { break };
+            info!("NapCat reconnecting...");
+            *adapter.writer.lock().await = None;
 
-        // 构建请求，附加 access_token（如已配置）
-        let req = if config.access_token.is_empty() {
-            url.clone()
-        } else {
-            format!("{url}?access_token={}", config.access_token)
-        };
+            let mut delay = Duration::from_secs(1);
+            for attempt in 0..MAX_RETRIES {
+                match Self::do_reconnect(&adapter).await {
+                    Ok(()) => {
+                        info!("NapCat reconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[{}/{}] NapCat reconnect failed: {}",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            e
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        }
+    }
 
-        let (ws_stream, _) = connect_async_tls_with_config(&req, None, false, None)
-            .await
-            .with_context(|| format!("Failed to connect WebSocket to {url}"))?;
-
+    async fn try_connect(config: NapCatConfig) -> Result<(Arc<Self>, mpsc::Receiver<()>)> {
+        let (ws_stream, event_tx, pending) = Self::handshake(&config).await?;
         let (sink, stream) = ws_stream.split();
-        let (tx, _) = broadcast::channel::<NcEvent>(256);
-        let pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>> =
-            Arc::new(DashMap::new());
+
+        let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(1);
 
         let adapter = Arc::new(Self {
-            writer: Mutex::new(sink),
-            event_tx: tx,
+            writer: Mutex::new(Some(sink)),
+            event_tx,
             pending: pending.clone(),
             self_id: AtomicI64::new(0),
+            reconnect_tx,
+            config,
         });
 
-        // 启动读取循环
-        let adapter_clone = adapter.clone();
+        Self::spawn_reader(adapter.clone(), stream);
+        Self::fetch_self_id(&adapter).await;
+
+        Ok((adapter, reconnect_rx))
+    }
+
+    async fn do_reconnect(adapter: &Arc<NapCatAdapter>) -> Result<()> {
+        let (ws_stream, _, _) = Self::handshake(&adapter.config).await?;
+        let (sink, stream) = ws_stream.split();
+
+        *adapter.writer.lock().await = Some(sink);
+        Self::spawn_reader(adapter.clone(), stream);
+        Self::fetch_self_id(adapter).await;
+
+        Ok(())
+    }
+
+    fn spawn_reader(adapter: Arc<NapCatAdapter>, stream: WsStream) {
         tokio::spawn(async move {
-            adapter_clone.reader_loop(stream).await;
+            adapter.reader_loop(stream).await;
         });
+    }
 
-        // 获取自身 QQ 号
+    async fn fetch_self_id(adapter: &NapCatAdapter) {
         match adapter.call(action_get_login_info()).await {
             Ok(resp) if resp.is_ok() => {
                 let uid = resp.data["user_id"].as_i64().unwrap_or(0);
@@ -95,38 +152,74 @@ impl NapCatAdapter {
                 info!("NapCat connected. Bot QQ: {uid}");
             }
             Ok(resp) => {
-                warn!("get_login_info returned non-ok: {:?}", resp.message);
+                warn!("get_login_info non-ok: {:?}", resp.message);
             }
             Err(e) => {
                 warn!("get_login_info failed: {e}");
             }
         }
-
-        Ok(adapter)
     }
 
-    /// 读取循环：分发事件和 API 响应
-    async fn reader_loop(
-        &self,
-        mut stream: futures_util::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+    /// 构建 WebSocket 握手请求，同时使用 Authorization header 和 query param 认证
+    async fn handshake(
+        config: &NapCatConfig,
+    ) -> Result<(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
-    ) {
+        broadcast::Sender<NcEvent>,
+        Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
+    )> {
+        let url = &config.ws_url;
+        info!("Connecting to NapCat at {url}");
+
+        let mut req = url
+            .clone()
+            .into_client_request()
+            .map_err(|e| anyhow::anyhow!("Invalid WS URL '{}': {}", url, e))?;
+
+        if !config.access_token.is_empty() {
+            // Header 认证
+            let bearer = format!("Bearer {}", config.access_token);
+            req.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&bearer)
+                    .map_err(|e| anyhow::anyhow!("Invalid access_token: {e}"))?,
+            );
+
+            // Query param 兼容 OneBot 11 标准
+            let uri = req.uri();
+            let sep = if uri.query().is_some() { "&" } else { "?" };
+            let new_uri = format!("{}{}access_token={}", uri, sep, &config.access_token);
+            *req.uri_mut() = new_uri
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Failed to build URI: {e}"))?;
+        }
+
+        let (ws_stream, _) = connect_async_tls_with_config(req, None, false, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("NapCat WS handshake failed: {e}"))?;
+
+        let (tx, _) = broadcast::channel::<NcEvent>(256);
+        let pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>> =
+            Arc::new(DashMap::new());
+
+        Ok((ws_stream, tx, pending))
+    }
+
+    async fn reader_loop(&self, mut stream: WsStream) {
         while let Some(msg_result) = stream.next().await {
             match msg_result {
                 Ok(Message::Text(text)) => {
-                    debug!("<< {text}");
+                    debug!("NC << {text}");
                     let val: Value = match serde_json::from_str(&text) {
                         Ok(v) => v,
                         Err(e) => {
-                            warn!("Failed to parse NapCat message: {e}");
+                            warn!("NC parse error: {e}");
                             continue;
                         }
                     };
 
-                    // 判断是否为 API 响应（含 retcode 字段）
                     if val.get("retcode").is_some() || val.get("status").is_some() {
                         let echo = val["echo"].as_str().unwrap_or("").to_string();
                         if !echo.is_empty() {
@@ -136,7 +229,7 @@ impl NapCatAdapter {
                                         status: "failed".into(),
                                         retcode: -1,
                                         data: Value::Null,
-                                        message: Some("parse error".to_string()),
+                                        message: Some("parse error".into()),
                                     });
                                 let _ = tx.send(resp);
                             }
@@ -144,59 +237,61 @@ impl NapCatAdapter {
                         }
                     }
 
-                    // 否则作为事件处理
                     let event = parse_event(val);
                     if let Err(e) = self.event_tx.send(event) {
-                        debug!("No NapCat event subscribers: {e}");
+                        debug!("No NC event subscribers: {e}");
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    error!("NapCat WebSocket connection closed by remote");
+                    error!("NC connection closed by remote");
                     break;
                 }
                 Ok(Message::Ping(data)) => {
-                    // tungstenite 自动处理 Pong，但有些实现需要手动
-                    let mut w = self.writer.lock().await;
-                    let _ = w.send(Message::Pong(data)).await;
+                    let mut guard = self.writer.lock().await;
+                    if let Some(ref mut w) = *guard {
+                        let _ = w.send(Message::Pong(data)).await;
+                    }
                 }
-                Ok(_) => {} // Binary / Pong 忽略
+                Ok(_) => {}
                 Err(e) => {
-                    error!("NapCat WebSocket read error: {e}");
+                    error!("NC read error: {e}");
                     break;
                 }
             }
         }
-        error!("NapCat reader_loop exited");
+        error!("NC reader loop exited");
+        let _ = self.reconnect_tx.try_send(());
     }
 
-    /// 发送 API action 并等待对应响应
     pub async fn call(&self, action: NcAction) -> Result<NcApiResponse> {
         let echo = action.echo.clone();
         let (tx, rx) = oneshot::channel::<NcApiResponse>();
         self.pending.insert(echo.clone(), tx);
 
         let payload = serde_json::to_string(&action)?;
-        debug!(">> {payload}");
+        debug!("NC >> {payload}");
 
         {
-            let mut w = self.writer.lock().await;
+            let mut guard = self.writer.lock().await;
+            let w = guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("NapCat WebSocket not connected"))?;
             w.send(Message::Text(payload.into()))
                 .await
-                .context("NapCat WebSocket write failed")?;
+                .context("NapCat WS write failed")?;
         }
 
         let resp = tokio::time::timeout(Duration::from_secs(10), rx)
             .await
             .map_err(|_| {
                 self.pending.remove(&echo);
-                anyhow::anyhow!("NapCat API timeout for action '{}'", action.action)
+                anyhow::anyhow!("NC API timeout: '{}'", action.action)
             })?
-            .map_err(|_| anyhow::anyhow!("NapCat API response channel closed"))?;
+            .map_err(|_| anyhow::anyhow!("NC API response channel closed"))?;
 
         Ok(resp)
     }
 
-    /// 发送私聊消息
     pub async fn send_private(&self, user_id: i64, message: &[Segment]) -> Result<()> {
         let action = super::api::action_send_private_msg(user_id, message);
         let resp = self.call(action).await?;
@@ -210,7 +305,6 @@ impl NapCatAdapter {
         Ok(())
     }
 
-    /// 发送群消息
     pub async fn send_group(&self, group_id: i64, message: &[Segment]) -> Result<()> {
         let action = super::api::action_send_group_msg(group_id, message);
         let resp = self.call(action).await?;
