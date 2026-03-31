@@ -173,7 +173,7 @@ impl EventRouter {
         if let Some(skill) = self.registry.get(&call.name) {
             let ctx = ExecutionContext {
                 adapter: self.adapter.clone(),
-                clients: &self.clients,
+                clients: self.clients.as_ref(),
                 caller_id: event.invoker_id,
                 caller_name: event.invoker_name.clone(),
                 caller_groups: groups.to_vec(),
