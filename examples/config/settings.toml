@@ -7,7 +7,7 @@ port = 10011
 ssh_port = 10022
 method = "tcp"            # 连接方式: tcp 或 ssh
 login_name = "serveradmin"
-login_pass = ""           # 通过环境变量 TS_LOGIN_PASS 覆盖
+login_pass = ""
 server_id = 1
 bot_nickname = "TSClaw"
 
@@ -16,7 +16,7 @@ backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信�
 base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
 
 [llm]
-api_key = ""              # 通过环境变量 LLM_API_KEY 覆盖
+api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 max_tokens = 1024
