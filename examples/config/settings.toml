@@ -37,6 +37,6 @@ burst_size = 3
 
 [napcat]
 enabled = false
-base_url = "http://127.0.0.1:3000"
+base_url = "ws://127.0.0.1:3000"
 api_key = ""
 respond_to_private = true
