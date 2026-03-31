@@ -98,16 +98,7 @@ impl NcRouter {
                     if msg.user_id == self.adapter.get_self_id() {
                         continue;
                     }
-                    let trusted_private = self.is_trusted(msg.user_id, None);
-                    if !self.config.napcat.respond_to_private && !trusted_private {
-                        continue;
-                    }
-                    if self.config.napcat.respond_to_private && !trusted_private {
-                        info!(
-                            "NC: Accepting private message from untrusted user {} due to respond_to_private=true",
-                            msg.user_id
-                        );
-                    } else if !trusted_private {
+                    if !self.is_trusted(msg.user_id, None) {
                         info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
@@ -216,16 +207,8 @@ impl NcRouter {
         }
         debug!("NC private event timestamp={}", msg.timestamp);
 
-        // 触发词检查（私聊可以不检查触发词，直接响应）
-        let nc = &self.config.napcat;
-        let triggered = if nc.respond_to_private {
-            true
-        } else {
-            self.is_triggered(text)
-        };
-        if !triggered {
-            return;
-        }
+        // 触发词检查（私聊不检查触发词，直接响应）
+        // 私聊已通过 trusted_users 过滤，始终放行
 
         let stripped = self.strip_prefix(text);
 
