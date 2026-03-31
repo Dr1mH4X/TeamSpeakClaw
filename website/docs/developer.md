@@ -121,9 +121,9 @@ src/
 |---|---|---|---|
 | `poke_client` | ✅ TS 执行 | ❌ | ❌ |
 | `send_message` | ✅ `private/channel/server` | ✅ `private/group`（NapCat 原生） | ✅ 路由到 TS |
-| `kick_client` | ✅ TS 执行 | ❌ | ❌ |
-| `ban_client` | ✅ TS 执行 | ❌ | ❌ |
-| `move_client` | ✅ TS 执行 | ❌ | ❌ |
+| `kick_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
+| `ban_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
+| `move_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
 | `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
 | `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
 | `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS，等待 TS3AudioBot 实际回复后回传 | 不适用 |
@@ -354,10 +354,11 @@ pub struct UnifiedExecutionContext<'a> {
 
 ```rust
 // 示例：src/skills/example.rs
-use crate::skills::{ExecutionContext, NcExecutionContext, Skill, UnifiedExecutionContext};
+use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use anyhow::Result;
+use tracing::info;
 
 pub struct ExampleSkill;
 
@@ -390,6 +391,13 @@ impl Skill for ExampleSkill {
             "message": format!("Hello, {}!", name)
         }))
     }
+
+    // 跨平台支持：使用 ctx.to_ts_ctx()? 简化上下文还原
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("ExampleSkill: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
+    }
 }
 ```
 
@@ -419,10 +427,11 @@ can_target_admins = false
 
 1. **命名规范**：使用 `snake_case`，如 `kick_client`、`get_client_list`
 2. **参数验证**：在 `execute` 中验证必填参数
-3. **错误处理**：返回有意义的错误消息
+3. **错误处理**：返回有意义的错误消息，使用 `ctx.error_prompts` 模板
 4. **权限检查**：使用 `ctx.gate.can_target()` 检查操作权限
-5. **返回值**：返回 JSON 对象，包含执行结果
-6. **跨平台**：如需支持 NC 入口，实现 `execute_unified()` 并在其中检查 `ctx.platform`
+5. **返回值**：返回 JSON 对象，包含 `status: "ok"` 及执行结果
+6. **跨平台**：实现 `execute_unified()`，使用 `ctx.to_ts_ctx()?` 一行还原 TS 上下文
+7. **详细指南**：参见 [技能开发向导](/docs/skills-guide)
 
 ### 现有技能列表
 
