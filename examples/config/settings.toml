@@ -39,7 +39,6 @@ burst_size = 3
 enabled = false
 ws_url = "ws://127.0.0.1:3001"
 access_token = ""
-respond_to_private = true
 listen_groups = []
 trigger_prefixes = ["!claw", "!bot"]
 trusted_groups = []
