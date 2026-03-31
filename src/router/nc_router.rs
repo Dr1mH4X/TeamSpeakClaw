@@ -446,7 +446,11 @@ impl NcRouter {
 
                 // 二轮 LLM
                 match self.llm.chat(messages, tools).await {
-                    Ok(final_resp) => final_resp.content.unwrap_or_default(),
+                    Ok(final_resp) => {
+                        let content = final_resp.content.unwrap_or_default();
+                        info!("[NC] LLM final reply: {content}");
+                        content
+                    }
                     Err(e) => {
                         error!("NC LLM 2nd turn error: {e}");
                         error_msg
