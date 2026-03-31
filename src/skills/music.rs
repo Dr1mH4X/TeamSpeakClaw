@@ -1,9 +1,7 @@
 use crate::adapter::command::cmd_send_text;
-use crate::router::ClientInfo;
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
-use dashmap::DashMap;
 use serde_json::{json, Value};
 use tracing::info;
 
@@ -192,7 +190,10 @@ impl Skill for MusicControl {
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!("MusicControl: unified execution, platform={:?}", ctx.platform);
+        info!(
+            "MusicControl: unified execution, platform={:?}",
+            ctx.platform
+        );
 
         // 从配置中获取 music backend
         let backend_cfg = &ctx.config.music_backend;
@@ -205,12 +206,11 @@ impl Skill for MusicControl {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-                    // 创建空的 clients，因为 unified context 没有直接传递 clients 引用
-                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
-                    
                     let ts_ctx = ExecutionContext {
                         adapter: ts_adapter.clone(),
-                        clients: &empty_clients,
+                        clients: ctx.ts_clients.ok_or_else(|| {
+                            anyhow::anyhow!("TeamSpeak clients list not available")
+                        })?,
                         caller_id: ctx.caller_id,
                         caller_groups: ctx.caller_groups.clone(),
                         caller_channel_group_id: ctx.caller_channel_group_id,
@@ -220,9 +220,7 @@ impl Skill for MusicControl {
                     };
 
                     match backend_cfg.backend.as_str() {
-                        "tsbot_backend" => {
-                            execute_http(action, &args, &backend_cfg.base_url).await
-                        }
+                        "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
                         _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
                     }
                 } else {
@@ -240,12 +238,11 @@ impl Skill for MusicControl {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-                    // 创建空的 clients
-                    let empty_clients: DashMap<u32, ClientInfo> = DashMap::new();
-                    
                     let ts_ctx = ExecutionContext {
                         adapter: ts_adapter.clone(),
-                        clients: &empty_clients,
+                        clients: ctx.ts_clients.ok_or_else(|| {
+                            anyhow::anyhow!("TeamSpeak clients list not available")
+                        })?,
                         caller_id: ctx.caller_id,
                         caller_groups: ctx.caller_groups.clone(),
                         caller_channel_group_id: ctx.caller_channel_group_id,
@@ -255,13 +252,13 @@ impl Skill for MusicControl {
                     };
 
                     match backend_cfg.backend.as_str() {
-                        "tsbot_backend" => {
-                            execute_http(action, &args, &backend_cfg.base_url).await
-                        }
+                        "tsbot_backend" => execute_http(action, &args, &backend_cfg.base_url).await,
                         _ => execute_ts3audiobot(action, &args, &ts_ctx).await,
                     }
                 } else {
-                    Err(anyhow::anyhow!("TeamSpeak adapter not available, cannot execute music"))
+                    Err(anyhow::anyhow!(
+                        "TeamSpeak adapter not available, cannot execute music"
+                    ))
                 }
             }
         }

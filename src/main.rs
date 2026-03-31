@@ -48,67 +48,95 @@ async fn main() -> Result<()> {
 
     // 5. 连接服务
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter.set_nickname(&config.serverquery.bot_nickname).await?;
+    adapter
+        .set_nickname(&config.serverquery.bot_nickname)
+        .await?;
 
     // 6. 事件路由循环（TeamSpeak）
-    let ts_router = EventRouter::new(config.clone(), prompts.clone(), adapter.clone(), gate.clone(), llm.clone(), registry.clone());
+    let ts_router = EventRouter::new(
+        config.clone(),
+        prompts.clone(),
+        adapter.clone(),
+        gate.clone(),
+        llm.clone(),
+        registry.clone(),
+    );
 
     // 7. NapCat 路由器（可选）
     use crate::adapter::napcat::NapCatAdapter;
     use crate::router::NcRouter;
 
-    let nc_future: tokio::task::JoinHandle<Result<()>> = if config.napcat.enabled {
+    let run_result: Result<()> = if config.napcat.enabled {
         let nc_adapter = NapCatAdapter::connect(config.napcat.clone()).await?;
-        let nc_router = NcRouter::new(
+        let nc_router = NcRouter::new_with_ts(
             config.clone(),
             prompts.clone(),
             nc_adapter,
             gate.clone(),
             llm.clone(),
             registry.clone(),
+            Some(adapter.clone()),
+            Some(ts_router.clients.clone()),
         );
-        tokio::spawn(async move {
-            nc_router.run().await
-        })
+        let nc_future = tokio::spawn(async move { nc_router.run().await });
+
+        info!("Bot ready. Listening for TS + NapCat events.");
+
+        tokio::select! {
+            res = ts_router.run() => {
+                match res {
+                    Ok(()) => {
+                        warn!("TS Event router exited unexpectedly");
+                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
+                    }
+                    Err(e) => {
+                        error!("TS Event router exited with error: {}", e);
+                        Err(e)
+                    }
+                }
+            }
+            res = nc_future => {
+                match res {
+                    Ok(Ok(())) => {
+                        warn!("NC router exited unexpectedly");
+                        Err(anyhow::anyhow!("NC router exited unexpectedly"))
+                    }
+                    Ok(Err(e)) => {
+                        error!("NC router error: {e}");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        error!("NC router task panicked: {e}");
+                        Err(anyhow::anyhow!("NC router panicked"))
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+                Ok(())
+            }
+        }
     } else {
-        info!("NapCat adapter disabled, skipping");
-        tokio::spawn(async { Ok(()) })
-    };
+        info!("NapCat adapter disabled, running in TeamSpeak-only mode");
+        info!("Bot ready. Listening for TeamSpeak events.");
 
-    info!("Bot ready. Listening for events.");
-
-    let run_result: Result<()> = tokio::select! {
-        res = ts_router.run() => {
-            match res {
-                Ok(()) => {
-                    warn!("TS Event router exited unexpectedly");
-                    Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
-                }
-                Err(e) => {
-                    error!("TS Event router exited with error: {}", e);
-                    Err(e)
+        tokio::select! {
+            res = ts_router.run() => {
+                match res {
+                    Ok(()) => {
+                        warn!("TS Event router exited unexpectedly");
+                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
+                    }
+                    Err(e) => {
+                        error!("TS Event router exited with error: {}", e);
+                        Err(e)
+                    }
                 }
             }
-        }
-        res = nc_future => {
-            match res {
-                Ok(Ok(())) => {
-                    warn!("NC router exited unexpectedly");
-                    Err(anyhow::anyhow!("NC router exited unexpectedly"))
-                }
-                Ok(Err(e)) => {
-                    error!("NC router error: {e}");
-                    Err(e)
-                }
-                Err(e) => {
-                    error!("NC router task panicked: {e}");
-                    Err(anyhow::anyhow!("NC router panicked"))
-                }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+                Ok(())
             }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down...");
-            Ok(())
         }
     };
 

@@ -3,7 +3,7 @@ use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::{ExecutionContext, SkillRegistry};
+use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
 use serde_json::json;
@@ -289,7 +289,35 @@ impl EventRouter {
                             config: self.config.clone(),
                             error_prompts: &self.prompts.error,
                         };
-                        match skill.execute(call.arguments.clone(), &ctx).await {
+                        let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
+                            .with_cross_adapters(
+                                Some(self.adapter.clone()),
+                                Some(self.clients.as_ref()),
+                                None,
+                            );
+                        let args = call.arguments.clone();
+                        let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
+                            Ok(val) => {
+                                info!(
+                                    skill = %call.name,
+                                    caller = %event.invoker_name,
+                                    args = %call.arguments,
+                                    result = %val,
+                                    "Unified skill executed successfully"
+                                );
+                                Ok(val)
+                            }
+                            Err(unified_err) => {
+                                debug!(
+                                    skill = %call.name,
+                                    caller = %event.invoker_name,
+                                    error = %unified_err,
+                                    "Unified execution unavailable, falling back to TS execution"
+                                );
+                                skill.execute(args, &ctx).await
+                            }
+                        };
+                        match result {
                             Ok(val) => {
                                 info!(
                                     skill = %call.name,

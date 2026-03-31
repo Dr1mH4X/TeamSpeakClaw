@@ -24,14 +24,6 @@ pub enum Platform {
     NapCat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrossPlatformIntent {
-    None,
-    QueryTsChannel,
-    NotifyNcGroup,
-    NotifyNcPrivate,
-}
-
 // ─────────────────────────────────────────────
 // TeamSpeak 执行上下文（原有）
 // ─────────────────────────────────────────────
@@ -125,14 +117,6 @@ impl<'a> UnifiedExecutionContext<'a> {
         self.nc_adapter = nc_adapter;
         self
     }
-
-    pub fn is_ts(&self) -> bool {
-        self.platform == Platform::TeamSpeak
-    }
-
-    pub fn is_nc(&self) -> bool {
-        self.platform == Platform::NapCat
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -180,7 +164,7 @@ impl SkillRegistry {
     pub fn with_defaults() -> Self {
         use communication::{PokeClient, SendMessage};
         use information::{GetClientInfo, GetClientList};
-        use moderation::{BanClient, KickClient};
+        use moderation::{BanClient, KickClient, MoveClient};
         use music::MusicControl;
         use tracing::info;
 
@@ -189,6 +173,7 @@ impl SkillRegistry {
         registry.register(Box::new(SendMessage));
         registry.register(Box::new(KickClient));
         registry.register(Box::new(BanClient));
+        registry.register(Box::new(MoveClient));
         registry.register(Box::new(GetClientList));
         registry.register(Box::new(GetClientInfo));
         registry.register(Box::new(MusicControl));
