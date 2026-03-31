@@ -49,19 +49,49 @@ requests_per_minute = 10        # 每个用户的令牌桶限流设置
 burst_size = 3
 
 [napcat]
-enabled = false
-ws_url = "ws://127.0.0.1:3001"
-access_token = ""
-listen_groups = []
-trigger_prefixes = ["!claw", "!bot"]
-trusted_groups = []
-trusted_users = []
+enabled = false                           # 是否启用 NapCat 适配器
+ws_url = "ws://127.0.0.1:3001"           # NapCat WebSocket 服务地址
+access_token = ""                         # 访问令牌（若 NapCat 配置了鉴权则填写）
+listen_groups = []                        # 监听的群 ID 列表，空列表表示监听所有群
+trigger_prefixes = ["!claw", "!bot"]      # 群聊触发前缀（私聊无需前缀）
+trusted_groups = []                       # 信任的群 ID 列表，群内所有成员可使用机器人
+trusted_users = []                        # 信任的用户 QQ 号列表，私聊和群聊均可使用
 ```
 
 ### 连接方式
 
 - **TCP（默认）**：`method = "tcp"`，使用 `port`（默认 10011）连接。
 - **SSH**：`method = "ssh"`，使用 `ssh_port`（默认 10022）连接。
+
+### NapCat 配置详解
+
+`[napcat]` 区段用于配置 QQ 机器人功能，通过 NapCat（OneBot 11 协议实现）连接 QQ。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否启用 NapCat 适配器 |
+| `ws_url` | string | `ws://127.0.0.1:3001` | NapCat WebSocket 服务地址 |
+| `access_token` | string | `""` | 访问令牌（若 NapCat 设置了鉴权则填写） |
+| `listen_groups` | 数组 | `[]` | 监听的群 ID 列表，空列表表示监听所有群 |
+| `trigger_prefixes` | 数组 | `["!claw", "!bot"]` | 群聊触发前缀（私聊无需前缀） |
+| `trusted_groups` | 数组 | `[]` | 信任的群 ID 列表，群内所有成员可使用机器人 |
+| `trusted_users` | 数组 | `[]` | 信任的用户 QQ 号列表，私聊和群聊均可使用 |
+
+**前置要求**：
+
+1. 安装并运行 [NapCat](https://napneko.github.io/)
+2. 确保 NapCat 的 WebSocket 服务已启用（默认端口 3001）
+
+**使用方式**：
+
+- **QQ 私聊**：信任用户直接发送消息给机器人，无需前缀
+- **QQ 群聊**：使用触发前缀（如 `!claw 播放音乐`）或 @机器人 触发
+
+**安全说明**：
+
+- 仅 `trusted_users` 中的用户可以私聊机器人
+- 仅 `trusted_groups` 中的群成员或 `trusted_users` 中的用户可以在群聊中使用机器人
+- 建议仅添加信任的用户和群组，避免滥用
 
 ### 音乐后端配置
 
