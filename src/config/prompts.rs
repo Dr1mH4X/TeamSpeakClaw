@@ -67,7 +67,7 @@ impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).context(format!(
-            "Prompts config file not found: {}. Please copy examples/prompts.toml to config/",
+            "Prompts config file not found: {}. Please copy examples/config/prompts.toml to config/",
             path.display()
         ))?;
         let config: PromptsConfig =
