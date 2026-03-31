@@ -4,8 +4,12 @@ use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{debug, info};
+
+static TS3AUDIOBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub struct MusicControl;
 
@@ -411,7 +415,9 @@ async fn execute_ts3audiobot(
         .find(|c| c.nickname == "TS3AudioBot")
         .ok_or_else(|| anyhow::anyhow!("TS3AudioBot not found online"))?;
 
-    // 在发送命令前订阅 TS 事件，等待 TS3AudioBot 回复
+    // 串行化 TS3AudioBot 交互，防止并发调用交叉消费 broadcast 事件
+    let _guard = TS3AUDIOBOT_LOCK.lock().await;
+
     let mut ts_rx = ctx.adapter.subscribe();
 
     ctx.adapter
@@ -437,6 +443,8 @@ async fn execute_ts3audiobot(
         }
     })
     .await;
+
+    drop(_guard);
 
     match reply {
         Ok(content) if !content.is_empty() => {

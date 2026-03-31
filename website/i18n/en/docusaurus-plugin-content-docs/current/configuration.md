@@ -49,7 +49,6 @@ burst_size = 3
 enabled = false
 ws_url = "ws://127.0.0.1:3001"
 access_token = ""
-respond_to_private = true
 listen_groups = []
 trigger_prefixes = ["!claw", "!bot"]
 trusted_groups = []
@@ -145,7 +144,7 @@ protected_group_ids = [6, 8, 9]
 ### NapCat and Cross-platform Behavior
 
 - When `enabled = false`, the app runs TeamSpeak-only routing and will not exit early due to NapCat branch completion.
-- With `respond_to_private = true`, NapCat private chat triggers directly; group handling still respects `listen_groups` and trusted rules.
+- Group chats respect `listen_groups` and trusted rules; private chats accept only users in `trusted_users`.
 - `send_message` defaults to native NapCat sending on NapCat context; set `ts_route=true` to explicitly route to TeamSpeak.
 
 ### NapCat Permission Mapping (ACL)

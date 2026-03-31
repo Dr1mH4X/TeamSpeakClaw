@@ -52,7 +52,6 @@ burst_size = 3
 enabled = false
 ws_url = "ws://127.0.0.1:3001"
 access_token = ""
-respond_to_private = true
 listen_groups = []
 trigger_prefixes = ["!claw", "!bot"]
 trusted_groups = []
@@ -181,7 +180,7 @@ protected_group_ids = [6, 8, 9]
 ### NapCat 与跨平台行为说明
 
 - `enabled = false` 时，程序仅运行 TeamSpeak 路由，不会因 NapCat 分支提前退出。
-- `respond_to_private = true` 时，NapCat 私聊可直接触发；群聊仍受 `listen_groups` 与 trusted 规则影响。
+- 群聊受 `listen_groups` 与 trusted 规则影响；私聊仅接受 `trusted_users` 列表中的用户。
 - `send_message` 在 NapCat 上默认走 NapCat 发送；如需显式走 TeamSpeak，请在工具参数里传 `ts_route=true`。
 
 ### NapCat 权限映射（ACL）
