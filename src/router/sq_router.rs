@@ -1,4 +1,5 @@
 use crate::adapter::command::cmd_send_text;
+use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, provider::ToolCall};
@@ -29,28 +30,10 @@ pub struct EventRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     semaphore: Arc<Semaphore>,
+    nc_adapter: Option<Arc<NapCatAdapter>>,
 }
 
 impl EventRouter {
-    pub fn new(
-        config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
-        adapter: Arc<TsAdapter>,
-        gate: Arc<PermissionGate>,
-        llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
-    ) -> Self {
-        Self::new_with_clients(
-            config,
-            prompts,
-            adapter,
-            gate,
-            llm,
-            registry,
-            Arc::new(DashMap::new()),
-        )
-    }
-
     pub fn new_with_clients(
         config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
@@ -59,6 +42,7 @@ impl EventRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
         clients: Arc<DashMap<u32, ClientInfo>>,
+        nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> Self {
         let max_concurrent = config.bot.max_concurrent_requests;
         Self {
@@ -70,6 +54,7 @@ impl EventRouter {
             llm,
             registry,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            nc_adapter,
         }
     }
 
@@ -122,6 +107,7 @@ impl EventRouter {
                     let llm = self.llm.clone();
                     let registry = self.registry.clone();
                     let semaphore = self.semaphore.clone();
+                    let nc_adapter = self.nc_adapter.clone();
 
                     tokio::spawn(async move {
                         let _permit = match semaphore.acquire().await {
@@ -133,7 +119,7 @@ impl EventRouter {
                         };
 
                         let router = Self::new_with_clients(
-                            config, prompts, adapter, gate, llm, registry, clients,
+                            config, prompts, adapter, gate, llm, registry, clients, nc_adapter,
                         );
                         router.handle_message(msg).await;
                     });
@@ -189,6 +175,7 @@ impl EventRouter {
                 adapter: self.adapter.clone(),
                 clients: &self.clients,
                 caller_id: event.invoker_id,
+                caller_name: event.invoker_name.clone(),
                 caller_groups: groups.to_vec(),
                 caller_channel_group_id: channel_group_id,
                 gate: self.gate.clone(),
@@ -199,7 +186,7 @@ impl EventRouter {
                 .with_cross_adapters(
                     Some(self.adapter.clone()),
                     Some(self.clients.as_ref()),
-                    None,
+                    self.nc_adapter.clone(),
                 );
             let args = call.arguments.clone();
             let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
