@@ -1,0 +1,70 @@
+# TeamSpeakClaw ACL Configuration
+# Copy this file to config/acl.toml and modify the rules below
+#
+# 规则匹配逻辑：server_group_ids 和 channel_group_ids 需要「同时匹配」才算匹配；
+#   - 若某一侧数组为空（[]），表示对该侧不做限制，等价于“匹配所有该侧的用户”
+#   - 即：server_group_ids（若非空）与用户所属服务器组有交集，且 channel_group_ids（若非空）与用户所属频道组有交集
+# 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集），而不是只使用第一条匹配规则
+
+[[rules]]
+name = "superadmin"
+server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
+channel_group_ids = []
+allowed_skills = ["*"]
+can_target_admins = true
+rate_limit_override = 60
+
+[[rules]]
+name = "channel_admin"
+server_group_ids = []
+channel_group_ids = [5]   # 频道管理员组 ID
+allowed_skills = [
+  "poke_client",
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control",
+  "kick_client"
+]
+can_target_admins = false
+rate_limit_override = 20
+
+[[rules]]
+name = "default_user"
+server_group_ids = [8]    # 普通用户组 ID
+channel_group_ids = []
+allowed_skills = [
+  "poke_client",
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control"
+]
+can_target_admins = false
+rate_limit_override = 20
+
+# NapCat 映射规则（可按需启用）
+[[rules]]
+name = "napcat_default"
+server_group_ids = [9000]  # 任意 NapCat 用户
+channel_group_ids = []
+allowed_skills = [
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control"
+]
+can_target_admins = false
+rate_limit_override = 20
+
+# 默认规则 (匹配所有人)
+[[rules]]
+name = "default"
+server_group_ids = []
+channel_group_ids = []
+allowed_skills = ["music_control"]
+can_target_admins = false
+
+# 受保护的组 ID，can_target_admins = false 的用户不能对这些组的成员执行踢出/封禁等操作
+[acl]
+protected_group_ids = [6, 8, 9]

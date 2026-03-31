@@ -1,12 +1,12 @@
 use crate::{
-    adapter::{
+    adapter::serverquery::{
         command::{check_ts_error, cmd_clientupdate_nick, cmd_login, cmd_register_event, cmd_use},
         event::{parse_events, ClientEnterEvent, TsEvent},
     },
-    config::{AppConfig, TsConfig},
+    config::{AppConfig, SqConfig},
 };
 use anyhow::{Context as _, Result};
-use std::path::PathBuf;
+
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
@@ -97,7 +97,7 @@ impl russh::client::Handler for SshHandler {
         &mut self,
         server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let key_dir = PathBuf::from("config");
+        let key_dir = crate::config::config_dir();
         if !key_dir.exists() {
             if let Err(e) = tokio::fs::create_dir_all(&key_dir).await {
                 error!("Failed to create config directory: {}", e);
@@ -162,7 +162,7 @@ pub struct TsAdapter {
 
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
-        let cfg = &config.teamspeak;
+        let cfg = &config.serverquery;
         let method = TsMethod::try_from(cfg.method.as_str())
             .context("Invalid connection method in config")?;
 
@@ -207,7 +207,7 @@ impl TsAdapter {
         Ok(adapter)
     }
 
-    async fn connect_with_retry(cfg: &TsConfig, method: TsMethod) -> Result<TsStream> {
+    async fn connect_with_retry(cfg: &SqConfig, method: TsMethod) -> Result<TsStream> {
         const MAX_RETRIES: u32 = 10;
         const BASE_DELAY_MS: u64 = 1000;
 
@@ -230,13 +230,13 @@ impl TsAdapter {
         Err(anyhow::anyhow!("Max reconnect attempts reached (code 999)"))
     }
 
-    async fn connect_tcp(cfg: &TsConfig) -> Result<TsStream> {
+    async fn connect_tcp(cfg: &SqConfig) -> Result<TsStream> {
         let addr = format!("{}:{}", cfg.host, cfg.port);
         let stream = TcpStream::connect(&addr).await?;
         Ok(TsStream::Tcp(stream))
     }
 
-    async fn connect_ssh(cfg: &TsConfig) -> Result<TsStream> {
+    async fn connect_ssh(cfg: &SqConfig) -> Result<TsStream> {
         let config = Arc::new(russh::client::Config::default());
         let addr = format!("{}:{}", cfg.host, cfg.ssh_port);
 
@@ -264,7 +264,7 @@ impl TsAdapter {
         Ok(TsStream::Ssh(stream))
     }
 
-    async fn init(&self, cfg: &TsConfig) -> Result<()> {
+    async fn init(&self, cfg: &SqConfig) -> Result<()> {
         sleep(Duration::from_millis(500)).await;
 
         self.send_raw(&cmd_login(&cfg.login_name, &cfg.login_pass))
