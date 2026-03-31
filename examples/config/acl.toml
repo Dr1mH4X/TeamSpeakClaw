@@ -1,10 +1,27 @@
-# TeamSpeakClaw ACL Configuration
-# Copy this file to config/acl.toml and modify the rules below
+# TeamSpeakClaw ACL（访问控制列表）配置
+# 复制此文件到 config/acl.toml 并根据需要修改规则
 #
-# 规则匹配逻辑：server_group_ids 和 channel_group_ids 需要「同时匹配」才算匹配；
-#   - 若某一侧数组为空（[]），表示对该侧不做限制，等价于“匹配所有该侧的用户”
-#   - 即：server_group_ids（若非空）与用户所属服务器组有交集，且 channel_group_ids（若非空）与用户所属频道组有交集
-# 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集），而不是只使用第一条匹配规则
+# 规则匹配逻辑：
+#   1. server_group_ids 和 channel_group_ids 需要「同时匹配」才算匹配
+#   2. 若某一侧数组为空（[]），表示对该侧不做限制，等价于"匹配所有该侧的用户"
+#   3. 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集）
+#   4. 如果任一匹配规则包含 "*"，则允许所有技能
+#
+# NapCat 虚拟组 ID 映射：
+#   - 9000: 任意 NapCat 用户
+#   - 9001: NapCat 群聊上下文
+#   - 9002: trusted_users 中的用户
+#   - 9003: trusted_groups 中群成员
+#
+# 可用技能名称：
+#   - poke_client: 戳一戳用户
+#   - send_message: 发送消息（跨平台路由）
+#   - kick_client: 踢出用户
+#   - ban_client: 封禁用户
+#   - move_client: 移动用户到指定频道
+#   - get_client_list: 获取在线用户列表
+#   - get_client_info: 获取用户详细信息
+#   - music_control: 音乐控制
 
 [[rules]]
 name = "superadmin"
