@@ -48,7 +48,6 @@ impl GroupMessageEvent {
 #[derive(Debug, Deserialize)]
 struct RawEvent {
     post_type: Option<String>,
-    meta_event_type: Option<String>,
     message_type: Option<String>,
     group_id: Option<i64>,
     user_id: Option<i64>,

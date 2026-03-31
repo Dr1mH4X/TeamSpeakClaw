@@ -17,8 +17,10 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-type WsSink =
-    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>;
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
 
 pub struct NapCatAdapter {
     writer: Mutex<WsSink>,
@@ -129,14 +131,12 @@ impl NapCatAdapter {
                         let echo = val["echo"].as_str().unwrap_or("").to_string();
                         if !echo.is_empty() {
                             if let Some((_, tx)) = self.pending.remove(&echo) {
-                                let resp: NcApiResponse =
-                                    serde_json::from_value(val).unwrap_or_else(|_| {
-                                        NcApiResponse {
-                                            status: "failed".into(),
-                                            retcode: -1,
-                                            data: Value::Null,
-                                            message: Some("parse error".to_string()),
-                                        }
+                                let resp: NcApiResponse = serde_json::from_value(val)
+                                    .unwrap_or_else(|_| NcApiResponse {
+                                        status: "failed".into(),
+                                        retcode: -1,
+                                        data: Value::Null,
+                                        message: Some("parse error".to_string()),
                                     });
                                 let _ = tx.send(resp);
                             }
