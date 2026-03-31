@@ -59,7 +59,7 @@ impl AppConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).context(format!(
-            "Config file not found: {}. Please copy examples/settings.toml to config/",
+            "Config file not found: {}. Please copy examples/config/settings.toml to config/",
             path.display()
         ))?;
         let config: AppConfig = toml::from_str(&content)?;
