@@ -1,9 +1,11 @@
 use crate::adapter::command::cmd_send_text;
+use crate::adapter::serverquery::event::{TextMessageTarget, TsEvent};
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing::info;
+use std::time::Duration;
+use tracing::{debug, info};
 
 pub struct MusicControl;
 
@@ -443,13 +445,45 @@ async fn execute_ts3audiobot(
         .find(|c| c.nickname == "TS3AudioBot")
         .ok_or_else(|| anyhow::anyhow!("TS3AudioBot not found online"))?;
 
+    // 在发送命令前订阅 TS 事件，等待 TS3AudioBot 回复
+    let mut ts_rx = ctx.adapter.subscribe();
+
     ctx.adapter
         .send_raw(&cmd_send_text(1, audiobot.clid, &bot_cmd))
         .await?;
 
-    Ok(json!({
-        "status": "ok",
-        "sent_to": "TS3AudioBot",
-        "command": bot_cmd
-    }))
+    // 等待 TS3AudioBot 的实际回复（最多 10 秒）
+    let reply = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match ts_rx.recv().await {
+                Ok(TsEvent::TextMessage(msg))
+                    if msg.invoker_name == "TS3AudioBot"
+                        && msg.target_mode == TextMessageTarget::Private =>
+                {
+                    return msg.message;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    debug!("TS event channel error while waiting for TS3AudioBot reply: {e}");
+                    return String::new();
+                }
+            }
+        }
+    })
+    .await;
+
+    match reply {
+        Ok(content) if !content.is_empty() => {
+            info!("TS3AudioBot replied: {content}");
+            Ok(content.into())
+        }
+        _ => {
+            // 超时降级：返回原始状态
+            Ok(json!({
+                "status": "ok",
+                "sent_to": "TS3AudioBot",
+                "command": bot_cmd
+            }))
+        }
+    }
 }
