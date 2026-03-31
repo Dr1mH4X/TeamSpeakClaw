@@ -182,6 +182,11 @@ impl EventRouter {
             return;
         }
 
+        // 忽略 TS3AudioBot 自动回复（由 music skill 专用，不应走 LLM 流程）
+        if event.invoker_name == "TS3AudioBot" {
+            return;
+        }
+
         // 只响应私信或由前缀触发的消息
         let is_private = event.target_mode == TextMessageTarget::Private;
         let msg_content = event.message.trim();
