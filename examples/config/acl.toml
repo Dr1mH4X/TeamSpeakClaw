@@ -42,6 +42,20 @@ allowed_skills = [
 can_target_admins = false
 rate_limit_override = 20
 
+# NapCat 映射规则（可按需启用）
+[[rules]]
+name = "napcat_default"
+server_group_ids = [9000]  # 任意 NapCat 用户
+channel_group_ids = []
+allowed_skills = [
+  "send_message",
+  "get_client_info",
+  "get_client_list",
+  "music_control"
+]
+can_target_admins = false
+rate_limit_override = 20
+
 # 默认规则 (匹配所有人)
 [[rules]]
 name = "default"

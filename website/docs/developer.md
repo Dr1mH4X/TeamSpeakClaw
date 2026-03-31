@@ -78,6 +78,24 @@ src/
                                    执行结果 → LlmEngine → TsAdapter → 回复用户
 ```
 
+### 跨平台行为矩阵（当前实现）
+
+| Skill | TS 入口 | NC 入口（默认） | NC 入口 + `ts_route=true` |
+|---|---|---|---|
+| `poke_client` | ✅ TS 执行 | ❌（未实现 NC execute_nc） | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group`（NapCat 原生发送） | ✅ 路由到 TS（`private/channel/server`） |
+| `kick_client` | ✅ TS 执行 | ❌（未实现 unified/NC） | ❌ |
+| `ban_client` | ✅ TS 执行 | ❌（未实现 unified/NC） | ❌ |
+| `move_client` | ✅ TS 执行 | ❌（未实现 unified/NC） | ❌ |
+| `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
+| `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
+| `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS | 不适用 |
+
+说明：
+- NC 侧统一执行遵循“先 `execute_unified`，失败再回退 `execute_nc`”。
+- TS 侧统一执行遵循“先 `execute_unified`，失败回退 `execute`”。
+- NC 权限通过 ACL 虚拟组映射（`9000~9003`）实现，详见配置文档。
+
 ## 核心模块详解
 
 ### adapter — TeamSpeak 适配器

@@ -44,6 +44,16 @@ default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "chann
 [rate_limit]
 requests_per_minute = 10        # 每个用户的令牌桶限流设置
 burst_size = 3
+
+[napcat]
+enabled = false
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
+respond_to_private = true
+listen_groups = []
+trigger_prefixes = ["!claw", "!bot"]
+trusted_groups = []
+trusted_users = []
 ```
 
 ### 连接方式
@@ -152,12 +162,30 @@ protected_group_ids = [6, 8, 9]
 | 技能名 | 说明 |
 |---|---|
 | `poke_client` | 戳一戳用户 |
-| `send_message` | 发送消息（私聊/频道/广播） |
+| `send_message` | 发送消息（跨平台路由，支持 TS 或 NapCat） |
 | `kick_client` | 踢出用户 |
 | `ban_client` | 封禁用户 |
+| `move_client` | 移动用户到指定频道 |
 | `get_client_list` | 获取在线用户列表 |
 | `get_client_info` | 获取用户详细信息 |
 | `music_control` | 音乐控制 |
+
+### NapCat 与跨平台行为说明
+
+- `enabled = false` 时，程序仅运行 TeamSpeak 路由，不会因 NapCat 分支提前退出。
+- `respond_to_private = true` 时，NapCat 私聊可直接触发；群聊仍受 `listen_groups` 与 trusted 规则影响。
+- `send_message` 在 NapCat 上默认走 NapCat 发送；如需显式走 TeamSpeak，请在工具参数里传 `ts_route=true`。
+
+### NapCat 权限映射（ACL）
+
+NapCat 不存在 TeamSpeak 的服务器组/频道组概念，因此项目在权限检查时使用“虚拟组 ID”映射到 `acl.toml` 的 `server_group_ids`：
+
+- `9000`：任意 NapCat 用户
+- `9001`：NapCat 群聊上下文
+- `9002`：`trusted_users` 中的用户
+- `9003`：`trusted_groups` 中群成员
+
+您可以在 `acl.toml` 中为这些组配置规则，实现 NC 专用权限控制。
 
 ## 3. 提示词配置 (prompts.toml)
 

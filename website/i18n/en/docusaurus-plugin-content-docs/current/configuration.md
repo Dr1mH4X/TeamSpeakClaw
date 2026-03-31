@@ -15,7 +15,7 @@ File path: `config/settings.toml`
 Contains basic configurations for connecting to the TeamSpeak server, LLM provider settings, and bot behavior.
 
 ```toml
-[teamspeak]
+[serverquery]
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
@@ -44,6 +44,16 @@ default_reply_mode = "private"  # Default reply mode: "private" | "channel" | "s
 [rate_limit]
 requests_per_minute = 10        # Token bucket rate limit per user
 burst_size = 3
+
+[napcat]
+enabled = false
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
+respond_to_private = true
+listen_groups = []
+trigger_prefixes = ["!claw", "!bot"]
+trusted_groups = []
+trusted_users = []
 ```
 
 ### Connection Method
@@ -118,6 +128,36 @@ can_target_admins = false
 [acl]
 protected_group_ids = [6, 8, 9]
 ```
+
+### Available Skills
+
+| Skill | Description |
+|---|---|
+| `poke_client` | Send poke notification |
+| `send_message` | Send messages with cross-platform routing |
+| `kick_client` | Kick client |
+| `ban_client` | Ban client |
+| `move_client` | Move client to target channel |
+| `get_client_list` | List online clients |
+| `get_client_info` | Get detailed client info |
+| `music_control` | Music control |
+
+### NapCat and Cross-platform Behavior
+
+- When `enabled = false`, the app runs TeamSpeak-only routing and will not exit early due to NapCat branch completion.
+- With `respond_to_private = true`, NapCat private chat triggers directly; group handling still respects `listen_groups` and trusted rules.
+- `send_message` defaults to native NapCat sending on NapCat context; set `ts_route=true` to explicitly route to TeamSpeak.
+
+### NapCat Permission Mapping (ACL)
+
+NapCat has no native TeamSpeak server/channel groups, so ACL checks use pseudo `server_group_ids`:
+
+- `9000`: any NapCat user
+- `9001`: NapCat group context
+- `9002`: user listed in `trusted_users`
+- `9003`: message from group listed in `trusted_groups`
+
+You can add ACL rules for these IDs in `acl.toml` to enforce NC-specific permissions.
 
 ---
 
