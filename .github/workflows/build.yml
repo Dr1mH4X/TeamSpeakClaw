@@ -184,7 +184,9 @@ jobs:
         shell: bash
         run: |
           ARTIFACT_PATH=$(find ./docker-artifact -name "TeamSpeakClaw-*" -type f)
-          cp "$ARTIFACT_PATH" ./teamspeakclaw
+          tar -xzf "$ARTIFACT_PATH" -C ./docker-artifact
+          cp ./docker-artifact/teamspeakclaw ./teamspeakclaw
+          cp -r ./docker-artifact/config ./config-docker
           chmod +x ./teamspeakclaw
 
       - name: Set up Docker Buildx
