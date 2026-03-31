@@ -1,7 +1,7 @@
 use crate::adapter::command::cmd_send_text;
 use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::LlmEngine;
+use crate::llm::{LlmEngine, provider::ToolCall};
 use crate::permission::PermissionGate;
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
@@ -176,6 +176,90 @@ impl EventRouter {
         );
     }
 
+    /// 执行单个工具调用，返回结果字符串
+    async fn execute_skill(
+        &self,
+        call: &ToolCall,
+        event: &TextMessageEvent,
+        groups: &[u32],
+        channel_group_id: u32,
+    ) -> String {
+        if let Some(skill) = self.registry.get(&call.name) {
+            let ctx = ExecutionContext {
+                adapter: self.adapter.clone(),
+                clients: &self.clients,
+                caller_id: event.invoker_id,
+                caller_groups: groups.to_vec(),
+                caller_channel_group_id: channel_group_id,
+                gate: self.gate.clone(),
+                config: self.config.clone(),
+                error_prompts: &self.prompts.error,
+            };
+            let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
+                .with_cross_adapters(
+                    Some(self.adapter.clone()),
+                    Some(self.clients.as_ref()),
+                    None,
+                );
+            let args = call.arguments.clone();
+            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
+                Ok(val) => {
+                    info!(
+                        skill = %call.name,
+                        caller = %event.invoker_name,
+                        args = %call.arguments,
+                        result = %val,
+                        "Unified skill executed successfully"
+                    );
+                    Ok(val)
+                }
+                Err(unified_err) => {
+                    debug!(
+                        skill = %call.name,
+                        caller = %event.invoker_name,
+                        error = %unified_err,
+                        "Unified execution unavailable, falling back to TS execution"
+                    );
+                    skill.execute(args, &ctx).await
+                }
+            };
+            match result {
+                Ok(val) => {
+                    info!(
+                        skill = %call.name,
+                        caller = %event.invoker_name,
+                        args = %call.arguments,
+                        result = %val,
+                        "Skill executed successfully"
+                    );
+                    val.to_string()
+                }
+                Err(e) => {
+                    let err_msg = self
+                        .prompts
+                        .error
+                        .skill_error
+                        .replace("{detail}", &e.to_string());
+                    error!(
+                        skill = %call.name,
+                        caller = %event.invoker_name,
+                        args = %call.arguments,
+                        error = %e,
+                        "Skill execution failed"
+                    );
+                    err_msg
+                }
+            }
+        } else {
+            warn!(
+                caller = %event.invoker_name,
+                skill = %call.name,
+                "Skill not found"
+            );
+            self.prompts.error.skill_not_found.clone()
+        }
+    }
+
     async fn handle_message(&self, event: TextMessageEvent) {
         // 按客户端ID忽略自身
         if event.invoker_id == self.adapter.get_bot_clid() {
@@ -244,162 +328,85 @@ impl EventRouter {
         // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
+        let max_turns = self.config.bot.max_tool_turns;
 
-        // 3. 第一次LLM调用
-        match self.llm.chat(messages.clone(), tools.clone()).await {
-            Ok(response) => {
-                // 4. 处理响应
-                if response.tool_calls.is_empty() {
-                    if let Some(content) = response.content {
-                        let _ = self
-                            .adapter
-                            .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
-                            .await;
-                    }
-                    return;
-                }
+        // 3. 多轮 LLM 调用循环
+        for turn in 0..max_turns {
+            debug!("[SQ] LLM turn {}/{}", turn + 1, max_turns);
 
-                // 准备历史记录中的工具调用
-                let assistant_tool_calls: Vec<_> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| {
-                        json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments.to_string()
-                            }
-                        })
-                    })
-                    .collect();
-
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": response.content,
-                    "tool_calls": assistant_tool_calls
-                }));
-
-                // 执行工具
-                for call in response.tool_calls {
-                    let tool_result = if let Some(skill) = self.registry.get(&call.name) {
-                        let ctx = ExecutionContext {
-                            adapter: self.adapter.clone(),
-                            clients: &self.clients,
-                            caller_id: event.invoker_id,
-                            caller_groups: groups.clone(),
-                            caller_channel_group_id: channel_group_id,
-                            gate: self.gate.clone(),
-                            config: self.config.clone(),
-                            error_prompts: &self.prompts.error,
-                        };
-                        let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
-                            .with_cross_adapters(
-                                Some(self.adapter.clone()),
-                                Some(self.clients.as_ref()),
-                                None,
-                            );
-                        let args = call.arguments.clone();
-                        let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
-                            Ok(val) => {
-                                info!(
-                                    skill = %call.name,
-                                    caller = %event.invoker_name,
-                                    args = %call.arguments,
-                                    result = %val,
-                                    "Unified skill executed successfully"
-                                );
-                                Ok(val)
-                            }
-                            Err(unified_err) => {
-                                debug!(
-                                    skill = %call.name,
-                                    caller = %event.invoker_name,
-                                    error = %unified_err,
-                                    "Unified execution unavailable, falling back to TS execution"
-                                );
-                                skill.execute(args, &ctx).await
-                            }
-                        };
-                        match result {
-                            Ok(val) => {
-                                info!(
-                                    skill = %call.name,
-                                    caller = %event.invoker_name,
-                                    args = %call.arguments,
-                                    result = %val,
-                                    "Skill executed successfully"
-                                );
-                                val.to_string()
-                            }
-                            Err(e) => {
-                                let err_msg = self
-                                    .prompts
-                                    .error
-                                    .skill_error
-                                    .replace("{detail}", &e.to_string());
-                                error!(
-                                    skill = %call.name,
-                                    caller = %event.invoker_name,
-                                    args = %call.arguments,
-                                    error = %e,
-                                    "Skill execution failed"
-                                );
-                                err_msg
-                            }
-                        }
-                    } else {
-                        warn!(
-                            caller = %event.invoker_name,
-                            skill = %call.name,
-                            "Skill not found"
-                        );
-                        self.prompts.error.skill_not_found.clone()
-                    };
-
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "name": call.name,
-                        "content": tool_result
-                    }));
-                }
-
-                // 5. 第二次LLM调用（包含工具结果）
-                match self.llm.chat(messages, tools).await {
-                    Ok(final_response) => {
-                        if let Some(content) = final_response.content {
+            match self.llm.chat(messages.clone(), tools.clone()).await {
+                Ok(response) => {
+                    // 没有工具调用，发送最终内容
+                    if response.tool_calls.is_empty() {
+                        if let Some(content) = response.content {
+                            info!("[SQ] LLM final reply (turn {}): {}", turn + 1, content);
                             let _ = self
                                 .adapter
                                 .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
                                 .await;
                         }
+                        return;
                     }
-                    Err(e) => {
-                        error!("LLM error (2nd turn): {e}");
-                        let _ = self
-                            .adapter
-                            .send_raw(&cmd_send_text(
-                                reply_mode,
-                                reply_target,
-                                &self.prompts.error.llm_error,
-                            ))
-                            .await;
+
+                    // 准备历史记录中的工具调用
+                    let assistant_tool_calls: Vec<_> = response
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments.to_string()
+                                }
+                            })
+                        })
+                        .collect();
+
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": response.content,
+                        "tool_calls": assistant_tool_calls
+                    }));
+
+                    // 执行所有工具调用
+                    for call in &response.tool_calls {
+                        let tool_result = self.execute_skill(call, &event, &groups, channel_group_id).await;
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": tool_result
+                        }));
                     }
+
+                    // 继续下一轮
+                }
+                Err(e) => {
+                    error!("LLM error (turn {}): {}", turn + 1, e);
+                    let _ = self
+                        .adapter
+                        .send_raw(&cmd_send_text(
+                            reply_mode,
+                            reply_target,
+                            &self.prompts.error.llm_error,
+                        ))
+                        .await;
+                    return;
                 }
             }
-            Err(e) => {
-                error!("LLM error: {e}");
-                let _ = self
-                    .adapter
-                    .send_raw(&cmd_send_text(
-                        reply_mode,
-                        reply_target,
-                        &self.prompts.error.llm_error,
-                    ))
-                    .await;
-            }
         }
+
+        // 达到最大轮数
+        warn!("[SQ] Reached max tool turns ({})", max_turns);
+        let _ = self
+            .adapter
+            .send_raw(&cmd_send_text(
+                reply_mode,
+                reply_target,
+                "操作超时，请稍后再试",
+            ))
+            .await;
     }
 }
