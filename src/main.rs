@@ -18,6 +18,7 @@ use crate::{
     adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
     router::EventRouter,
 };
+use dashmap::DashMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -52,22 +53,30 @@ async fn main() -> Result<()> {
         .set_nickname(&config.serverquery.bot_nickname)
         .await?;
 
-    // 6. 事件路由循环（TeamSpeak）
-    let ts_router = EventRouter::new(
+    // 6. NapCat 适配器（可选，需要在 ts_router 之前创建）
+    use crate::adapter::napcat::NapCatAdapter;
+    use crate::router::NcRouter;
+
+    let nc_adapter: Option<Arc<NapCatAdapter>> = if config.napcat.enabled {
+        let nc = NapCatAdapter::connect(config.napcat.clone()).await?;
+        Some(nc)
+    } else {
+        None
+    };
+
+    // 7. 事件路由循环（TeamSpeak）
+    let ts_router = EventRouter::new_with_clients(
         config.clone(),
         prompts.clone(),
         adapter.clone(),
         gate.clone(),
         llm.clone(),
         registry.clone(),
+        Arc::new(DashMap::new()),
+        nc_adapter.clone(),
     );
 
-    // 7. NapCat 路由器（可选）
-    use crate::adapter::napcat::NapCatAdapter;
-    use crate::router::NcRouter;
-
-    let run_result: Result<()> = if config.napcat.enabled {
-        let nc_adapter = NapCatAdapter::connect(config.napcat.clone()).await?;
+    let run_result: Result<()> = if let Some(nc_adapter) = nc_adapter {
         let nc_router = NcRouter::new_with_ts(
             config.clone(),
             prompts.clone(),
@@ -168,7 +177,8 @@ fn print_banner() {
 fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     use std::path::PathBuf;
     use tracing_subscriber::{
-        fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+        fmt::{self, time::LocalTime},
+        layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
     };
 
     let console_filter = EnvFilter::try_from_default_env()
@@ -177,6 +187,7 @@ fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     let console_layer = fmt::layer()
         .with_target(true)
         .compact()
+        .with_timer(LocalTime::rfc_3339())
         .with_filter(console_filter);
 
     // 使用可执行文件所在目录作为日志根目录
@@ -195,6 +206,7 @@ fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
+        .with_timer(LocalTime::rfc_3339())
         .with_filter(file_filter);
 
     tracing_subscriber::registry()

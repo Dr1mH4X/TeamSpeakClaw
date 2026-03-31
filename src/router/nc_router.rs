@@ -324,6 +324,7 @@ impl NcRouter {
             let nc_ctx = NcExecutionContext {
                 adapter: self.adapter.clone(),
                 caller_id: user_id,
+                caller_name: sender_name.to_string(),
                 caller_group_id: group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
@@ -356,6 +357,7 @@ impl NcRouter {
                     let nc_ctx = NcExecutionContext {
                         adapter: self.adapter.clone(),
                         caller_id: user_id,
+                        caller_name: sender_name.to_string(),
                         caller_group_id: group_id,
                         gate: self.gate.clone(),
                         config: self.config.clone(),

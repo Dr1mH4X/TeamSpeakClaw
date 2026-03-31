@@ -43,10 +43,7 @@ impl Skill for PokeClient {
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!(
-            "PokeClient: unified execution, platform={:?}",
-            ctx.platform
-        );
+        info!("PokeClient: unified execution, platform={:?}", ctx.platform);
 
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
@@ -59,6 +56,7 @@ impl Skill for PokeClient {
                             anyhow::anyhow!("TeamSpeak clients list not available")
                         })?,
                         caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
                         caller_groups: ctx.caller_groups.clone(),
                         caller_channel_group_id: ctx.caller_channel_group_id,
                         gate: ctx.gate.clone(),
@@ -70,9 +68,10 @@ impl Skill for PokeClient {
                 Err(anyhow::anyhow!("TeamSpeak adapter not available"))
             }
             Platform::NapCat => {
-                let ts_adapter = ctx.ts_adapter.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("TeamSpeak adapter not available")
-                })?;
+                let ts_adapter = ctx
+                    .ts_adapter
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
 
                 let clid = args["clid"].as_u64().ok_or_else(|| {
                     anyhow::anyhow!(ctx
@@ -103,7 +102,7 @@ impl Skill for SendMessage {
     }
 
     fn description(&self) -> &'static str {
-        "Send message via explicit routing. TS mode: private/channel/server (requires ts_route=true). NC mode: private/group (default when called from NapCat)."
+        "Send message via explicit routing. Supports cross-platform: ts_route (NC->TS), nc_route (TS->NC)."
     }
 
     fn parameters(&self) -> Value {
@@ -122,6 +121,10 @@ impl Skill for SendMessage {
                 "ts_route": {
                     "type": "boolean",
                     "description": "When called from NapCat, set true to force routing to TeamSpeak."
+                },
+                "nc_route": {
+                    "type": "boolean",
+                    "description": "When called from TeamSpeak, set true to force routing to NapCat/QQ."
                 },
                 "clid": {
                     "type": "integer",
@@ -195,25 +198,81 @@ impl Skill for SendMessage {
 
         let mode = args["mode"].as_str().unwrap_or("");
         let ts_route = args["ts_route"].as_bool().unwrap_or(false);
+        let nc_route = args["nc_route"].as_bool().unwrap_or(false);
 
         match ctx.platform {
             Platform::TeamSpeak => {
-                if let Some(ref ts_adapter) = ctx.ts_adapter {
-                    let ts_ctx = ExecutionContext {
-                        adapter: ts_adapter.clone(),
-                        clients: ctx.ts_clients.ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak clients list not available")
-                        })?,
-                        caller_id: ctx.caller_id,
-                        caller_groups: ctx.caller_groups.clone(),
-                        caller_channel_group_id: ctx.caller_channel_group_id,
-                        gate: ctx.gate.clone(),
-                        config: ctx.config.clone(),
-                        error_prompts: ctx.error_prompts,
+                if nc_route {
+                    // TS 请求 → NC 执行
+                    let nc_adapter = ctx.nc_adapter.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("NapCat adapter not available for nc_route=true")
+                    })?;
+
+                    // 添加发送者前缀
+                    let prefixed_msg = if !ctx.caller_name.is_empty() {
+                        format!("ts({}): {}", ctx.caller_name, msg)
+                    } else {
+                        msg.to_string()
                     };
-                    return self.execute(args.clone(), &ts_ctx).await;
+
+                    let segs = vec![crate::adapter::napcat::types::Segment::text(&prefixed_msg)];
+
+                    match mode {
+                        "private" => {
+                            let user_id = args["user_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!(ctx
+                                    .error_prompts
+                                    .missing_parameter
+                                    .replace("{param}", "user_id"))
+                            })?;
+                            nc_adapter.send_private(user_id, &segs).await?;
+                            Ok(json!({
+                                "status": "ok",
+                                "message": format!("已在QQ发送私聊消息: {}", prefixed_msg),
+                                "platform": "napcat",
+                                "routed_by": "nc_route"
+                            }))
+                        }
+                        "group" => {
+                            let group_id = args["group_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!(ctx
+                                    .error_prompts
+                                    .missing_parameter
+                                    .replace("{param}", "group_id"))
+                            })?;
+                            nc_adapter.send_group(group_id, &segs).await?;
+                            Ok(json!({
+                                "status": "ok",
+                                "message": format!("已在QQ群发送消息: {}", prefixed_msg),
+                                "platform": "napcat",
+                                "routed_by": "nc_route"
+                            }))
+                        }
+                        _ => Err(anyhow::anyhow!(ctx
+                            .error_prompts
+                            .invalid_mode
+                            .replace("{allowed}", "private, group"))),
+                    }
+                } else {
+                    // 默认：TS 原生发送
+                    if let Some(ref ts_adapter) = ctx.ts_adapter {
+                        let ts_ctx = ExecutionContext {
+                            adapter: ts_adapter.clone(),
+                            clients: ctx.ts_clients.ok_or_else(|| {
+                                anyhow::anyhow!("TeamSpeak clients list not available")
+                            })?,
+                            caller_id: ctx.caller_id,
+                            caller_name: ctx.caller_name.clone(),
+                            caller_groups: ctx.caller_groups.clone(),
+                            caller_channel_group_id: ctx.caller_channel_group_id,
+                            gate: ctx.gate.clone(),
+                            config: ctx.config.clone(),
+                            error_prompts: ctx.error_prompts,
+                        };
+                        return self.execute(args.clone(), &ts_ctx).await;
+                    }
+                    Err(anyhow::anyhow!("TeamSpeak adapter not available"))
                 }
-                Err(anyhow::anyhow!("TeamSpeak adapter not available"))
             }
             Platform::NapCat => {
                 if let Some(ref nc_adapter) = ctx.nc_adapter {
@@ -244,12 +303,19 @@ impl Skill for SendMessage {
                             }
                         };
 
+                        // 添加发送者前缀
+                        let prefixed_msg = if !ctx.caller_name.is_empty() {
+                            format!("nc({}): {}", ctx.caller_name, msg)
+                        } else {
+                            msg.to_string()
+                        };
+
                         ts_adapter
-                            .send_raw(&cmd_send_text(targetmode, target_id, msg))
+                            .send_raw(&cmd_send_text(targetmode, target_id, &prefixed_msg))
                             .await?;
 
                         // 结果返回给 NC
-                        let reply = format!("已在TS发送消息: {} -> {}", mode, msg);
+                        let reply = format!("已在TS发送消息: {} -> {}", mode, prefixed_msg);
                         return Ok(json!({
                             "status": "ok",
                             "message": reply,

@@ -214,6 +214,7 @@ impl Skill for MusicControl {
                             anyhow::anyhow!("TeamSpeak clients list not available")
                         })?,
                         caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
                         caller_groups: ctx.caller_groups.clone(),
                         caller_channel_group_id: ctx.caller_channel_group_id,
                         gate: ctx.gate.clone(),
@@ -246,6 +247,7 @@ impl Skill for MusicControl {
                             anyhow::anyhow!("TeamSpeak clients list not available")
                         })?,
                         caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
                         caller_groups: ctx.caller_groups.clone(),
                         caller_channel_group_id: ctx.caller_channel_group_id,
                         gate: ctx.gate.clone(),
