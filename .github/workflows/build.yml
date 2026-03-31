@@ -58,14 +58,17 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             bin_suffix: .exe
+            archive_ext: zip
           - platform: linux-amd64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_suffix: ""
+            archive_ext: tar.gz
           - platform: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             bin_suffix: ""
+            archive_ext: tar.gz
 
     steps:
       - name: Checkout
@@ -122,10 +125,14 @@ jobs:
           cp examples/config/acl.toml "$STAGING/config/"
           cp examples/config/prompts.toml "$STAGING/config/"
           mkdir -p dist
-          cd staging
-          ZIP_NAME="../dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
-          zip -9 -r "$ZIP_NAME" .
-          echo "Artifact prepared: $ZIP_NAME"
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"
+            powershell -Command "Compress-Archive -Path 'staging/*' -DestinationPath '${ARCHIVE_NAME}'"
+          else
+            ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.tar.gz"
+            tar czf "$ARCHIVE_NAME" -C staging .
+          fi
+          echo "Artifact prepared: $ARCHIVE_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
