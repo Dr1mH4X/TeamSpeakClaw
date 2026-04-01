@@ -1,4 +1,5 @@
 <div align="center">
+  <img alt="LOGO" src="https://tsclaw.dreamhax.cc/img/tsclaw-400.png" width="256" height="256" />
   <h1>TeamSpeakClaw</h1>
 
   <img src="https://count.getloli.com/get/@TeamSpeakClaw?theme=booru-lewd" alt=":name" /></p>
