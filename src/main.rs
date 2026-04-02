@@ -64,7 +64,38 @@ async fn main() -> Result<()> {
         None
     };
 
-    // 7. 事件路由循环（TeamSpeak）
+    // 7. Headless 适配器（可选）
+    let headless_shutdown = tokio_util::sync::CancellationToken::new();
+    if config.headless.enabled {
+        let hl_runtime = crate::adapter::headless::HeadlessRuntimeConfig {
+            grpc_addr: config.headless.grpc_addr.clone(),
+            ts3_host: config.headless.ts3_host.clone(),
+            ts3_port: config.headless.ts3_port,
+            nickname: config.headless.nickname.clone(),
+            server_password: config.headless.server_password.clone(),
+            channel_password: config.headless.channel_password.clone(),
+            channel_path: config.headless.channel_path.clone(),
+            channel_id: config.headless.channel_id.clone(),
+            identity: config.headless.identity.clone(),
+            identity_file: config.headless.identity_file.clone(),
+            avatar_dir: config.headless.avatar_dir.clone(),
+            voice_state_file: config.headless.voice_state_file.clone(),
+            sq_host: config.serverquery.host.clone(),
+            sq_port: config.serverquery.port,
+            sq_user: config.serverquery.login_name.clone(),
+            sq_password: config.serverquery.login_pass.clone(),
+            sq_sid: config.serverquery.server_id,
+        };
+        let hl_shutdown = headless_shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::adapter::headless::run(hl_runtime, hl_shutdown).await {
+                error!("headless service failed: {}", e);
+            }
+        });
+        info!("Headless voice service enabled");
+    }
+
+    // 8. 事件路由循环（TeamSpeak）
     let ts_router = EventRouter::new_with_clients(
         config.clone(),
         prompts.clone(),
