@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
     // 7. Headless 适配器（可选）
     let headless_shutdown = tokio_util::sync::CancellationToken::new();
-    if config.headless.enabled {
+    let headless_handle: Option<tokio::task::JoinHandle<()>> = if config.headless.enabled {
         let hl_runtime = crate::adapter::headless::HeadlessRuntimeConfig {
             grpc_addr: config.headless.grpc_addr.clone(),
             ts3_host: config.headless.ts3_host.clone(),
@@ -87,11 +87,16 @@ async fn main() -> Result<()> {
             sq_sid: config.serverquery.server_id,
         };
         let hl_shutdown = headless_shutdown.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = crate::adapter::headless::run(hl_runtime, hl_shutdown).await {
                 error!("headless service failed: {}", e);
             }
-        });
+        }))
+    } else {
+        None
+    };
+
+    if headless_handle.is_some() {
         info!("Headless voice service enabled");
     }
 
@@ -179,6 +184,13 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    // 9. Graceful shutdown for headless service
+    if let Some(handle) = headless_handle {
+        info!("Shutting down headless voice service...");
+        headless_shutdown.cancel();
+        let _ = handle.await;
+    }
 
     if let Err(e) = adapter.quit().await {
         error!("Failed to send quit command: {}", e);
