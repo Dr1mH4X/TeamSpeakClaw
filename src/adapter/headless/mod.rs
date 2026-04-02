@@ -145,12 +145,6 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
         });
     }
 
-    use crate::config::serverquery::SqConfig;
-    let sq_runtime_cfg = serverquery::ServerQueryRuntimeConfig::from_sq_config(
-        &SqConfig::default(), // placeholder, will be overridden
-        config.ts3_port,
-    );
-    // Build actual sq config from runtime config
     let sq_runtime_cfg = serverquery::ServerQueryRuntimeConfig {
         host: config.sq_host.clone(),
         port: config.sq_port,
