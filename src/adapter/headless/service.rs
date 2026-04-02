@@ -60,12 +60,9 @@ impl VoiceServiceImpl {
         let mut pb = self.playback.lock().await;
         if let Some(p) = pb.take() {
             p.cancel.cancel();
-            let abort_handle = p.handle.abort_handle();
-            let join = p.handle;
-            let r = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
-            if r.is_err() {
-                abort_handle.abort();
-            }
+            let handle = p.handle;
+            handle.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
     }
 }
