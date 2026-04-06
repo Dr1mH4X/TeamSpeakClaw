@@ -15,10 +15,8 @@ After configuring `settings.toml` and `acl.toml`, run the program directly:
 If configured correctly, you should see logs similar to the following:
 
 ```
-Version: v0.x.x
-GitHub: https://github.com/Dr1mH4X/TeamSpeakClaw
 INFO Starting TeamSpeakClaw v0.x.x
-INFO Bot ready. Listening for events.
+INFO Bot ready. Listening for TS + NapCat events.
 ```
 
 At this point, the bot should be connected to your TeamSpeak server.
@@ -26,20 +24,20 @@ At this point, the bot should be connected to your TeamSpeak server.
 ## Command Line Options
 
 - `--log-level <LEVEL>`: Set the console log level (error, warn, info, debug, trace). Default is `info`.
-- `--config generate`: Generates default configuration files in the `config/` directory.
-- `--config edit`: Starts the interactive configuration wizard.
 
 ## Interaction Methods
 
 You can interact with the bot in the following ways:
 
-1. **Channel Chat**: Send a message in the channel using a trigger prefix.
-    - **Default Prefixes**: `!tsclaw`, `!bot`, `@TSClaw`
-    - **Example**: `!bot Play Nocturne by Jay Chou`
+1.  **Channel Chat**: Send a message in the channel using a trigger prefix.
+    -   Default Prefixes: `!tsclaw`, `!bot`, `@TSClaw`
+    -   Example: `!bot Play Nocturne by Jay Chou`
 
-2. **Private Chat (Recommended)**: Double-click the bot to start a private conversation.
-    - Private messages usually do not require a prefix (depending on the `respond_to_private` setting).
-    - **Example**: `Kick that person named User123`
+2.  **Private Chat (Recommended)**: Double-click the bot to start a private conversation.
+    -   Private messages usually do not require a prefix (depending on the `respond_to_private` setting).
+    -   Example: `Kick that person named User123`
+
+3.  **NapCat / QQ** (Optional): Enable NapCat to interact via QQ private messages or group chats.
 
 ## Available Skills
 
@@ -57,13 +55,26 @@ Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private mes
 
 Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `backend = "tsbot_backend"` and `base_url` in `settings.toml`.
 
-**Supported Actions:**
-- **Request Songs**: "Play [Song Name]"
-- **Skip Songs**: "Next song", "Skip"
-- **Pause/Resume**: "Pause music", "Resume playback"
-- **Search**: "Search for songs by Jay Chou"
-- **Volume**: "Set volume to 50"
-- **Audio Effects**: Adjust stereo, bass, reverb, etc.
+Supported actions:
+
+| Action | Description |
+|---|---|
+| `play` | Play a song (search by keyword) |
+| `pause` | Pause / resume playback |
+| `next` / `skip` | Skip song |
+| `previous` | Previous song |
+| `search` | Search and play |
+| `repeat` | Repeat mode (none/one/all) |
+| `volume` | Adjust volume |
+| `fx` | Sound effect settings |
+| `ts_play` | TS3AudioBot exclusive play |
+| `ts_add` | TS3AudioBot exclusive add to queue |
+| `ts_gedan` / `ts_gedanid` | TS3AudioBot playlist operations |
+| `ts_playid` / `ts_addid` | TS3AudioBot operations by ID |
+| `ts_mode` | TS3AudioBot playback mode |
+| `ts_login` | TS3AudioBot login |
+| `queue_netease` | tsbot_backend: NetEase playlist enqueue |
+| `queue_qqmusic` | tsbot_backend: QQ Music playlist enqueue |
 
 ### 🛡️ Administration
 
@@ -76,7 +87,7 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
 - **Poke Client** (poke_client): "Poke UserA"
 - **Send Message** (send_message): "Send a private message to UserA saying hello"
 
-#### `send_message` cross-platform routing
+#### `send_message` Cross-Platform Routing Notes
 
 - TeamSpeak context: supports `mode=private|channel|server`.
 - NapCat context: defaults to native NapCat sending, supports `mode=private|group`.
@@ -98,5 +109,5 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
     - Check the configuration in `acl.toml` to ensure your User Group ID is included in an allowed rule.
 
 - **Music features aren't working?**
-    - **ts3audiobot mode**: Ensure TS3AudioBot is online and its nickname is exactly `TS3AudioBot`.
-    - **tsbot_backend mode**: Ensure the NeteaseTSBot backend service is running and the `base_url` is correct.
+    - ts3audiobot mode: Ensure TS3AudioBot is online and its nickname is exactly `TS3AudioBot`.
+    - tsbot_backend mode: Ensure the NeteaseTSBot backend service is running and the `base_url` is correct.

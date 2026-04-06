@@ -19,33 +19,70 @@ TeamSpeakClaw is a standalone binary application and does not require a complex 
 1. Extract the downloaded archive into a folder.
 2. Ensure you have read and write permissions for that folder.
 
-## 3. Generate Configuration
+## 3. Configuration
 
-Run the following command in your terminal to automatically generate the default configuration files:
-
-```bash
-./teamspeakclaw --config generate
-```
-
-This will create three configuration files in the `config/` directory:
+The extracted archive contains a `config/` directory with the following configuration files:
 
 - `settings.toml` — Core settings (Connection, LLM, bot behavior)
-- `acl.toml` — Permission control rules (ACL)
+- `acl.toml` — Permission control rules
 - `prompts.toml` — System prompts and error messages
 
-## 4. Edit Configuration
-
-You can manually modify the configuration files using a text editor, or use the built-in interactive wizard:
-
-```bash
-./teamspeakclaw --config edit
-```
-
-The wizard will guide you through entering information such as your TeamSpeak ServerQuery account credentials and LLM API Key.
+Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak ServerQuery account credentials, LLM API Key, and other information.
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).
 
-## 5. Start Service
+## 4. Docker Deployment (Recommended)
+
+Deploying with Docker is the easiest way, without manually installing dependencies.
+
+### Using Docker Compose (Recommended)
+
+1. Create a project directory and download the configuration file:
+
+```bash
+mkdir teamspeakclaw && cd teamspeakclaw
+curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-compose.yml
+```
+
+2. Edit the configuration file:
+
+Fill in your TeamSpeak and LLM configuration in `config/settings.toml`:
+
+3. Start the service:
+
+```bash
+docker compose up -d
+```
+
+4. View logs:
+
+```bash
+docker compose logs -f
+```
+
+### Using Docker Command
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/dr1mh4x/teamspeakclaw:latest
+
+# Create directories
+mkdir -p config logs
+
+# Copy example configuration and edit
+# Copy configuration files from the examples/config/ directory and modify them
+
+# After editing the configuration, run the container
+docker run -d \
+  --name teamspeakclaw \
+  --restart unless-stopped \
+  -v ./config:/app/config:ro \
+  -v ./logs:/app/logs \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/dr1mh4x/teamspeakclaw:latest
+```
+
+## 5. Start Service (Traditional Method)
 
 Once the configuration is complete, simply run the program:
 
