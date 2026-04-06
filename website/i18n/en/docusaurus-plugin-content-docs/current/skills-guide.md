@@ -8,6 +8,8 @@ This guide walks you through creating a new Skill from scratch, including trait 
 
 ## Architecture Overview
 
+The skill system consists of the following core components:
+
 ```
 ┌─────────────────────────────────────────────────┐
 │                   SkillRegistry                  │
@@ -42,17 +44,17 @@ pub trait Skill: Send + Sync {
     // Required: TeamSpeak native execution
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
-    // Optional: NapCat native execution (defaults to "not supported")
+    // Optional: NapCat native execution (defaults to not supported)
     async fn execute_nc(&self, args: Value, ctx: &NcExecutionContext) -> Result<Value>;
 
-    // Optional: Unified execution (defaults to "not supported")
+    // Optional: Unified execution (defaults to not supported)
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value>;
 }
 ```
 
 **Call priority**: `execute_unified` → fallback to `execute` (TS side) or `execute_nc` (NC side).
 
-## Step-by-Step: Create a New Skill
+## Quick Start: Create a New Skill
 
 ### Step 1: Define the Struct and Implement `execute`
 
@@ -93,9 +95,9 @@ impl Skill for EchoSkill {
 }
 ```
 
-### Step 2: Implement `execute_unified` (Cross-Platform)
+### Step 2: Implement `execute_unified` (Cross-Platform Support)
 
-All skills that need cross-platform invocation should implement `execute_unified`. Use `ctx.to_ts_ctx()?` to convert `UnifiedExecutionContext` back to `ExecutionContext` in one line:
+All skills that need cross-platform invocation should implement `execute_unified`. Use `ctx.to_ts_ctx()?` to convert `UnifiedExecutionContext` back to `ExecutionContext` in one line, avoiding manual unwrapping:
 
 ```rust
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
@@ -103,7 +105,7 @@ All skills that need cross-platform invocation should implement `execute_unified
 
         match ctx.platform {
             Platform::TeamSpeak => {
-                // Restore TS context via to_ts_ctx()
+                // Restore TS context via to_ts_ctx() in one line
                 let ts_ctx = ctx.to_ts_ctx()?;
                 self.execute(args, &ts_ctx).await
             }
@@ -183,6 +185,7 @@ When called from NC but the operation needs to execute on TS (e.g., music contro
 ```rust
 Platform::NapCat => {
     let ts_ctx = ctx.to_ts_ctx()?;  // Auto-validates adapter availability
+    // Use ts_ctx.adapter to send TS commands
     ts_ctx.adapter.send_raw(&some_command).await?;
     Ok(json!({ "status": "ok" }))
 }
@@ -190,7 +193,7 @@ Platform::NapCat => {
 
 ### Parameter Error Prompts
 
-Use `ctx.error_prompts` templates for consistent user experience:
+Prefer using the unified error templates from `ctx.error_prompts` for consistent user experience:
 
 ```rust
 let clid = args["clid"].as_u64().ok_or_else(|| {
@@ -198,18 +201,18 @@ let clid = args["clid"].as_u64().ok_or_else(|| {
 })? as u32;
 ```
 
-## Existing Skills
+## Existing Skills Overview
 
 | Skill Name | File | Cross-Platform | Description |
 |---|---|---|---|
 | `poke_client` | `communication.rs` | ✅ | Poke a user |
-| `send_message` | `communication.rs` | ✅ | Send message (supports TS↔NC routing) |
-| `kick_client` | `moderation.rs` | ✅ | Kick a user from the server |
-| `ban_client` | `moderation.rs` | ✅ | Ban a user from the server |
-| `move_client` | `moderation.rs` | ✅ | Move a user to another channel |
-| `get_client_list` | `information.rs` | ✅ | Get list of online users |
+| `send_message` | `communication.rs` | ✅ | Send message (supports TS↔NC bidirectional routing) |
+| `kick_client` | `moderation.rs` | ✅ | Kick a user |
+| `ban_client` | `moderation.rs` | ✅ | Ban a user |
+| `move_client` | `moderation.rs` | ✅ | Move a user to a specified channel |
+| `get_client_list` | `information.rs` | ✅ | Get online user list |
 | `get_client_info` | `information.rs` | ✅ | Get detailed user info |
-| `music_control` | `music.rs` | ✅ | Music player control (dual backend) |
+| `music_control` | `music.rs` | ✅ | Music control (dual backend) |
 
 ## File Organization
 
@@ -224,13 +227,13 @@ src/skills/
 └── music.rs             # Music: music_control
 ```
 
-Place new skills in the appropriate existing file, or create a new file (e.g., `automation.rs`).
+It is recommended to place new skills in the corresponding file following the same grouping principle, or create a new file (e.g., `automation.rs`).
 
 ## Best Practices
 
 1. **Naming**: Use `snake_case`, e.g., `kick_client`
-2. **Parameters**: Provide complete JSON Schema in `parameters()` — the LLM relies on it
+2. **Parameters**: Provide complete JSON Schema in `parameters()` — the LLM relies on it for correct invocation
 3. **Errors**: Return meaningful errors using `ctx.error_prompts` templates
-4. **Cross-platform**: All new skills should implement `execute_unified` using `ctx.to_ts_ctx()?`
+4. **Cross-platform**: All new skills should implement `execute_unified` using `ctx.to_ts_ctx()?` for simplified logic
 5. **Logging**: Add `info!` at the `execute_unified` entry point for debugging
 6. **Return values**: Return JSON in `{"status": "ok", ...}` format

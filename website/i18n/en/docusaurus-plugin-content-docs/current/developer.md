@@ -25,13 +25,12 @@ cd TeamSpeakClaw
 cargo build
 
 # Run (Development mode)
-cargo run -- --config generate   # Generate default configuration
-cargo run                         # Start the bot
+cargo run
 ```
 
 ### Setup Development Environment
 
-A configuration file must be generated upon the first run. For details, see the [Configuration Guide](/docs/configuration).
+Manually create the configuration file before first run. See [Configuration Guide](/docs/configuration) for details.
 
 ## Project Architecture
 
@@ -39,76 +38,120 @@ A configuration file must be generated upon the first run. For details, see the 
 
 ```
 src/
-├── main.rs           # Entry point: Initializes components, starts event loop
-├── cli.rs            # CLI argument parsing and configuration wizard
-├── router.rs         # Event Router: Coordinates modules to handle user messages
-├── adapter/          # TeamSpeak Adapter Layer
+├── main.rs                  # Entry: Initialize components, start event loop
+├── cli.rs                   # CLI argument parsing
+├── router.rs                # Module re-exports (→ router/)
+├── router/
+│   ├── sq_router.rs         # TeamSpeak event router
+│   └── nc_router.rs         # NapCat/QQ event router
+├── adapter/
 │   ├── mod.rs
-│   ├── connection.rs # Connection management (TCP/SSH)
-│   ├── command.rs    # Command building
-│   └── event.rs      # Event parsing
-├── config/           # Configuration loading and validation
-│   └── mod.rs
-├── llm/              # LLM Integration Layer
+│   ├── serverquery/         # TeamSpeak ServerQuery adapter
+│   │   ├── mod.rs
+│   │   ├── connection.rs    # TCP/SSH connection management
+│   │   ├── command.rs       # Command building
+│   │   └── event.rs         # Event parsing
+│   └── napcat/              # NapCat OneBot 11 adapter
+│       ├── mod.rs
+│       ├── ws.rs            # WebSocket connection and reconnection
+│       ├── api.rs           # OneBot API action definitions
+│       ├── event.rs         # Event parsing
+│       └── types.rs         # Message segments and response types
+├── config/
+│   ├── mod.rs               # AppConfig aggregation
+│   ├── serverquery.rs       # ServerQuery config
+│   ├── napcat.rs            # NapCat config
+│   ├── bot.rs               # Bot behavior config
+│   ├── llm.rs               # LLM config
+│   ├── music_backend.rs     # Music backend config
+│   ├── acl.rs               # ACL rules config
+│   ├── logging.rs           # Logging config
+│   ├── rate_limit.rs        # Rate limit config
+│   └── prompts.rs           # Prompts and error messages
+├── llm/
 │   ├── mod.rs
-│   ├── engine.rs     # LLM Engine encapsulation
-│   └── provider.rs   # Provider trait and OpenAI implementation
-├── permission/       # Access Control (ACL)
+│   ├── engine.rs            # LLM engine wrapper
+│   └── provider.rs          # Provider trait and OpenAI implementation
+├── permission/
 │   ├── mod.rs
-│   └── gate.rs       # Permission gating logic
-└── skills/           # Skill System
-    ├── mod.rs        # Skill trait and registry
-    ├── communication.rs
-    ├── information.rs
-    ├── moderation.rs
-    └── music.rs
+│   └── gate.rs              # Permission gating logic
+└── skills/
+    ├── mod.rs               # Skill trait, context types, and registry
+    ├── communication.rs     # poke_client, send_message
+    ├── information.rs       # get_client_list, get_client_info
+    ├── moderation.rs        # kick_client, ban_client, move_client
+    └── music.rs             # music_control (dual backend + cross-platform)
 ```
 
 ### Data Flow
 
+**TeamSpeak Path**:
+
 ```
-User Message → TsAdapter → EventRouter → LlmEngine
-                                           ↓
-                                     Tool Call Request
-                                           ↓
-                                 PermissionGate (Auth Check)
-                                           ↓
-                                  SkillRegistry → Skill.execute()
-                                           ↓
-                                  Result → LlmEngine → TsAdapter → Reply to User
+User Message → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
+                                                ↓
+                                           Tool Call Request
+                                                ↓
+                                    PermissionGate (Auth Check)
+                                                ↓
+                                    SkillRegistry → Skill.execute()
+                                                ↓
+                                    Result → LlmEngine → TsAdapter → Reply to User
 ```
 
-### Cross-platform Behavior Matrix (Current)
+**NapCat / QQ Path**:
+
+```
+User Message → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
+                                                      ↓
+                                                 Tool Call Request
+                                                      ↓
+                                          PermissionGate (Auth Check)
+                                                      ↓
+                                    SkillRegistry → Skill.execute_unified()
+                                          ↓              ↓
+                                    NC native exec    Forward to TS exec
+                                          ↓              ↓
+                                    Reply NC user     Reply NC user
+```
+
+### Cross-platform Behavior Matrix
 
 | Skill | TS entry | NC entry (default) | NC entry + `ts_route=true` |
 |---|---|---|---|
-| `poke_client` | ✅ TS execution | ❌ (no NC implementation) | ❌ |
-| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (native NapCat sending) | ✅ routed to TS (`private/channel/server`) |
+| `poke_client` | ✅ TS execution | ❌ | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (NapCat native) | ✅ routed to TS |
 | `kick_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
 | `ban_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
 | `move_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
-| `get_client_list` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
-| `get_client_info` | ✅ TS execution | ✅ reads TS online cache and returns | n/a |
-| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS | n/a |
+| `get_client_list` | ✅ TS execution | ✅ queries TS online cache and returns | n/a |
+| `get_client_info` | ✅ TS execution | ✅ queries TS online cache and returns | n/a |
+| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS, waits for TS3AudioBot actual reply then returns | n/a |
 
 Notes:
-- NC routing prefers `execute_unified`, then falls back to `execute_nc` on failure.
-- TS routing prefers `execute_unified`, then falls back to `execute`.
-- NC permissions are enforced via ACL pseudo groups (`9000~9003`); see configuration docs.
+- NC side unified execution follows "first `execute_unified`, fallback to `execute_nc` on failure".
+- TS side unified execution follows "first `execute_unified`, fallback to `execute` on failure".
+- NC permissions are enforced via ACL virtual group mapping (`9000~9003`), see configuration docs.
 
 ## Core Modules Detail
 
-### adapter — TeamSpeak Adapter
+### adapter — Communication Adapter
+
+#### TeamSpeak Adapter (`adapter/serverquery/`)
 
 Handles low-level communication with the TeamSpeak server.
 
-**Core Structure**: `src/adapter/connection.rs:153-158`
+**Core Structure**: `src/adapter/serverquery/connection.rs`
 
 ```rust
 pub struct TsAdapter {
     writer: Mutex<tokio::io::WriteHalf<TsStream>>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: AtomicU32,
+    query_tx: mpsc::Sender<String>,
+    query_active: AtomicBool,
+    include_event_lines_active: AtomicBool,
+    query_lock: Mutex<()>,
 }
 ```
 
@@ -116,13 +159,39 @@ pub struct TsAdapter {
 - TCP (Default): `method = "tcp"`
 - SSH: `method = "ssh"`
 
-**Event Types**: `src/adapter/event.rs`
+**Event Types**: `src/adapter/serverquery/event.rs`
 
 | Event | Description |
 |---|---|
 | `TsEvent::TextMessage` | Text message received |
 | `TsEvent::ClientEnterView` | Client entered view |
 | `TsEvent::ClientLeftView` | Client left view |
+
+#### NapCat Adapter (`adapter/napcat/`)
+
+Connects to NapCat via WebSocket (OneBot 11 protocol), supports automatic reconnection on disconnect.
+
+**Core Structure**: `src/adapter/napcat/ws.rs`
+
+```rust
+pub struct NapCatAdapter {
+    writer: Mutex<Option<WsSink>>,   // None means disconnected
+    event_tx: broadcast::Sender<NcEvent>,
+    pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
+    self_id: AtomicI64,
+    reconnect_tx: mpsc::Sender<()>,
+    config: NapCatConfig,
+}
+```
+
+**Authentication**: Carries both `Authorization: Bearer` header and `access_token` query parameter during WebSocket handshake, compatible with OneBot 11 standard.
+
+**Event Types**: `src/adapter/napcat/event.rs`
+
+| Event | Description |
+|---|---|
+| `NcEvent::PrivateMessage` | QQ private message received |
+| `NcEvent::GroupMessage` | QQ group message received |
 
 ### llm — LLM Integration
 
@@ -156,128 +225,317 @@ pub struct ToolCall {
 }
 ```
 
+**Integration**: `LlmEngine::new()` in `src/llm/engine.rs` directly creates an `OpenAiProvider`. All OpenAI-compatible APIs (DeepSeek, ChatGPT, etc.) can be configured via `base_url` and `model`.
+
 ### permission — Access Control
 
 Access control based on TeamSpeak Server Groups and Channel Groups.
 
-**Core Methods**:
-- `get_allowed_skills(&self, caller_groups: &[u32], caller_channel_group_id: u32) -> Vec<String>`: Returns a list of skills permitted for the user.
-- `can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, target_groups: &[u32]) -> bool`: Prevents regular users from performing actions (kick/ban) on administrative groups.
+**Core Method**: `src/permission/gate.rs:12-43`
 
-**Rule Matching Logic**: Server groups and channel groups match if either one matches. If both arrays are empty, the rule matches all users.
+```rust
+pub fn get_allowed_skills(&self, caller_groups: &[u32], caller_channel_group_id: u32) -> Vec<String>
+```
+
+**Target Protection**: `src/permission/gate.rs:45-79`
+
+```rust
+pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, target_groups: &[u32]) -> bool
+```
+
+Prevents regular users from performing actions (kick/ban) on administrative groups.
+
+**Rule Matching Logic**: Iterate all rules, collect `allowed_skills` from all matching rules as a union. Empty array means "match all".
 
 ### router — Event Router
 
-Coordinates all modules to handle user messages, implementing the complete dialogue workflow.
+#### SqRouter (TeamSpeak)
 
-**Message Processing Flow**: `src/router.rs:115-286`
+`src/router/sq_router.rs` — Handles TeamSpeak text message events.
 
-1. Filter out self-messages.
-2. Determine response trigger (Private message or Prefix).
-3. Retrieve user server groups and channel group.
-4. Prepare LLM context.
-5. First LLM call.
-6. Execute tool calls (if any).
-7. Second LLM call (containing tool results).
-8. Send reply.
+Message processing flow:
+1. Filter out self-messages
+2. Filter TS3AudioBot auto-replies
+3. Determine response trigger (PM or prefix)
+4. Get user server groups
+5. First LLM call
+6. Execute tool calls (if any, via `UnifiedExecutionContext`)
+7. Second LLM call (containing tool results)
+8. Send reply
 
-## Skill Development
+#### NcRouter (NapCat / QQ)
+
+`src/router/nc_router.rs` — Handles NapCat private and group message events.
+
+Key differences from SqRouter:
+- Has `ts_adapter` and `ts_clients`, can construct `UnifiedExecutionContext::from_nc()` for cross-platform tool calls
+- NC user permissions are mapped via virtual group IDs (`9000-9003`)
+
+## Skill System Development
 
 ### Skill Trait
 
-All skills must implement the `Skill` trait: `src/skills/mod.rs:26-31`
+All skills must implement the `Skill` trait: `src/skills/mod.rs:126-152`
 
 ```rust
 #[async_trait]
 pub trait Skill: Send + Sync {
-    /// Skill name (Unique identifier)
     fn name(&self) -> &'static str;
-
-    /// Skill description (For LLM understanding)
     fn description(&self) -> &'static str;
-
-    /// Parameter JSON Schema
     fn parameters(&self) -> Value;
 
-    /// Execution logic
+    /// TeamSpeak execution (must implement)
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
+
+    /// NapCat/QQ execution (defaults to not supported, override as needed)
+    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value>;
+
+    /// Unified execution (cross-platform, defaults to not supported, override as needed)
+    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value>;
 }
 ```
 
 ### ExecutionContext
 
-Context available during skill execution: `src/skills/mod.rs:16-23`
+Context during TeamSpeak skill execution: `src/skills/mod.rs:31-40`
 
 ```rust
 pub struct ExecutionContext<'a> {
-    pub adapter: Arc<TsAdapter>,                // TeamSpeak Adapter
-    pub clients: &'a DashMap<u32, ClientInfo>,  // Online client list
-    pub caller_id: u32,                         // Caller client ID
-    pub caller_groups: Vec<u32>,                // Caller server groups
-    pub caller_channel_group_id: u32,           // Caller channel group ID
-    pub gate: Arc<PermissionGate>,              // Permission gate
-    pub config: Arc<AppConfig>,                 // Application config
+    pub adapter: Arc<TsAdapter>,
+    pub clients: &'a DashMap<u32, ClientInfo>,
+    pub caller_id: u32,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+### NcExecutionContext
+
+Context during NapCat skill execution: `src/skills/mod.rs:46-53`
+
+```rust
+pub struct NcExecutionContext<'a> {
+    pub adapter: Arc<NapCatAdapter>,
+    pub caller_id: i64,
+    pub caller_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+### UnifiedExecutionContext
+
+Cross-platform unified context, built via `from_ts()` or `from_nc()`, with cross-end adapters injected via `with_cross_adapters()`: `src/skills/mod.rs:59-120`
+
+```rust
+pub struct UnifiedExecutionContext<'a> {
+    pub platform: Platform,                      // TeamSpeak | NapCat
+    pub ts_adapter: Option<Arc<TsAdapter>>,
+    pub ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+    pub nc_adapter: Option<Arc<NapCatAdapter>>,
+    pub caller_id: u32,
+    pub caller_id_nc: i64,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub nc_group_id: Option<i64>,
+    pub gate: Arc<PermissionGate>,
+    pub config: Arc<AppConfig>,
+    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
 ### Adding a New Skill
 
-1. **Create the file**: Create a new file or extend an existing one in `src/skills/`.
-2. **Implement Skill**: Define your struct and implement the `Skill` trait. Use `ctx.to_ts_ctx()?` in `execute_unified` for cross-platform support.
-3. **Register**: Add the module declaration and register it in `src/skills/mod.rs`.
-4. **Configure ACL**: Add the skill to `config/acl.toml`.
+**Step 1**: Create a new file or extend an existing one under `src/skills/`
 
-### Best Practices
+```rust
+// Example: src/skills/example.rs
+use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use anyhow::Result;
+use tracing::info;
 
-1. **Naming**: Use `snake_case` (e.g., `kick_client`).
-2. **Validation**: Validate required parameters within `execute`.
-3. **Error Handling**: Return meaningful error messages using `ctx.error_prompts` templates.
-4. **Target Check**: Use `ctx.gate.can_target()` to verify permissions for administrative actions.
-5. **Cross-Platform**: Implement `execute_unified` using `ctx.to_ts_ctx()?` to restore the TS context in one line.
-6. **Detailed Guide**: See [Skills Development Guide](/docs/skills-guide).
+pub struct ExampleSkill;
+
+#[async_trait]
+impl Skill for ExampleSkill {
+    fn name(&self) -> &'static str {
+        "example_skill"
+    }
+
+    fn description(&self) -> &'static str {
+        "Example skill: returns a greeting message"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "User name"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
+        let name = args["name"].as_str().unwrap_or("Unknown");
+        Ok(json!({
+            "message": format!("Hello, {}!", name)
+        }))
+    }
+
+    // Cross-platform support: use ctx.to_ts_ctx()? for simplified context restoration
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        info!("ExampleSkill: unified execution, platform={:?}", ctx.platform);
+        let ts_ctx = ctx.to_ts_ctx()?;
+        self.execute(args, &ts_ctx).await
+    }
+}
+```
+
+**Step 2**: Register in `src/skills/mod.rs`
+
+```rust
+pub mod example;  // Add module declaration
+
+pub fn with_defaults() -> Self {
+    // ... existing registration ...
+    registry.register(Box::new(example::ExampleSkill));
+    registry
+}
+```
+
+**Step 3**: Configure permissions in `config/acl.toml`
+
+```toml
+[[rules]]
+name = "example_rule"
+server_group_ids = [8]
+allowed_skills = ["example_skill"]
+can_target_admins = false
+```
+
+### Skill Development Practices
+
+1. **Naming**: Use `snake_case`, e.g., `kick_client`, `get_client_list`
+2. **Parameter Validation**: Validate required parameters in `execute`
+3. **Error Handling**: Return meaningful error messages, use `ctx.error_prompts` templates
+4. **Permission Check**: Use `ctx.gate.can_target()` to check operation permissions
+5. **Return Values**: Return JSON objects with `status: "ok"` and execution results
+6. **Cross-Platform**: Implement `execute_unified()`, use `ctx.to_ts_ctx()?` for one-line TS context restoration
+7. **Detailed Guide**: See [Skills Development Guide](/docs/skills-guide)
+
+### Existing Skills
+
+| Skill Name | File | Description |
+|---|---|---|
+| `poke_client` | `communication.rs` | Poke a user |
+| `send_message` | `communication.rs` | Send message (cross-platform) |
+| `kick_client` | `moderation.rs` | Kick a user |
+| `ban_client` | `moderation.rs` | Ban a user |
+| `move_client` | `moderation.rs` | Move a user to a specified channel |
+| `get_client_list` | `information.rs` | Get online user list |
+| `get_client_info` | `information.rs` | Get detailed user info |
+| `music_control` | `music.rs` | Music control (dual backend + cross-platform) |
 
 ## Permission System
 
 ### Configuration Structure
 
-`config/acl.toml` uses top-down rule matching:
+`config/acl.toml` iterates all rules, collecting the union of matched skills:
 
 ```toml
 [[rules]]
-name = "rule_name"
+name = "Rule Name"
 server_group_ids = [6]          # Server group ID list, empty array matches everyone
 channel_group_ids = [5]         # Channel group ID list, empty array means don't check channel group
 allowed_skills = ["skill_name"] # Allowed skills, "*" means all
 can_target_admins = true        # Whether can target protected group members
 
 [acl]
-protected_group_ids = [6, 8, 9] # Protected server group IDs
+protected_group_ids = [6, 8, 9] # Protected server groups
 ```
 
 ### Permission Evaluation Flow
 
 1. Iterate through rule list
-2. Check if caller's server group matches (server_group_ids empty array matches everyone)
-3. Check if caller's channel group matches (channel_group_ids empty array matches everyone)
-4. Server group and channel group match if either one matches
-5. Collect allowed skills from matching rules
-6. If rule contains `"*"` immediately return all skills
+2. Check if caller's server group matches (`server_group_ids` empty array matches all server groups)
+3. Check if caller's channel group matches (`channel_group_ids` empty array skips channel group check)
+4. Both server group and channel group must match for the rule to match
+5. Collect allowed skills from all matching rules, take the union
+6. If any matching rule contains `"*"`, immediately return all skills
 7. Before executing operation on target, call `can_target()` to check
 
 ## Code Standards
 
-- **Language**: Visible output and documentation should prefer Chinese (or follow existing project locale).
-- **Type Safety**: Prefer strong types over raw JSON manipulation.
-- **Error Handling**: Use `anyhow::Result` for readable error chains.
-- **Compiler Warnings**: Do not suppress warnings with `allow(dead_code)`; remove or refactor unused code instead.
+### General Guidelines
+
+- **Global Chinese**: All visible output, comments, and documentation should prefer Chinese
+- **Type Safety**: Prefer strong typed structs, avoid raw JSON manipulation
+- **Error Handling**: Use `anyhow::Result`, provide meaningful error messages
+
+### Compiler Warnings
+
+- **No suppressing warnings**: Do not use `#[allow(dead_code)]` or `#[allow(unused)]`
+- **Dead code handling**: Remove unused code, or refactor to use it properly
+- **Unused imports**: Remove unused `use` statements
 
 ## Contribution Process
 
-1. Fork the repository.
-2. Create a feature branch: `git checkout -b feature/my-feature`.
-3. Follow the code standards.
-4. Ensure all tests pass: `cargo test`.
-5. Format code: `cargo fmt`.
-6. Submit a Pull Request.
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Follow code standards during development
+4. Ensure all tests pass: `cargo test`
+5. Format code: `cargo fmt`
+6. Submit a Pull Request
 
-**Commit Format**: `type: short description` (e.g., `feat: add mute skill`).
+### Commit Message Format
+
+```
+type: short description
+
+Detailed description (optional)
+```
+
+Types: `feat` | `fix` | `docs` | `refactor` | `test` | `chore`
+
+## FAQ
+
+### Q: How to debug connection issues?
+
+Check connection settings in `config/settings.toml`, ensure:
+- Host and port are correct
+- Login credentials are valid
+- Server ID exists
+
+### Q: How to view detailed logs?
+
+```bash
+# Set log level
+RUST_LOG=debug cargo run
+
+# Or use CLI argument
+cargo run -- --log-level debug
+```
+
+### Q: How to test a specific skill?
+
+1. Add the target skill to your test user group in `config/acl.toml`
+2. Start the bot and send a message using the corresponding TeamSpeak account
+3. Check console logs to confirm execution results
+
+## Related Resources
+
+- [Rust Official Documentation](https://doc.rust-lang.org/book/)
+- [TeamSpeak ServerQuery Manual](https://yat.qa/resources/)
+- [OpenAI API Documentation](https://platform.openai.com/docs/api-reference)
+- [OneBot 11 Standard](https://github.com/botuniverse/onebot-11)
+- [NapCat Documentation](https://napneko.github.io/)
