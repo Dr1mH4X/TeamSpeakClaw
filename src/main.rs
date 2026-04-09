@@ -52,7 +52,7 @@ async fn execute_app() -> Result<()> {
         .await?;
 
     let nc_adapter = connect_napcat_if_enabled(config.clone()).await?;
-    let headless_runtime = start_headless_if_enabled(config.clone(), prompts.clone(), llm.clone());
+    let clients = Arc::new(DashMap::new());
 
     let ts_router = EventRouter::new_with_clients(
         config.clone(),
@@ -61,8 +61,17 @@ async fn execute_app() -> Result<()> {
         gate.clone(),
         llm.clone(),
         registry.clone(),
-        Arc::new(DashMap::new()),
+        clients.clone(),
         nc_adapter.clone(),
+    );
+    let headless_runtime = start_headless_if_enabled(
+        config.clone(),
+        prompts.clone(),
+        gate.clone(),
+        llm.clone(),
+        registry.clone(),
+        adapter.clone(),
+        clients,
     );
 
     let run_result = run_routers(
@@ -113,6 +122,8 @@ impl HeadlessRuntime {
     }
 
     async fn shutdown(self) {
+        self.shutdown.cancel();
+
         if let Some(handle) = self.bridge_handle {
             info!("Shutting down headless LLM bridge...");
             let _ = handle.await;
@@ -120,7 +131,6 @@ impl HeadlessRuntime {
 
         if let Some(handle) = self.service_handle {
             info!("Shutting down headless voice service...");
-            self.shutdown.cancel();
             let _ = handle.await;
         }
     }
@@ -129,7 +139,11 @@ impl HeadlessRuntime {
 fn start_headless_if_enabled(
     config: Arc<AppConfig>,
     prompts: Arc<crate::config::PromptsConfig>,
+    gate: Arc<crate::permission::PermissionGate>,
     llm: Arc<crate::llm::LlmEngine>,
+    registry: Arc<crate::skills::SkillRegistry>,
+    ts_adapter: Arc<crate::adapter::TsAdapter>,
+    ts_clients: Arc<dashmap::DashMap<u32, crate::router::ClientInfo>>,
 ) -> HeadlessRuntime {
     if !config.headless.enabled {
         return HeadlessRuntime::disabled();
@@ -167,7 +181,9 @@ fn start_headless_if_enabled(
 
     info!("Headless voice service enabled");
 
-    let bridge = crate::router::HeadlessLlmBridge::new(prompts, llm);
+    let bridge = crate::router::HeadlessLlmBridge::new(
+        config, prompts, gate, llm, registry, ts_adapter, ts_clients,
+    );
     let bridge_handle = Some(tokio::spawn(async move {
         if let Err(e) = bridge.run().await {
             error!("headless LLM bridge failed: {}", e);
