@@ -119,7 +119,7 @@ impl HeadlessLlmBridge {
     }
 
     fn should_ignore_chat(&self, chat: &voicev1::ChatEvent, caller_id: u32) -> bool {
-        if chat.invoker_name == self.config.headless.nickname {
+        if chat.invoker_name == self.config.bot.nickname {
             return true;
         }
         let bot_clid = self.ts_adapter.get_bot_clid();

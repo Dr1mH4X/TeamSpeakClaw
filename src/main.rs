@@ -47,9 +47,7 @@ async fn execute_app() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter
-        .set_nickname(&config.serverquery.bot_nickname)
-        .await?;
+    adapter.set_nickname(&config.bot.nickname).await?;
 
     let nc_adapter = connect_napcat_if_enabled(config.clone()).await?;
     let clients = Arc::new(DashMap::new());
@@ -153,15 +151,11 @@ fn start_headless_if_enabled(
     let hl_runtime = crate::adapter::headless::HeadlessRuntimeConfig {
         ts3_host: config.headless.ts3_host.clone(),
         ts3_port: config.headless.ts3_port,
-        nickname: config.headless.nickname.clone(),
+        nickname: config.bot.nickname.clone(),
         server_password: config.headless.server_password.clone(),
         channel_password: config.headless.channel_password.clone(),
         channel_path: config.headless.channel_path.clone(),
         channel_id: config.headless.channel_id.clone(),
-        identity: config.headless.identity.clone(),
-        identity_file: config.headless.identity_file.clone(),
-        avatar_dir: config.headless.avatar_dir.clone(),
-        voice_state_file: config.headless.voice_state_file.clone(),
         sq_host: config.serverquery.host.clone(),
         sq_port: config.serverquery.port,
         sq_user: config.serverquery.login_name.clone(),

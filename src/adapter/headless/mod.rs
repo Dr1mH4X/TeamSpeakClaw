@@ -41,10 +41,6 @@ pub struct HeadlessRuntimeConfig {
     pub channel_password: String,
     pub channel_path: String,
     pub channel_id: String,
-    pub identity: String,
-    pub identity_file: String,
-    pub avatar_dir: String,
-    pub voice_state_file: String,
     pub sq_host: String,
     pub sq_port: u16,
     pub sq_user: String,
@@ -82,7 +78,7 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
         }
     });
 
-    let persist_file = resolve_repo_relative(&config.voice_state_file);
+    let persist_file = resolve_repo_relative("voice_state.json");
 
     let mut init_status = SharedStatus {
         state: 1,
