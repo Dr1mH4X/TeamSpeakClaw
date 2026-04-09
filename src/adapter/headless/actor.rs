@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use tsclientlib::ChannelId;
 use tsclientlib::{events, MessageTarget};
@@ -69,6 +69,8 @@ pub async fn ts3_actor(
     let channel_id = config.channel_id;
     let identity_str = config.identity;
     let identity_file = resolve_repo_relative(&config.identity_file);
+    let diag_enabled = false;
+    let diag_interval = Duration::from_secs(5);
     let avatar_dir = config.avatar_dir.trim();
     let avatar_dir = if avatar_dir.is_empty() {
         None
@@ -208,7 +210,7 @@ pub async fn ts3_actor(
         let mut out_buf_max: usize = 0;
         let mut out_buf_drops: u64 = 0;
         let mut send_audio_errs: u64 = 0;
-        let mut diag_next = Instant::now() + Duration::from_secs(5);
+        let mut diag_next = Instant::now() + diag_interval;
 
         let mut event_tick = tokio::time::interval(std::time::Duration::from_millis(50));
         let mut send_tick = tokio::time::interval(std::time::Duration::from_millis(20));
@@ -505,14 +507,13 @@ pub async fn ts3_actor(
                         }
                     }
 
-                    if now >= diag_next {
-                        diag_next = now + Duration::from_secs(5);
+                    if diag_enabled && now >= diag_next {
+                        diag_next = now + diag_interval;
                         let msg = format!(
                             "audio_send_diag: out_buf_max={} drops={} send_jitter_max_ms={} send_audio_errs={}",
                             out_buf_max, out_buf_drops, send_jitter_max_ms, send_audio_errs
                         );
-                        emit_log(&events_tx, 2, msg.clone());
-                        info!("{msg}");
+                        emit_log(&events_tx, 1, msg.clone());
                         out_buf_max = out_buf.len();
                         send_jitter_max_ms = 0;
                         send_audio_errs = 0;
