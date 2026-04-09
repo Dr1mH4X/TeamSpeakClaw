@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
+use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
-use futures::StreamExt;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use tsproto_packets::packets::{OutCommand, OutPacket, OutAudio, Direction, Flags, PacketType};
+use tsproto_packets::packets::{Direction, Flags, OutCommand, OutPacket, PacketType};
 
-use super::tsbot::voice::v1 as voicev1;
-use voicev1::voice_service_server::{VoiceService, VoiceServiceServer};
-use super::types::{SharedStatus, PersistedVoiceState, emit_log, emit_playback};
 use super::playback::playback_loop;
-use super::serverquery::{ServerQueryRuntimeConfig, serverquery_set_client_description, ts3_escape_value};
+use super::serverquery::{
+    serverquery_set_client_description, ts3_escape_value, ServerQueryRuntimeConfig,
+};
+use super::tsbot::voice::v1 as voicev1;
+use super::types::{emit_log, emit_playback, PersistedVoiceState, SharedStatus};
+use voicev1::voice_service_server::VoiceService;
 
 pub struct PlaybackControl {
     pub cancel: tokio_util::sync::CancellationToken,
@@ -24,24 +26,30 @@ pub struct VoiceServiceImpl {
     status: Arc<Mutex<SharedStatus>>,
     playback: Arc<Mutex<Option<PlaybackControl>>>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
-    ts3_notice_tx: mpsc::Sender<(i32, String)>,
+    ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
     ts3_cmd_tx: mpsc::Sender<OutCommand>,
     events_tx: broadcast::Sender<voicev1::Event>,
     persist_tx: mpsc::Sender<PersistedVoiceState>,
     sq_config: Option<ServerQueryRuntimeConfig>,
     nickname: String,
+    bot_respond_to_private: bool,
+    bot_default_reply_mode: String,
+    bot_trigger_prefixes: Vec<String>,
 }
 
 impl VoiceServiceImpl {
     pub fn new(
         status: Arc<Mutex<SharedStatus>>,
         ts3_audio_tx: mpsc::Sender<OutPacket>,
-        ts3_notice_tx: mpsc::Sender<(i32, String)>,
+        ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
         ts3_cmd_tx: mpsc::Sender<OutCommand>,
         events_tx: broadcast::Sender<voicev1::Event>,
         persist_tx: mpsc::Sender<PersistedVoiceState>,
         sq_config: Option<ServerQueryRuntimeConfig>,
         nickname: String,
+        bot_respond_to_private: bool,
+        bot_default_reply_mode: String,
+        bot_trigger_prefixes: Vec<String>,
     ) -> Self {
         Self {
             status,
@@ -53,6 +61,17 @@ impl VoiceServiceImpl {
             persist_tx,
             sq_config,
             nickname,
+            bot_respond_to_private,
+            bot_default_reply_mode,
+            bot_trigger_prefixes,
+        }
+    }
+
+    fn default_reply_mode(&self) -> i32 {
+        match self.bot_default_reply_mode.as_str() {
+            "channel" => 2,
+            "server" => 3,
+            _ => 1,
         }
     }
 
@@ -85,7 +104,15 @@ impl VoiceService for VoiceServiceImpl {
         let r = req.into_inner();
 
         if !r.notice.is_empty() {
-            let _ = self.ts3_notice_tx.try_send((2, r.notice.clone()));
+            let mut mode = self.default_reply_mode();
+            if mode == 1 {
+                // PlayRequest 未提供私聊目标，避免发送无效 private 消息。
+                mode = 2;
+            }
+            let target = 0;
+            let _ = self
+                .ts3_notice_tx
+                .try_send((mode, target, r.notice.clone()));
         }
 
         {
@@ -95,7 +122,13 @@ impl VoiceService for VoiceServiceImpl {
             st.state = 2;
         }
 
-        emit_playback(&self.events_tx, 1, r.title.clone(), r.source_url.clone(), "");
+        emit_playback(
+            &self.events_tx,
+            1,
+            r.title.clone(),
+            r.source_url.clone(),
+            "",
+        );
 
         self.stop_internal().await;
 
@@ -176,10 +209,7 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         let cleaned = desc.replace(['\r', '\n', '\t'], " ");
-        let compact = cleaned
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let compact = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
 
         let encoded = ts3_escape_value(&compact);
 
@@ -211,7 +241,12 @@ impl VoiceService for VoiceServiceImpl {
             }
         }
 
-        let mut cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, "clientupdate");
+        let mut cmd = OutCommand::new(
+            Direction::C2S,
+            Flags::empty(),
+            PacketType::Command,
+            "clientupdate",
+        );
         cmd.write_arg("client_description", &encoded);
 
         self.ts3_cmd_tx
@@ -281,10 +316,58 @@ impl VoiceService for VoiceServiceImpl {
         req: Request<voicev1::NoticeRequest>,
     ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
         let r = req.into_inner();
-        if !r.message.is_empty() {
-            let mode = if r.target_mode == 3 { 3 } else { 2 };
-            let _ = self.ts3_notice_tx.try_send((mode, r.message));
+        if r.message.is_empty() {
+            return Ok(Response::new(voicev1::CommandResponse {
+                ok: false,
+                message: "empty message".to_string(),
+            }));
         }
+
+        let mode = match r.target_mode {
+            1 | 2 | 3 => r.target_mode,
+            _ => self.default_reply_mode(),
+        };
+        let mut target = r.target_client_id;
+
+        if mode == 1 {
+            if !self.bot_respond_to_private {
+                return Ok(Response::new(voicev1::CommandResponse {
+                    ok: false,
+                    message: "private reply disabled by bot.respond_to_private".to_string(),
+                }));
+            }
+            if target == 0 {
+                return Ok(Response::new(voicev1::CommandResponse {
+                    ok: false,
+                    message: "target_client_id is required for private message".to_string(),
+                }));
+            }
+        } else {
+            target = 0;
+        }
+
+        if self
+            .ts3_notice_tx
+            .try_send((mode, target, r.message))
+            .is_err()
+        {
+            return Ok(Response::new(voicev1::CommandResponse {
+                ok: false,
+                message: "notice queue is full".to_string(),
+            }));
+        }
+
+        emit_log(
+            &self.events_tx,
+            2,
+            format!(
+                "send_notice accepted: target_mode={} target_client_id={} trigger_prefixes={}",
+                mode,
+                target,
+                self.bot_trigger_prefixes.len()
+            ),
+        );
+
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,
             message: "ok".to_string(),
@@ -381,6 +464,7 @@ impl VoiceService for VoiceServiceImpl {
             let include_chat = cfg.include_chat;
             let include_playback = cfg.include_playback;
             let include_log = cfg.include_log;
+            let include_audio = cfg.include_audio;
             async move {
                 match r {
                     Ok(ev) => {
@@ -388,16 +472,25 @@ impl VoiceService for VoiceServiceImpl {
                             Some(voicev1::event::Payload::Chat(_)) => include_chat,
                             Some(voicev1::event::Payload::Playback(_)) => include_playback,
                             Some(voicev1::event::Payload::Log(_)) => include_log,
+                            Some(voicev1::event::Payload::Audio(_)) => include_audio,
                             None => false,
                         };
-                        if ok { Some(Ok(ev)) } else { None }
+                        if ok {
+                            Some(Ok(ev))
+                        } else {
+                            None
+                        }
                     }
                     Err(_) => None,
                 }
             }
         });
-        Ok(Response::new(Box::pin(stream) as Self::SubscribeEventsStream))
+        Ok(Response::new(
+            Box::pin(stream) as Self::SubscribeEventsStream
+        ))
     }
 
-    type SubscribeEventsStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = std::result::Result<voicev1::Event, Status>> + Send>>;
+    type SubscribeEventsStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = std::result::Result<voicev1::Event, Status>> + Send>,
+    >;
 }
