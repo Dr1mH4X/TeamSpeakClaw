@@ -1,9 +1,10 @@
 use crate::adapter::command::cmd_send_text;
 use crate::adapter::napcat::NapCatAdapter;
-use crate::adapter::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
+use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{LlmEngine, provider::ToolCall};
+use crate::llm::{provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
+use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
@@ -182,12 +183,11 @@ impl EventRouter {
                 config: self.config.clone(),
                 error_prompts: &self.prompts.error,
             };
-            let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
-                .with_cross_adapters(
-                    Some(self.adapter.clone()),
-                    Some(self.clients.as_ref()),
-                    self.nc_adapter.clone(),
-                );
+            let unified_ctx = UnifiedExecutionContext::from_ts(&ctx).with_cross_adapters(
+                Some(self.adapter.clone()),
+                Some(self.clients.as_ref()),
+                self.nc_adapter.clone(),
+            );
             let args = call.arguments.clone();
             let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
                 Ok(val) => {
@@ -258,31 +258,35 @@ impl EventRouter {
             return;
         }
 
-        // 只响应私信或由前缀触发的消息
-        let is_private = event.target_mode == TextMessageTarget::Private;
-        let msg_content = event.message.trim();
-        let triggers = &self.config.bot.trigger_prefixes;
-
-        let should_respond = is_private && self.config.bot.respond_to_private
-            || triggers
-                .iter()
-                .any(|prefix| msg_content.starts_with(prefix));
-
-        if !should_respond {
+        let Some(unified_event) = UnifiedInboundEvent::from_ts(&event, &self.config) else {
+            return;
+        };
+        debug!(
+            source = ?unified_event.source,
+            sender_id = %unified_event.sender_id,
+            sender_name = %unified_event.sender_name,
+            trace_id = %unified_event.trace_id,
+            should_trigger_llm = unified_event.should_trigger_llm,
+            "SQ unified inbound event"
+        );
+        if !unified_event.should_respond {
             return;
         }
 
-        // 确定回复目标 (targetmode, target)
-        let (reply_mode, reply_target) = if is_private {
-            // 私聊触发始终私聊回复
-            (1u8, event.invoker_id)
-        } else {
-            match self.config.bot.default_reply_mode.as_str() {
-                "channel" => (2, 0),
-                "server" => (3, 0),
-                _ => (1, event.invoker_id),
+        let (reply_mode, reply_target) = match unified_event.reply_policy {
+            ReplyPolicy::TeamSpeak {
+                target_mode,
+                target,
+            } => (target_mode, target),
+            _ => {
+                debug!(
+                    "Unexpected reply policy for TS event: {:?}",
+                    unified_event.reply_policy
+                );
+                return;
             }
         };
+        let msg_content = unified_event.text.as_str();
 
         info!(
             "消息接收: {} (clid: {}, uid: {}, content: {})",
@@ -359,7 +363,9 @@ impl EventRouter {
 
                     // 执行所有工具调用
                     for call in &response.tool_calls {
-                        let tool_result = self.execute_skill(call, &event, &groups, channel_group_id).await;
+                        let tool_result = self
+                            .execute_skill(call, &event, &groups, channel_group_id)
+                            .await;
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call.id,

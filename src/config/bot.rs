@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BotConfig {
+    #[serde(default = "default_bot_nickname")]
+    pub nickname: String,
     pub trigger_prefixes: Vec<String>,
     pub respond_to_private: bool,
     pub max_concurrent_requests: u32,
@@ -9,9 +11,14 @@ pub struct BotConfig {
     pub max_tool_turns: u32,
 }
 
+fn default_bot_nickname() -> String {
+    "TSClaw".to_string()
+}
+
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
+            nickname: default_bot_nickname(),
             trigger_prefixes: vec![
                 "!tsclaw".to_string(),
                 "!bot".to_string(),
