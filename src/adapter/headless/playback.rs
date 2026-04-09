@@ -1,18 +1,18 @@
 use std::collections::VecDeque;
-use tokio::io::AsyncBufReadExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncBufReadExt;
 
 use anyhow::{anyhow, Result};
 use audiopus::coder::Encoder;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 use tsproto_packets::packets::OutPacket;
+use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 use crate::adapter::headless::types::SharedStatus;
 
@@ -150,7 +150,6 @@ pub async fn playback_loop(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                use tokio::io::AsyncBufReadExt;
                 info!(source_url = %src, "ffmpeg: {line}");
             }
         });
@@ -369,7 +368,8 @@ pub async fn playback_loop(
                 float_buf[idx] *= g;
                 float_buf[idx + 1] *= g;
             }
-            fade_pos_samples_per_channel = (fade_pos_samples_per_channel + frame_samples_per_channel)
+            fade_pos_samples_per_channel = (fade_pos_samples_per_channel
+                + frame_samples_per_channel)
                 .min(fade_total_samples_per_channel);
         }
 

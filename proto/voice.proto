@@ -49,6 +49,7 @@ message CommandResponse {
 message NoticeRequest {
   string message = 1;
   int32 target_mode = 2;
+  uint32 target_client_id = 3;
 }
 
 message SetClientDescriptionRequest {
@@ -94,6 +95,7 @@ message SubscribeRequest {
   bool include_chat = 1;
   bool include_playback = 2;
   bool include_log = 3;
+  bool include_audio = 4;
 }
 
 message Event {
@@ -103,6 +105,7 @@ message Event {
     ChatEvent chat = 2;
     PlaybackEvent playback = 3;
     LogEvent log = 4;
+    AudioFrameEvent audio = 5;
   }
 }
 
@@ -120,6 +123,10 @@ message ChatEvent {
   string message = 4;
   string invoker_avatar_hash = 5;
   string invoker_description = 6;
+  bool should_trigger_llm = 7;
+  bool should_respond = 8;
+  TargetMode reply_target_mode = 9;
+  uint32 reply_target_client_id = 10;
 }
 
 message PlaybackEvent {
@@ -147,4 +154,22 @@ message LogEvent {
 
   Level level = 1;
   string message = 2;
+}
+
+message AudioFrameEvent {
+  enum Codec {
+    CODEC_UNSPECIFIED = 0;
+    CODEC_OPUS_VOICE = 1;
+    CODEC_OPUS_MUSIC = 2;
+    CODEC_CELT_MONO = 3;
+    CODEC_SPEEX_NARROW = 4;
+    CODEC_SPEEX_WIDE = 5;
+    CODEC_SPEEX_ULTRA_WIDE = 6;
+  }
+
+  uint32 from_client_id = 1;
+  string from_client_name = 2;
+  Codec codec = 3;
+  bool is_whisper = 4;
+  bytes frame = 5;
 }
