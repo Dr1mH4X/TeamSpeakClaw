@@ -25,10 +25,14 @@ jobs:
   meta:
     name: Meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       is-release: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      is-prerelease: ${{ startsWith(github.ref, 'refs/tags/v') && contains(steps.version.outputs.tag, '-beta') }}
+      is-stable-release: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(steps.version.outputs.tag, '-beta') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +54,8 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: meta
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -93,10 +99,20 @@ jobs:
           key: ${{ matrix.target }}
           cache-on-failure: true
 
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake libtool
+
       - name: Build
         if: runner.os != 'Linux'
         shell: bash
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libopus-dev
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
@@ -142,6 +158,8 @@ jobs:
     needs: meta
     if: needs.meta.outputs.is-release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       release_body: ${{ steps.git-cliff.outputs.content }}
     steps:
@@ -190,7 +208,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
-        if: needs.meta.outputs.is-release == 'true' || github.event_name == 'push'
+        if: needs.meta.outputs.is-stable-release == 'true' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -203,9 +221,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/teamspeakclaw
           tags: |
-            type=raw,value=latest,enable=${{ needs.meta.outputs.is-release }}
-            type=semver,pattern={{version}},enable=${{ needs.meta.outputs.is-release }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.is-release }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.is-stable-release }}
+            type=semver,pattern={{version}},enable=${{ needs.meta.outputs.is-stable-release }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.is-stable-release }}
             type=sha,prefix=sha-,enable=${{ !needs.meta.outputs.is-release }}
             type=raw,value=dev,enable=${{ !needs.meta.outputs.is-release && github.event_name == 'push' }}
 
@@ -214,7 +232,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: ${{ needs.meta.outputs.is-release == 'true' || github.event_name == 'push' }}
+          push: ${{ needs.meta.outputs.is-stable-release == 'true' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -246,14 +264,9 @@ jobs:
           name: Release ${{ needs.meta.outputs.tag }}
           body: |
             ${{ needs.changelog.outputs.release_body }}
-
-            ## 🐋 Docker Image
-
-            ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ needs.meta.outputs.version }}
-            ```
+            ${{ needs.meta.outputs.is-stable-release == 'true' && format('\n## 🐋 Docker Image\n\n```bash\ndocker pull ghcr.io/{0}:{1}\n```', github.repository, needs.meta.outputs.version) || '\n> 这是预发布版本（beta），未构建 Docker 镜像。' }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.meta.outputs.is-prerelease == 'true' }}
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

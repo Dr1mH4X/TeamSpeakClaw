@@ -1,16 +1,16 @@
-use anyhow::Result;
-use clap::Parser;
-use std::sync::Arc;
-use tracing::{error, info, warn};
-use tracing_appender::non_blocking::WorkerGuard;
-
 mod adapter;
 mod cli;
 mod config;
 mod llm;
+mod log;
 mod permission;
 mod router;
 mod skills;
+
+use anyhow::Result;
+use clap::Parser;
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
 use crate::cli::Args;
 use crate::skills::SkillRegistry;
@@ -22,49 +22,36 @@ use dashmap::DashMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. 打印 Banner
+    execute_app().await
+}
+
+async fn execute_app() -> Result<()> {
     print_banner();
 
-    // 2. 解析参数
     let args = Args::parse();
 
-    // 3. 初始化配置与日志
     let config_dir = crate::config::config_dir();
     let cfg = AppConfig::load(config_dir.join("settings.toml"))?;
-    let _guard = init_tracing(&args.log_level, &cfg.logging.file_level);
+    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging.file_level);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(cfg);
 
-    // 4. 初始化组件
     let acl_config = crate::config::AclConfig::load(config_dir.join("acl.toml"))?;
     let prompts_config = crate::config::PromptsConfig::load(config_dir.join("prompts.toml"))?;
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
 
     let registry = Arc::new(SkillRegistry::with_defaults());
-
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
-    // 5. 连接服务
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter
-        .set_nickname(&config.serverquery.bot_nickname)
-        .await?;
+    adapter.set_nickname(&config.bot.nickname).await?;
 
-    // 6. NapCat 适配器（可选，需要在 ts_router 之前创建）
-    use crate::adapter::napcat::NapCatAdapter;
-    use crate::router::NcRouter;
+    let nc_adapter = connect_napcat_if_enabled(config.clone()).await?;
+    let clients = Arc::new(DashMap::new());
 
-    let nc_adapter: Option<Arc<NapCatAdapter>> = if config.napcat.enabled {
-        let nc = NapCatAdapter::connect(config.napcat.clone()).await?;
-        Some(nc)
-    } else {
-        None
-    };
-
-    // 7. 事件路由循环（TeamSpeak）
     let ts_router = EventRouter::new_with_clients(
         config.clone(),
         prompts.clone(),
@@ -72,19 +59,157 @@ async fn main() -> Result<()> {
         gate.clone(),
         llm.clone(),
         registry.clone(),
-        Arc::new(DashMap::new()),
+        clients.clone(),
         nc_adapter.clone(),
     );
+    let headless_runtime = start_headless_if_enabled(
+        config.clone(),
+        prompts.clone(),
+        gate.clone(),
+        llm.clone(),
+        registry.clone(),
+        adapter.clone(),
+        clients,
+    );
 
-    let run_result: Result<()> = if let Some(nc_adapter) = nc_adapter {
-        let nc_router = NcRouter::new_with_ts(
-            config.clone(),
-            prompts.clone(),
+    let run_result = run_routers(
+        config.clone(),
+        prompts,
+        gate,
+        llm,
+        registry,
+        adapter.clone(),
+        ts_router,
+        nc_adapter,
+    )
+    .await;
+
+    headless_runtime.shutdown().await;
+
+    if let Err(e) = adapter.quit().await {
+        error!("Failed to send quit command: {}", e);
+    }
+
+    run_result
+}
+
+async fn connect_napcat_if_enabled(
+    config: Arc<AppConfig>,
+) -> Result<Option<Arc<crate::adapter::napcat::NapCatAdapter>>> {
+    if config.napcat.enabled {
+        let nc = crate::adapter::napcat::NapCatAdapter::connect(config.napcat.clone()).await?;
+        Ok(Some(nc))
+    } else {
+        Ok(None)
+    }
+}
+
+struct HeadlessRuntime {
+    shutdown: tokio_util::sync::CancellationToken,
+    service_handle: Option<tokio::task::JoinHandle<()>>,
+    bridge_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HeadlessRuntime {
+    fn disabled() -> Self {
+        Self {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            service_handle: None,
+            bridge_handle: None,
+        }
+    }
+
+    async fn shutdown(self) {
+        self.shutdown.cancel();
+
+        if let Some(handle) = self.bridge_handle {
+            info!("Shutting down headless LLM bridge...");
+            let _ = handle.await;
+        }
+
+        if let Some(handle) = self.service_handle {
+            info!("Shutting down headless voice service...");
+            let _ = handle.await;
+        }
+    }
+}
+
+fn start_headless_if_enabled(
+    config: Arc<AppConfig>,
+    prompts: Arc<crate::config::PromptsConfig>,
+    gate: Arc<crate::permission::PermissionGate>,
+    llm: Arc<crate::llm::LlmEngine>,
+    registry: Arc<crate::skills::SkillRegistry>,
+    ts_adapter: Arc<crate::adapter::TsAdapter>,
+    ts_clients: Arc<dashmap::DashMap<u32, crate::router::ClientInfo>>,
+) -> HeadlessRuntime {
+    if !config.headless.enabled {
+        return HeadlessRuntime::disabled();
+    }
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let hl_runtime = crate::adapter::headless::HeadlessRuntimeConfig {
+        ts3_host: config.headless.ts3_host.clone(),
+        ts3_port: config.headless.ts3_port,
+        nickname: config.bot.nickname.clone(),
+        server_password: config.headless.server_password.clone(),
+        channel_password: config.headless.channel_password.clone(),
+        channel_path: config.headless.channel_path.clone(),
+        channel_id: config.headless.channel_id.clone(),
+        sq_host: config.serverquery.host.clone(),
+        sq_port: config.serverquery.port,
+        sq_user: config.serverquery.login_name.clone(),
+        sq_password: config.serverquery.login_pass.clone(),
+        sq_sid: config.serverquery.server_id,
+        bot_respond_to_private: config.bot.respond_to_private,
+        bot_default_reply_mode: config.bot.default_reply_mode.clone(),
+        bot_trigger_prefixes: config.bot.trigger_prefixes.clone(),
+    };
+
+    let shutdown_for_service = shutdown.clone();
+    let service_handle = Some(tokio::spawn(async move {
+        if let Err(e) = crate::adapter::headless::run(hl_runtime, shutdown_for_service).await {
+            error!("headless service failed: {}", e);
+        }
+    }));
+
+    info!("Headless voice service enabled");
+
+    let bridge = crate::router::HeadlessLlmBridge::new(
+        config, prompts, gate, llm, registry, ts_adapter, ts_clients,
+    );
+    let bridge_handle = Some(tokio::spawn(async move {
+        if let Err(e) = bridge.run().await {
+            error!("headless LLM bridge failed: {}", e);
+        }
+    }));
+
+    HeadlessRuntime {
+        shutdown,
+        service_handle,
+        bridge_handle,
+    }
+}
+
+async fn run_routers(
+    config: Arc<AppConfig>,
+    prompts: Arc<crate::config::PromptsConfig>,
+    gate: Arc<crate::permission::PermissionGate>,
+    llm: Arc<crate::llm::LlmEngine>,
+    registry: Arc<crate::skills::SkillRegistry>,
+    adapter: Arc<crate::adapter::TsAdapter>,
+    ts_router: crate::router::EventRouter,
+    nc_adapter: Option<Arc<crate::adapter::napcat::NapCatAdapter>>,
+) -> Result<()> {
+    if let Some(nc_adapter) = nc_adapter {
+        let nc_router = crate::router::NcRouter::new_with_ts(
+            config,
+            prompts,
             nc_adapter,
-            gate.clone(),
-            llm.clone(),
-            registry.clone(),
-            Some(adapter.clone()),
+            gate,
+            llm,
+            registry,
+            Some(adapter),
             Some(ts_router.clients.clone()),
         );
         let nc_future = tokio::spawn(async move { nc_router.run().await });
@@ -92,34 +217,8 @@ async fn main() -> Result<()> {
         info!("Bot ready. Listening for TS + NapCat events.");
 
         tokio::select! {
-            res = ts_router.run() => {
-                match res {
-                    Ok(()) => {
-                        warn!("TS Event router exited unexpectedly");
-                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
-                    }
-                    Err(e) => {
-                        error!("TS Event router exited with error: {}", e);
-                        Err(e)
-                    }
-                }
-            }
-            res = nc_future => {
-                match res {
-                    Ok(Ok(())) => {
-                        warn!("NC router exited unexpectedly");
-                        Err(anyhow::anyhow!("NC router exited unexpectedly"))
-                    }
-                    Ok(Err(e)) => {
-                        error!("NC router error: {e}");
-                        Err(e)
-                    }
-                    Err(e) => {
-                        error!("NC router task panicked: {e}");
-                        Err(anyhow::anyhow!("NC router panicked"))
-                    }
-                }
-            }
+            res = ts_router.run() => map_ts_router_result(res),
+            res = nc_future => map_nc_router_result(res),
             _ = tokio::signal::ctrl_c() => {
                 info!("Received Ctrl+C, shutting down...");
                 Ok(())
@@ -130,30 +229,43 @@ async fn main() -> Result<()> {
         info!("Bot ready. Listening for TeamSpeak events.");
 
         tokio::select! {
-            res = ts_router.run() => {
-                match res {
-                    Ok(()) => {
-                        warn!("TS Event router exited unexpectedly");
-                        Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
-                    }
-                    Err(e) => {
-                        error!("TS Event router exited with error: {}", e);
-                        Err(e)
-                    }
-                }
-            }
+            res = ts_router.run() => map_ts_router_result(res),
             _ = tokio::signal::ctrl_c() => {
                 info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
         }
-    };
-
-    if let Err(e) = adapter.quit().await {
-        error!("Failed to send quit command: {}", e);
     }
+}
 
-    run_result
+fn map_ts_router_result(res: Result<()>) -> Result<()> {
+    match res {
+        Ok(()) => {
+            warn!("TS Event router exited unexpectedly");
+            Err(anyhow::anyhow!("TS Event router exited unexpectedly"))
+        }
+        Err(e) => {
+            error!("TS Event router exited with error: {}", e);
+            Err(e)
+        }
+    }
+}
+
+fn map_nc_router_result(res: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    match res {
+        Ok(Ok(())) => {
+            warn!("NC router exited unexpectedly");
+            Err(anyhow::anyhow!("NC router exited unexpectedly"))
+        }
+        Ok(Err(e)) => {
+            error!("NC router error: {e}");
+            Err(e)
+        }
+        Err(e) => {
+            error!("NC router task panicked: {e}");
+            Err(anyhow::anyhow!("NC router panicked"))
+        }
+    }
 }
 
 fn print_banner() {
@@ -166,123 +278,10 @@ fn print_banner() {
        ░▒▓█▓▒░         ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░
        ░▒▓█▓▒░  ░▒▓███████▓▒░ ░▒▓██████▓▒░░▒▓████████▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓█████████████▓▒░
 
-                                                                                          "#;
+                                                                                           "#;
 
     println!("{}", banner);
     println!(" 版本: v{}", env!("CARGO_PKG_VERSION"));
     println!(" GitHub: https://github.com/Dr1mH4X/TeamSpeakClaw");
     println!("{:-<86}", "");
-}
-
-fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
-    use std::path::PathBuf;
-    use tracing_subscriber::{
-        fmt::{self, time::LocalTime},
-        layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-    };
-
-    let console_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("{console_level},russh::client=off,russh=off")));
-
-    let console_layer = fmt::layer()
-        .with_target(true)
-        .compact()
-        .with_timer(LocalTime::rfc_3339())
-        .with_filter(console_filter);
-
-    // 使用可执行文件所在目录作为日志根目录
-    let log_dir: PathBuf = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-
-    let file_appender = daily_file::DailyFileAppender::new(log_dir, "tsclaw");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-    let file_filter = EnvFilter::new(file_level);
-
-    let file_layer = fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_timer(LocalTime::rfc_3339())
-        .with_filter(file_filter);
-
-    tracing_subscriber::registry()
-        .with(console_layer)
-        .with(file_layer)
-        .init();
-
-    guard
-}
-
-/// 按日滚动日志文件，文件名格式: `{prefix}-{yyyy-MM-dd}.log`
-mod daily_file {
-    use chrono::Local;
-    use std::fs::{File, OpenOptions};
-    use std::io::{self, Write};
-    use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    pub struct DailyFileAppender {
-        dir: PathBuf,
-        prefix: String,
-        inner: Mutex<Inner>,
-    }
-
-    struct Inner {
-        file: Option<File>,
-        date_key: String, // "2026-03-24"
-    }
-
-    impl DailyFileAppender {
-        pub fn new(dir: PathBuf, prefix: &str) -> Self {
-            Self {
-                dir,
-                prefix: prefix.to_string(),
-                inner: Mutex::new(Inner {
-                    file: None,
-                    date_key: String::new(),
-                }),
-            }
-        }
-
-        fn file_path(dir: &PathBuf, prefix: &str, date_key: &str) -> PathBuf {
-            dir.join(format!("{prefix}-{date_key}.log"))
-        }
-
-        fn ensure_open(inner: &mut Inner, dir: &PathBuf, prefix: &str) -> io::Result<()> {
-            let today = Local::now().format("%Y-%m-%d").to_string();
-            if inner.date_key != today || inner.file.is_none() {
-                let path = Self::file_path(dir, prefix, &today);
-                let file = OpenOptions::new().create(true).append(true).open(path)?;
-                inner.file = Some(file);
-                inner.date_key = today;
-            }
-            Ok(())
-        }
-    }
-
-    impl Write for DailyFileAppender {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
-            Self::ensure_open(&mut inner, &self.dir, &self.prefix)?;
-            inner.file.as_mut().unwrap().write(buf)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
-            if let Some(ref mut file) = inner.file {
-                file.flush()?;
-            }
-            Ok(())
-        }
-    }
 }

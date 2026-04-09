@@ -9,7 +9,6 @@ pub struct SqConfig {
     pub login_name: String,
     pub login_pass: String,
     pub server_id: u32,
-    pub bot_nickname: String,
 }
 
 impl Default for SqConfig {
@@ -22,7 +21,6 @@ impl Default for SqConfig {
             login_name: "serveradmin".to_string(),
             login_pass: String::new(),
             server_id: 1,
-            bot_nickname: "TSClaw".to_string(),
         }
     }
 }

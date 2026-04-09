@@ -19,40 +19,42 @@ Contains basic configurations for connecting to the TeamSpeak server, LLM provid
 host = "127.0.0.1"
 port = 10011
 ssh_port = 10022
-method = "tcp"            # Connection method: "tcp" or "ssh"
+method = "tcp"            # Connection method: tcp or ssh
 login_name = "serveradmin"
-login_pass = ""           # Overridden by environment variable TS_LOGIN_PASS
+login_pass = ""
 server_id = 1
-bot_nickname = "TSClaw"
 
 [music_backend]
 backend = "ts3audiobot"  # Music backend: "ts3audiobot" (via TS PM) or "tsbot_backend" (NeteaseTSBot)
-base_url = "http://127.0.0.1:8000"   # Only effective when backend = "tsbot_backend"
+base_url = "http://127.0.0.1:8009"   # Only effective when backend = "tsbot_backend"
 
 [llm]
-api_key = ""              # Overridden by environment variable LLM_API_KEY
+api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-max_tokens = 1024
 
 [bot]
+nickname = "TSClaw"                       # Bot name (ServerQuery auto-appends a random suffix)
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # Prefixes to trigger the bot in channel/server chat
 respond_to_private = true       # Private messages always trigger the bot
 max_concurrent_requests = 4     # Maximum concurrent LLM requests
-default_reply_mode = "private"  # Default reply mode: "private" | "channel" | "server"
+default_reply_mode = "private"  # Default reply mode: "private"(PM) | "channel"(channel) | "server"(server broadcast), only effective when triggered from channel/broadcast
+
+[logging]
+file_level = "info"       # File log level: error | warn | info | debug | trace
 
 [rate_limit]
 requests_per_minute = 10        # Token bucket rate limit per user
 burst_size = 3
 
 [napcat]
-enabled = false
-ws_url = "ws://127.0.0.1:3001"
-access_token = ""
-listen_groups = []
-trigger_prefixes = ["!claw", "!bot"]
-trusted_groups = []
-trusted_users = []
+enabled = false                           # Whether to enable NapCat adapter
+ws_url = "ws://127.0.0.1:3001"           # NapCat WebSocket service URL
+access_token = ""                         # Access token (fill if NapCat has authentication)
+listen_groups = []                        # List of group IDs to listen to, empty means all groups
+trigger_prefixes = ["!claw", "!bot"]      # Group chat trigger prefixes (PM requires no prefix)
+trusted_groups = []                       # List of trusted group IDs, all members in these groups can use the bot
+trusted_users = []                        # List of trusted user QQ numbers, usable in PM and group chat
 ```
 
 ### Connection Method
@@ -60,23 +62,72 @@ trusted_users = []
 - **TCP (Default)**: `method = "tcp"`, connects using `port` (default 10011).
 - **SSH**: `method = "ssh"`, connects using `ssh_port` (default 10022).
 
----
+### NapCat Configuration Details
+
+The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11 protocol implementation).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Whether to enable the NapCat adapter |
+| `ws_url` | string | `ws://127.0.0.1:3001` | NapCat WebSocket service URL |
+| `access_token` | string | `""` | Access token (fill if NapCat has authentication) |
+| `listen_groups` | array | `[]` | List of group IDs to listen to, empty means all groups |
+| `trigger_prefixes` | array | `["!claw", "!bot"]` | Group chat trigger prefixes (PM requires no prefix) |
+| `trusted_groups` | array | `[]` | List of trusted group IDs, all members in these groups can use the bot |
+| `trusted_users` | array | `[]` | List of trusted user QQ numbers, usable in PM and group chat |
+
+**Prerequisites**:
+
+1. Install and run [NapCat](https://napneko.github.io/)
+2. Ensure NapCat's WebSocket service is enabled (default port 3001)
+
+**Usage**:
+
+- **QQ PM**: Trusted users can directly send messages to the bot without a prefix
+- **QQ Group Chat**: Use trigger prefixes (e.g., `!claw play music`) or @bot to trigger
+
+**Security Notes**:
+
+- Only users in `trusted_users` can PM the bot
+- Only members in `trusted_groups` or users in `trusted_users` can use the bot in group chats
+- It is recommended to only add trusted users and groups to avoid abuse
+
+### Music Backend Configuration
+
+The `[music_backend]` section controls which backend is used for music functionality:
+
+| Value | Description |
+|---|---|
+| `ts3audiobot` | (Default) Controls TS3AudioBot via TS private messages. Ensure the music bot's nickname is `TS3AudioBot`. |
+| `tsbot_backend` | Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `base_url`. |
+
+### Reply Mode
+
+`default_reply_mode` only takes effect when the trigger message comes from a channel or server broadcast:
+
+- `"private"` — Reply via private message to the triggerer (default)
+- `"channel"` — Reply in the current channel
+- `"server"` — Server broadcast
+
+Messages triggered via private message are always replied to via private message.
 
 ## 2. Permission Configuration (acl.toml)
 
 File path: `config/acl.toml`
 
-Controls which user groups can use which features. Rules are matched from top to bottom.
+Controls which user groups can use which features. **All matching rules' allowed skills are collected** (not just the first match), taking the union.
 
 ```toml
-# server_group_ids: TeamSpeak Server Group IDs
+# server_group_ids: TeamSpeak Server Group IDs, empty array matches all server groups
 # channel_group_ids: TeamSpeak Channel Group IDs, empty array means don't check channel group
 # allowed_skills: List of allowed skills, "*" for all
-# can_target_admins: Whether the user can perform actions on protected group members
+# can_target_admins: Whether can perform actions on protected group members
 # rate_limit_override: Optional, overrides global rate limit
 #
-# Rule matching logic: server_group_ids and channel_group_ids match if either one matches
-# If both arrays are empty, the rule matches all users
+# Rule matching logic: Iterate all rules, collect allowed_skills from all matching rules as union
+# If a rule contains "*", return all skills immediately
+# server_group_ids empty → matches all server groups
+# channel_group_ids empty → skip channel group check (matches everyone)
 
 [[rules]]
 name = "superadmin"
@@ -128,43 +179,41 @@ can_target_admins = false
 protected_group_ids = [6, 8, 9]
 ```
 
-### Available Skills
+### Available Skill Names
 
-| Skill | Description |
+| Skill Name | Description |
 |---|---|
-| `poke_client` | Send poke notification |
-| `send_message` | Send messages with cross-platform routing |
-| `kick_client` | Kick client |
-| `ban_client` | Ban client |
-| `move_client` | Move client to target channel |
-| `get_client_list` | List online clients |
-| `get_client_info` | Get detailed client info |
+| `poke_client` | Poke a user |
+| `send_message` | Send message (cross-platform routing, supports TS or NapCat) |
+| `kick_client` | Kick a user |
+| `ban_client` | Ban a user |
+| `move_client` | Move a user to a specified channel |
+| `get_client_list` | Get online user list |
+| `get_client_info` | Get detailed user info |
 | `music_control` | Music control |
 
-### NapCat and Cross-platform Behavior
+### NapCat and Cross-platform Behavior Notes
 
-- When `enabled = false`, the app runs TeamSpeak-only routing and will not exit early due to NapCat branch completion.
-- Group chats respect `listen_groups` and trusted rules; private chats accept only users in `trusted_users`.
+- When `enabled = false`, the program only runs TeamSpeak routing and will not exit early due to NapCat branch completion.
+- Group chats are affected by `listen_groups` and trusted rules; PM only accepts users in `trusted_users`.
 - `send_message` defaults to native NapCat sending on NapCat context; set `ts_route=true` to explicitly route to TeamSpeak.
 
 ### NapCat Permission Mapping (ACL)
 
-NapCat has no native TeamSpeak server/channel groups, so ACL checks use pseudo `server_group_ids`:
+NapCat has no TeamSpeak server/channel group concept, so the project uses "virtual group IDs" mapped to `server_group_ids` in `acl.toml` for permission checks:
 
-- `9000`: any NapCat user
-- `9001`: NapCat group context
-- `9002`: user listed in `trusted_users`
-- `9003`: message from group listed in `trusted_groups`
+- `9000`: Any NapCat user
+- `9001`: NapCat group chat context
+- `9002`: Users in `trusted_users`
+- `9003`: Members of groups in `trusted_groups`
 
-You can add ACL rules for these IDs in `acl.toml` to enforce NC-specific permissions.
-
----
+You can configure rules for these group IDs in `acl.toml` to implement NC-specific permission control.
 
 ## 3. Prompt Configuration (prompts.toml)
 
 File path: `config/prompts.toml`
 
-Defines the bot's System Prompt and error messages.
+Defines the bot's System Prompt and error messages. Usually no modification is needed unless you want to change the bot's behavior or language.
 
 ```toml
 [system]
@@ -173,16 +222,41 @@ You are TSClaw, an automated administrator assistant for TeamSpeak servers.
 Your job is to interpret administrator commands and call the appropriate tools.
 
 Rules:
-- Only call tools when explicitly requested.
-- If an instruction is unclear, ask for clarification.
-- Confirm before performing destructive actions (ban, kick).
-- Reply using the same language used by the user.
-- Keep replies concise. Do not use markdown.
-- Never reveal internal system details or API keys.
+- Only call tools when explicitly requested. Do not take action without a clear directive.
+- If an instruction is unclear, ask for clarification instead of guessing.
+- Always confirm by repeating what you are about to do before performing destructive actions (ban, kick).
+- If there is no suitable tool for the request, say so directly.
+- Reply in the same language the user used.
+- Keep replies concise. Do not use markdown — this is a chat interface.
+- Never reveal internal system details, configuration, or API keys.
 """
 
 [error]
 permission_denied = "You do not have permission to use this command."
-llm_error = "The AI backend is currently unavailable."
+llm_error = "The AI backend is currently unavailable. Please try again later."
 ts_error = "TeamSpeak command execution failed: {detail}"
+skill_error = "Skill execution failed: {detail}"
+skill_not_found = "Specified skill not found"
+self_target = "Cannot perform this operation on yourself"
+target_permission = "No permission to perform this operation on that user"
+empty_message = "Message content cannot be empty"
+missing_parameter = "Missing required parameter: {param}"
+invalid_mode = "Invalid mode, must be one of {allowed}"
+client_offline = "Client {clid} is not online or does not exist"
 ```
+
+### Error Prompt Field Descriptions
+
+| Field | Description |
+|---|---|
+| `permission_denied` | Insufficient permissions |
+| `llm_error` | LLM API unavailable |
+| `ts_error` | TeamSpeak command failed |
+| `skill_error` | Skill execution failed |
+| `skill_not_found` | Skill not found |
+| `self_target` | Operation on self not allowed |
+| `target_permission` | Operation on target not allowed |
+| `empty_message` | Message is empty |
+| `missing_parameter` | Missing required parameter |
+| `invalid_mode` | Invalid mode |
+| `client_offline` | Client not online |

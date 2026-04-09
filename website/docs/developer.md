@@ -423,7 +423,7 @@ allowed_skills = ["example_skill"]
 can_target_admins = false
 ```
 
-### 技能开发最佳实践
+### 技能开发实践
 
 1. **命名规范**：使用 `snake_case`，如 `kick_client`、`get_client_list`
 2. **参数验证**：在 `execute` 中验证必填参数
@@ -445,44 +445,6 @@ can_target_admins = false
 | `get_client_list` | `information.rs` | 获取在线用户列表 |
 | `get_client_info` | `information.rs` | 获取用户详细信息 |
 | `music_control` | `music.rs` | 音乐控制（双后端 + 跨平台） |
-
-## 扩展 LLM 提供者
-
-### 实现 LlmProvider trait
-
-```rust
-use crate::llm::{LlmProvider, LlmResponse};
-use async_trait::async_trait;
-use serde_json::Value;
-use anyhow::Result;
-
-pub struct CustomProvider {
-    // 配置字段
-}
-
-#[async_trait]
-impl LlmProvider for CustomProvider {
-    async fn chat_completion(
-        &self,
-        messages: Vec<Value>,
-        tools: Vec<Value>,
-    ) -> Result<LlmResponse> {
-        // 实现 API 调用逻辑
-        // 返回 LlmResponse
-    }
-}
-```
-
-### 集成到引擎
-
-修改 `src/llm/engine.rs`，替换 `OpenAiProvider` 为你的实现：
-
-```rust
-pub fn new(config: Arc<AppConfig>) -> Self {
-    let provider: Box<dyn LlmProvider> = Box::new(CustomProvider::new(config.llm.clone()));
-    Self { provider }
-}
-```
 
 ## 权限系统
 
@@ -526,35 +488,13 @@ protected_group_ids = [6, 8, 9] # 受保护的服务器组
 - **死代码处理**：删除未使用代码，或重构以正确使用
 - **未使用导入**：移除未使用的 `use` 语句
 
-### 编写单元测试
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn test_skill_execution() {
-        let skill = ExampleSkill;
-        let args = json!({"name": "Test"});
-
-        // 创建 mock ExecutionContext
-        // ...
-
-        let result = skill.execute(args, &ctx).await.unwrap();
-        assert_eq!(result["message"], "Hello, Test!");
-    }
-}
-```
-
 ## 贡献流程
 
 1. Fork 仓库
 2. 创建功能分支：`git checkout -b feature/my-feature`
 3. 遵循代码规范进行开发
 4. 确保所有测试通过：`cargo test`
-5. Format代码: `cargo fmt`
+5. 格式化代码: `cargo fmt`
 6. 提交 Pull Request
 
 ### 提交信息格式
