@@ -25,6 +25,8 @@ jobs:
   meta:
     name: Meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -52,6 +54,8 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: meta
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +158,8 @@ jobs:
     needs: meta
     if: needs.meta.outputs.is-release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       release_body: ${{ steps.git-cliff.outputs.content }}
     steps:
