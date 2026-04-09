@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -210,19 +209,5 @@ fn resolve_repo_relative(path: &str) -> PathBuf {
     if p.is_absolute() {
         return p.to_path_buf();
     }
-
-    let rel = PathBuf::from(path);
-    let mut cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let fallback = cwd.clone();
-
-    loop {
-        if cwd.join(".git").exists() {
-            return cwd.join(&rel);
-        }
-        if !cwd.pop() {
-            break;
-        }
-    }
-
-    fallback.join(rel)
+    crate::config::config_dir().join(path)
 }
