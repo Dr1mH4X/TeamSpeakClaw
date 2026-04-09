@@ -52,10 +52,7 @@ src/
 
 ## 代码规范
 
-项目使用 `.github/copilot-instructions.md` 定义开发规范，涉及:
-- 第一性原理、FAILFAST、YAGNI 原则
-- 提交格式: Conventional Commits
-- 中文注释、ASCII 代码
+- 项目使用 `.github/copilot-instructions.md` 定义开发规范
 
 ## 实现参考
 
