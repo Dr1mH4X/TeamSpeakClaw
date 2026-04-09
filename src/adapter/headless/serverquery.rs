@@ -3,28 +3,12 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use crate::config::serverquery::SqConfig;
-
 pub struct ServerQueryRuntimeConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
     pub password: String,
     pub sid: u32,
-    pub use_port: u16,
-}
-
-impl ServerQueryRuntimeConfig {
-    pub fn from_sq_config(sq: &SqConfig, ts3_port: u16) -> Self {
-        Self {
-            host: sq.host.clone(),
-            port: sq.port,
-            user: sq.login_name.clone(),
-            password: sq.login_pass.clone(),
-            sid: sq.server_id,
-            use_port: ts3_port,
-        }
-    }
 }
 
 pub fn ts3_escape_value(s: &str) -> String {
@@ -79,9 +63,13 @@ pub async fn serverquery_set_client_description(
 
     let find_cmd = format!("clientfind pattern={}", ts3_escape_value(nickname));
     let lines = serverquery_exec(&mut reader, &mut write_half, &find_cmd).await?;
-    let clid = parse_clientfind_first_clid(&lines).ok_or_else(|| "clientfind returned no clid".to_string())?;
+    let clid = parse_clientfind_first_clid(&lines)
+        .ok_or_else(|| "clientfind returned no clid".to_string())?;
 
-    let edit_cmd = format!("clientedit clid={} client_description={}", clid, encoded_desc);
+    let edit_cmd = format!(
+        "clientedit clid={} client_description={}",
+        clid, encoded_desc
+    );
     serverquery_exec(&mut reader, &mut write_half, &edit_cmd)
         .await
         .map(|_| ())?;

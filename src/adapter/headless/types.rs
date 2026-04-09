@@ -1,13 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
-use tokio::sync::{broadcast, mpsc};
-use tokio_util::sync::CancellationToken;
-
-use tsproto_packets::packets::{OutCommand, OutPacket};
+use tokio::sync::broadcast;
 
 use super::tsbot::voice::v1 as voicev1;
 
@@ -59,15 +53,6 @@ impl PersistedVoiceState {
             fx_reverb_mix: st.fx_reverb_mix,
         }
     }
-}
-
-pub struct VoiceServiceHandle {
-    pub status: Arc<Mutex<SharedStatus>>,
-    pub events_tx: broadcast::Sender<voicev1::Event>,
-    pub ts3_audio_tx: mpsc::Sender<OutPacket>,
-    pub ts3_notice_tx: mpsc::Sender<(i32, String)>,
-    pub ts3_cmd_tx: mpsc::Sender<OutCommand>,
-    pub cancel: CancellationToken,
 }
 
 pub fn load_persisted_voice_state(path: &Path) -> Option<PersistedVoiceState> {

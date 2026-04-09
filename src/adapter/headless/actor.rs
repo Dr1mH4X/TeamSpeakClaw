@@ -1,24 +1,23 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use tsclientlib::{Connection, DisconnectOptions, Identity, StreamItem, Version};
-use tsproto_packets::packets::{OutCommand, OutPacket};
-use tsclientlib::{events, MessageTarget};
 use tsclientlib::ChannelId;
+use tsclientlib::{events, MessageTarget};
+use tsclientlib::{Connection, DisconnectOptions, Identity, StreamItem, Version};
+use tsproto_packets::packets::{AudioData, CodecType, OutCommand, OutPacket};
 
+use super::resolve_repo_relative;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::{emit_log, now_unix_ms};
 use super::HeadlessRuntimeConfig;
-use super::resolve_repo_relative;
 
 struct AvatarUploadState {
     handle: tsclientlib::FiletransferHandle,
@@ -55,7 +54,7 @@ fn md5_hex_of_file(path: &std::path::Path) -> Result<String> {
 
 pub async fn ts3_actor(
     mut audio_rx: mpsc::Receiver<OutPacket>,
-    mut notice_rx: mpsc::Receiver<(i32, String)>,
+    mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
     mut cmd_rx: mpsc::Receiver<OutCommand>,
     events_tx: broadcast::Sender<voicev1::Event>,
     shutdown_token: CancellationToken,
@@ -82,7 +81,12 @@ pub async fn ts3_actor(
     let client_version = Version::Custom {
         platform: "Windows".to_string(),
         version: "3.6.2 [Build: 1695203293]".to_string(),
-        signature: vec![224, 23, 90, 102, 151, 96, 81, 35, 2, 184, 139, 60, 169, 201, 104, 36, 243, 113, 54, 82, 120, 163, 180, 10, 159, 19, 2, 68, 238, 180, 153, 35, 147, 180, 150, 114, 42, 51, 171, 24, 176, 38, 120, 1, 45, 44, 130, 99, 114, 57, 157, 74, 156, 156, 49, 180, 14, 33, 95, 118, 43, 107, 215, 3],
+        signature: vec![
+            224, 23, 90, 102, 151, 96, 81, 35, 2, 184, 139, 60, 169, 201, 104, 36, 243, 113, 54,
+            82, 120, 163, 180, 10, 159, 19, 2, 68, 238, 180, 153, 35, 147, 180, 150, 114, 42, 51,
+            171, 24, 176, 38, 120, 1, 45, 44, 130, 99, 114, 57, 157, 74, 156, 156, 49, 180, 14, 33,
+            95, 118, 43, 107, 215, 3,
+        ],
     };
 
     let mut opts = Connection::build(address)
@@ -133,7 +137,10 @@ pub async fn ts3_actor(
                 let _ = fs::create_dir_all(parent);
             }
             let id = Identity::create();
-            let _ = fs::write(&identity_file, serde_json::to_string(&id).unwrap_or_default());
+            let _ = fs::write(
+                &identity_file,
+                serde_json::to_string(&id).unwrap_or_default(),
+            );
             ident = Some(id);
         }
 
@@ -281,6 +288,22 @@ pub async fn ts3_actor(
                                             MessageTarget::Channel => 2,
                                             MessageTarget::Server => 3,
                                         };
+                                        let msg_content = message.trim().to_string();
+                                        let should_trigger_llm = mode == 1 && config.bot_respond_to_private
+                                            || config
+                                                .bot_trigger_prefixes
+                                                .iter()
+                                                .any(|prefix| msg_content.starts_with(prefix));
+                                        let should_respond = should_trigger_llm;
+                                        let (reply_target_mode, reply_target_client_id) = if mode == 1 {
+                                            (1, invoker.id.0 as u32)
+                                        } else {
+                                            match config.bot_default_reply_mode.as_str() {
+                                                "channel" => (2, 0),
+                                                "server" => (3, 0),
+                                                _ => (1, invoker.id.0 as u32),
+                                            }
+                                        };
 
                                         let uid = invoker
                                             .uid
@@ -310,9 +333,13 @@ pub async fn ts3_actor(
                                                 target_mode: mode,
                                                 invoker_unique_id: uid,
                                                 invoker_name: invoker.name,
-                                                message,
+                                                message: msg_content,
                                                 invoker_avatar_hash: avatar_hash,
                                                 invoker_description: description,
+                                                should_trigger_llm,
+                                                should_respond,
+                                                reply_target_mode,
+                                                reply_target_client_id,
                                             })),
                                         });
                                     }
@@ -369,6 +396,45 @@ pub async fn ts3_actor(
                                         emit_log(&events_tx, 3, format!("avatar filetransfer failed: {e}"));
                                         avatar_upload = None;
                                     }
+                                }
+                            }
+
+                            Some(Some(Ok(StreamItem::Audio(pkt)))) => {
+                                let maybe_audio = match pkt.data().data() {
+                                    AudioData::S2C { from, codec, data, .. } => Some((*from as u32, false, *codec, data.to_vec())),
+                                    AudioData::S2CWhisper { from, codec, data, .. } => Some((*from as u32, true, *codec, data.to_vec())),
+                                    _ => None,
+                                };
+
+                                if let Some((from_client_id, is_whisper, codec, frame)) = maybe_audio {
+                                    let from_client_name = if let Ok(st) = con.get_state() {
+                                        st.clients
+                                            .get(&tsclientlib::ClientId(from_client_id as u16))
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+
+                                    let codec = match codec {
+                                        CodecType::OpusVoice => voicev1::audio_frame_event::Codec::OpusVoice as i32,
+                                        CodecType::OpusMusic => voicev1::audio_frame_event::Codec::OpusMusic as i32,
+                                        CodecType::CeltMono => voicev1::audio_frame_event::Codec::CeltMono as i32,
+                                        CodecType::SpeexNarrowband => voicev1::audio_frame_event::Codec::SpeexNarrow as i32,
+                                        CodecType::SpeexWideband => voicev1::audio_frame_event::Codec::SpeexWide as i32,
+                                        CodecType::SpeexUltrawideband => voicev1::audio_frame_event::Codec::SpeexUltraWide as i32,
+                                    };
+
+                                    let _ = events_tx.send(voicev1::Event {
+                                        unix_ms: now_unix_ms(),
+                                        payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
+                                            from_client_id,
+                                            from_client_name,
+                                            codec,
+                                            is_whisper,
+                                            frame,
+                                        })),
+                                    });
                                 }
                             }
 
@@ -454,11 +520,13 @@ pub async fn ts3_actor(
                 }
 
                 msg = notice_rx.recv() => {
-                    if let Some((mode, text)) = msg {
-                        let target_mode = if mode == 3 { 3 } else { 2 };
+                    if let Some((mode, target, text)) = msg {
+                        let target_mode = if mode == 1 || mode == 2 || mode == 3 { mode } else { 2 };
+                        let target = if target_mode == 1 { target } else { 0 };
                         use tsproto_packets::packets::{Direction, Flags, PacketType, OutCommand as OutCmd};
                         let mut cmd = OutCmd::new(Direction::C2S, Flags::empty(), PacketType::Command, "sendtextmessage");
                         cmd.write_arg("targetmode", &target_mode);
+                        cmd.write_arg("target", &target);
                         cmd.write_arg("msg", &text);
                         if let Ok(client) = con.get_tsproto_client_mut() {
                             if let Err(e) = client.send_packet(cmd.into_packet()) {
@@ -524,9 +592,17 @@ pub async fn ts3_actor(
             if msg.contains("ClientTooManyClonesConnected") {
                 wait = std::cmp::max(wait, Duration::from_secs(30));
             }
-            emit_log(&events_tx, 3, format!("ts3 connection lost: {msg}; retry in {:?}", wait));
+            emit_log(
+                &events_tx,
+                3,
+                format!("ts3 connection lost: {msg}; retry in {:?}", wait),
+            );
         } else {
-            emit_log(&events_tx, 3, format!("ts3 disconnected; retry in {:?}", wait));
+            emit_log(
+                &events_tx,
+                3,
+                format!("ts3 disconnected; retry in {:?}", wait),
+            );
         }
 
         tokio::select! {

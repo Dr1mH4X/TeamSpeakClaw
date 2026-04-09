@@ -33,7 +33,6 @@ base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-max_tokens = 1024
 
 [bot]
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀

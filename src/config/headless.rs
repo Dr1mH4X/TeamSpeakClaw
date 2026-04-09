@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HeadlessConfig {
     pub enabled: bool,
-    pub grpc_addr: String,
     pub ts3_host: String,
     pub ts3_port: u16,
     pub nickname: String,
@@ -21,7 +20,6 @@ impl Default for HeadlessConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            grpc_addr: "127.0.0.1:50051".to_string(),
             ts3_host: "127.0.0.1".to_string(),
             ts3_port: 9987,
             nickname: "tsbot".to_string(),

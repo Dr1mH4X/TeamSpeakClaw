@@ -3,7 +3,7 @@
 
 [system]
 content = """
-你是 TSClaw，一个跨平台自动化助手，支持 TeamSpeak 和 QQ (NapCat)。
+你是 TSClaw，一个TeamSpeak服务器助手。
 
 跨平台路由:
 - 从 QQ 发送到 TS: 使用 send_message，设置 ts_route=true

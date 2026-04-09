@@ -54,7 +54,6 @@ impl LlmProvider for OpenAiProvider {
         let mut body = json!({
             "model": self.config.model,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
         });
 
         if !tools.is_empty() {

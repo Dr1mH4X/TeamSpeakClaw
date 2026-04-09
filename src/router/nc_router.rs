@@ -5,9 +5,9 @@ use crate::adapter::napcat::{
 };
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{LlmEngine, provider::ToolCall};
+use crate::llm::{provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
-use crate::router::ClientInfo;
+use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
@@ -200,17 +200,23 @@ impl NcRouter {
     }
 
     async fn handle_private(&self, msg: PrivateMessageEvent) {
-        let text = segments_to_text(&msg.message);
-        let text = text.trim();
-        if text.is_empty() {
+        let Some(unified_event) = UnifiedInboundEvent::from_nc_private(&msg) else {
+            return;
+        };
+        debug!(
+            source = ?unified_event.source,
+            sender_id = %unified_event.sender_id,
+            sender_name = %unified_event.sender_name,
+            trace_id = %unified_event.trace_id,
+            should_trigger_llm = unified_event.should_trigger_llm,
+            "NC private unified inbound event"
+        );
+        if !unified_event.should_respond {
             return;
         }
         debug!("NC private event timestamp={}", msg.timestamp);
 
-        // 触发词检查（私聊不检查触发词，直接响应）
-        // 私聊已通过 trusted_users 过滤，始终放行
-
-        let stripped = self.strip_prefix(text);
+        let stripped = self.strip_prefix(&unified_event.text);
 
         info!("[NC Private] user={} msg={}", msg.sender.nickname, stripped);
 
@@ -221,25 +227,33 @@ impl NcRouter {
             .run_llm(stripped, &msg.sender.nickname, msg.user_id, None, &allowed)
             .await;
 
-        let segs = vec![Segment::text(&reply_text)];
-        if let Err(e) = self.adapter.send_private(msg.user_id, &segs).await {
-            error!("NC send_private failed: {e}");
+        if let ReplyPolicy::NapCatPrivate { user_id } = unified_event.reply_policy {
+            let segs = vec![Segment::text(&reply_text)];
+            if let Err(e) = self.adapter.send_private(user_id, &segs).await {
+                error!("NC send_private failed: {e}");
+            }
         }
     }
 
     async fn handle_group(&self, msg: GroupMessageEvent) {
-        let text = segments_to_text(&msg.message);
-        let text = text.trim();
-        if text.is_empty() {
+        let triggered = self.is_triggered(segments_to_text(&msg.message).trim());
+        let Some(unified_event) = UnifiedInboundEvent::from_nc_group(&msg, triggered) else {
+            return;
+        };
+        debug!(
+            source = ?unified_event.source,
+            sender_id = %unified_event.sender_id,
+            sender_name = %unified_event.sender_name,
+            trace_id = %unified_event.trace_id,
+            should_trigger_llm = unified_event.should_trigger_llm,
+            "NC group unified inbound event"
+        );
+        if !unified_event.should_respond {
             return;
         }
         debug!("NC group event timestamp={}", msg.timestamp);
 
-        if !self.is_triggered(text) {
-            return;
-        }
-
-        let stripped = self.strip_prefix(text);
+        let stripped = self.strip_prefix(&unified_event.text);
 
         info!(
             "[NC Group {}] user={} msg={}",
@@ -259,14 +273,20 @@ impl NcRouter {
             )
             .await;
 
-        // 群消息回复带 @
-        let segs = vec![
-            Segment::at(msg.user_id),
-            Segment::text(" "),
-            Segment::text(&reply_text),
-        ];
-        if let Err(e) = self.adapter.send_group(msg.group_id, &segs).await {
-            error!("NC send_group failed: {e}");
+        if let ReplyPolicy::NapCatGroup {
+            group_id,
+            at_user_id,
+        } = unified_event.reply_policy
+        {
+            let mut segs = Vec::new();
+            if let Some(uid) = at_user_id {
+                segs.push(Segment::at(uid));
+                segs.push(Segment::text(" "));
+            }
+            segs.push(Segment::text(&reply_text));
+            if let Err(e) = self.adapter.send_group(group_id, &segs).await {
+                error!("NC send_group failed: {e}");
+            }
         }
     }
 
@@ -313,12 +333,11 @@ impl NcRouter {
                 config: self.config.clone(),
                 error_prompts: &self.prompts.error,
             };
-            let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
-                .with_cross_adapters(
-                    self.ts_adapter.clone(),
-                    self.ts_clients.as_ref().map(|c| c.as_ref()),
-                    Some(self.adapter.clone()),
-                );
+            let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx).with_cross_adapters(
+                self.ts_adapter.clone(),
+                self.ts_clients.as_ref().map(|c| c.as_ref()),
+                Some(self.adapter.clone()),
+            );
             if let Some(ref ts_clients) = self.ts_clients {
                 unified_ctx.ts_clients = Some(ts_clients.as_ref());
             }
@@ -436,7 +455,9 @@ impl NcRouter {
 
                     // 执行所有工具调用
                     for call in &response.tool_calls {
-                        let tool_result = self.execute_skill(call, user_id, group_id, sender_name).await;
+                        let tool_result = self
+                            .execute_skill(call, user_id, group_id, sender_name)
+                            .await;
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call.id,

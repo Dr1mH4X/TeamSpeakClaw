@@ -5,7 +5,6 @@ edition = "2021"
 authors = ["Dr1mH4X"]
 repository = "https://github.com/Dr1mH4X/TeamSpeakClaw"
 description = "LLM-powered TeamSpeak ServerQuery bot"
-license = "MIT"
 
 [[bin]]
 name = "teamspeakclaw"

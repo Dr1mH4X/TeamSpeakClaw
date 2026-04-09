@@ -33,7 +33,6 @@ base_url = "http://127.0.0.1:8009"   # Only effective when backend = "tsbot_back
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-max_tokens = 1024
 
 [bot]
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # Prefixes to trigger the bot in channel/server chat
