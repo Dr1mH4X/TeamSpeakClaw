@@ -23,7 +23,6 @@ method = "tcp"            # Connection method: tcp or ssh
 login_name = "serveradmin"
 login_pass = ""
 server_id = 1
-bot_nickname = "TSClaw"
 
 [music_backend]
 backend = "ts3audiobot"  # Music backend: "ts3audiobot" (via TS PM) or "tsbot_backend" (NeteaseTSBot)
@@ -35,6 +34,7 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 
 [bot]
+nickname = "TSClaw"                       # Bot name (ServerQuery auto-appends a random suffix)
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # Prefixes to trigger the bot in channel/server chat
 respond_to_private = true       # Private messages always trigger the bot
 max_concurrent_requests = 4     # Maximum concurrent LLM requests

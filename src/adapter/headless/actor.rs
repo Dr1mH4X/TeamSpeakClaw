@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -24,32 +24,38 @@ struct AvatarUploadState {
     local_path: PathBuf,
     md5_hex: String,
 }
-
-fn pick_avatar_file(dir: &std::path::Path) -> Option<PathBuf> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    let rd = fs::read_dir(dir).ok()?;
-    for e in rd.flatten() {
-        let p = e.path();
-        if !p.is_file() {
-            continue;
-        }
-        let ext = p
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" {
-            files.push(p);
-        }
-    }
-    files.sort();
-    files.into_iter().next()
-}
-
 fn md5_hex_of_file(path: &std::path::Path) -> Result<String> {
     let bs = fs::read(path).map_err(|e| anyhow!("read avatar file failed: {e}"))?;
     let digest = md5::compute(&bs);
     Ok(format!("{:x}", digest))
+}
+
+fn validate_identity_filename(raw: &str) -> Result<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(anyhow!("invalid headless identity file: empty filename"));
+    }
+
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(anyhow!(
+            "invalid headless identity file: separators and '..' are not allowed"
+        ));
+    }
+
+    let p = Path::new(name);
+    if p.is_absolute() {
+        return Err(anyhow!(
+            "invalid headless identity file: absolute path is not allowed"
+        ));
+    }
+
+    let mut comps = p.components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name.to_string()),
+        _ => Err(anyhow!(
+            "invalid headless identity file: only a single filename is allowed"
+        )),
+    }
 }
 
 pub async fn ts3_actor(
@@ -67,16 +73,11 @@ pub async fn ts3_actor(
     let channel_password = config.channel_password;
     let channel_path = config.channel_path;
     let channel_id = config.channel_id;
-    let identity_str = config.identity;
-    let identity_file = resolve_repo_relative(&config.identity_file);
+    let identity_file_name = validate_identity_filename("identity.json")?;
+    let identity_file = resolve_repo_relative(&identity_file_name);
     let diag_enabled = false;
     let diag_interval = Duration::from_secs(5);
-    let avatar_dir = config.avatar_dir.trim();
-    let avatar_dir = if avatar_dir.is_empty() {
-        None
-    } else {
-        Some(resolve_repo_relative(avatar_dir))
-    };
+    let avatar_file = resolve_repo_relative("avatar.png");
 
     let address = format!("{}:{}", host, port);
 
@@ -116,39 +117,33 @@ pub async fn ts3_actor(
         opts = opts.channel(channel_path);
     }
 
-    if !identity_str.is_empty() {
-        if let Ok(id) = Identity::new_from_str(&identity_str) {
-            opts = opts.identity(id);
-        }
-    } else {
-        let mut ident: Option<Identity> = None;
+    let mut ident: Option<Identity> = None;
 
-        if let Ok(s) = fs::read_to_string(&identity_file) {
-            let s = s.trim();
-            if !s.is_empty() {
-                if let Ok(id) = serde_json::from_str::<Identity>(s) {
-                    ident = Some(id);
-                } else if let Ok(id) = Identity::new_from_str(s) {
-                    ident = Some(id);
-                }
+    if let Ok(s) = fs::read_to_string(&identity_file) {
+        let s = s.trim();
+        if !s.is_empty() {
+            if let Ok(id) = serde_json::from_str::<Identity>(s) {
+                ident = Some(id);
+            } else if let Ok(id) = Identity::new_from_str(s) {
+                ident = Some(id);
             }
         }
+    }
 
-        if ident.is_none() {
-            if let Some(parent) = identity_file.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let id = Identity::create();
-            let _ = fs::write(
-                &identity_file,
-                serde_json::to_string(&id).unwrap_or_default(),
-            );
-            ident = Some(id);
+    if ident.is_none() {
+        if let Some(parent) = identity_file.parent() {
+            let _ = fs::create_dir_all(parent);
         }
+        let id = Identity::create();
+        let _ = fs::write(
+            &identity_file,
+            serde_json::to_string(&id).unwrap_or_default(),
+        );
+        ident = Some(id);
+    }
 
-        if let Some(id) = ident {
-            opts = opts.identity(id);
-        }
+    if let Some(id) = ident {
+        opts = opts.identity(id);
     }
 
     let mut out_buf: VecDeque<OutPacket> = VecDeque::with_capacity(400);
@@ -244,40 +239,31 @@ pub async fn ts3_actor(
                                     logged_connected = true;
                                     emit_log(&events_tx, 2, "ts3 connected");
 
-                                    if !avatar_set_done {
-                                        if let Some(dir) = avatar_dir.as_ref() {
-                                            if dir.is_dir() {
-                                                if let Some(p) = pick_avatar_file(dir) {
-                                                    match fs::metadata(&p) {
-                                                        Ok(md) => {
-                                                            let size = md.len();
-                                                            match md5_hex_of_file(&p) {
-                                                                Ok(md5_hex) => {
-                                                                    let remote_path = format!("/avatar_{}", md5_hex);
-                                                                    match con.upload_file(ChannelId(0), &remote_path, None, size, true, false) {
-                                                                        Ok(h) => {
-                                                                            avatar_upload = Some(AvatarUploadState { handle: h, local_path: p.clone(), md5_hex: md5_hex.clone() });
-                                                                            emit_log(&events_tx, 2, format!("avatar upload started: {} -> {}", p.display(), remote_path));
-                                                                        }
-                                                                        Err(e) => {
-                                                                            emit_log(&events_tx, 3, format!("avatar upload start failed: {e}"));
-                                                                        }
-                                                                    }
-                                                                }
-                                                                Err(e) => {
-                                                                    emit_log(&events_tx, 3, format!("avatar md5 failed: {e}"));
-                                                                }
+                                    if !avatar_set_done && avatar_file.is_file() {
+                                        let p = avatar_file.clone();
+                                        match fs::metadata(&p) {
+                                            Ok(md) => {
+                                                let size = md.len();
+                                                match md5_hex_of_file(&p) {
+                                                    Ok(md5_hex) => {
+                                                        let remote_path = format!("/avatar_{}", md5_hex);
+                                                        match con.upload_file(ChannelId(0), &remote_path, None, size, true, false) {
+                                                            Ok(h) => {
+                                                                avatar_upload = Some(AvatarUploadState { handle: h, local_path: p.clone(), md5_hex: md5_hex.clone() });
+                                                                emit_log(&events_tx, 2, format!("avatar upload started: {} -> {}", p.display(), remote_path));
+                                                            }
+                                                            Err(e) => {
+                                                                emit_log(&events_tx, 3, format!("avatar upload start failed: {e}"));
                                                             }
                                                         }
-                                                        Err(e) => {
-                                                            emit_log(&events_tx, 3, format!("avatar stat failed: {e}"));
-                                                        }
                                                     }
-                                                } else {
-                                                    emit_log(&events_tx, 3, format!("avatar dir has no supported images: {}", dir.display()));
+                                                    Err(e) => {
+                                                        emit_log(&events_tx, 3, format!("avatar md5 failed: {e}"));
+                                                    }
                                                 }
-                                            } else {
-                                                emit_log(&events_tx, 3, format!("avatar dir not found: {}", dir.display()));
+                                            }
+                                            Err(e) => {
+                                                emit_log(&events_tx, 3, format!("avatar stat failed: {e}"));
                                             }
                                         }
                                     }

@@ -23,7 +23,6 @@ method = "tcp"            # 连接方式: tcp 或 ssh
 login_name = "serveradmin"
 login_pass = ""
 server_id = 1
-bot_nickname = "TSClaw"
 
 [music_backend]
 backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
@@ -35,6 +34,7 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 
 [bot]
+nickname = "TSClaw"                       # 机器人名称（ServerQuery 会自动追加随机后缀）
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
 respond_to_private = true       # 私聊消息始终触发机器人
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
