@@ -264,7 +264,6 @@ jobs:
           name: Release ${{ needs.meta.outputs.tag }}
           body: |
             ${{ needs.changelog.outputs.release_body }}
-            ${{ needs.meta.outputs.is-stable-release == 'true' && format('\n## 🐋 Docker Image\n\n```bash\ndocker pull ghcr.io/{0}:{1}\n```', github.repository, needs.meta.outputs.version) || '\n> 这是预发布版本（beta），未构建 Docker 镜像。' }}
           draft: false
           prerelease: ${{ needs.meta.outputs.is-prerelease == 'true' }}
           files: artifacts/*
