@@ -1,5 +1,6 @@
 pub mod acl;
 pub mod bot;
+pub mod headless;
 pub mod llm;
 pub mod logging;
 pub mod music_backend;
@@ -10,6 +11,7 @@ pub mod serverquery;
 
 pub use acl::AclConfig;
 pub use bot::BotConfig;
+pub use headless::HeadlessConfig;
 pub use llm::LlmConfig;
 pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
@@ -38,6 +40,7 @@ pub struct AppConfig {
     pub rate_limit: RateLimitConfig,
     pub music_backend: MusicBackendConfig,
     pub napcat: NapCatConfig,
+    pub headless: HeadlessConfig,
     pub logging: LogConfig,
 }
 
@@ -50,6 +53,7 @@ impl Default for AppConfig {
             rate_limit: RateLimitConfig::default(),
             music_backend: MusicBackendConfig::default(),
             napcat: NapCatConfig::default(),
+            headless: HeadlessConfig::default(),
             logging: LogConfig::default(),
         }
     }

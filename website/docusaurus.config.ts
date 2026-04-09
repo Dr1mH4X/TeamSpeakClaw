@@ -94,24 +94,16 @@ const config: Config = {
     footer: {
       links: [
         {
-          title: "Docs",
+          title: "文档",
           items: [
             {
               label: "快速开始",
               to: "/docs/intro",
             },
-            {
-              label: "下载",
-              to: "/docs/setup",
-            },
-            {
-              label: "配置",
-              to: "/docs/configuration",
-            },
           ],
         },
         {
-          title: "Community",
+          title: "社区",
           items: [
             {
               label: "GitHub Issues",
@@ -120,15 +112,11 @@ const config: Config = {
           ],
         },
         {
-          title: "More",
+          title: "支持我们",
           items: [
             {
-              label: "Blog",
-              href: "https://dreamhax.cc",
-            },
-            {
-              label: "GitHub",
-              href: "https://github.com/Dr1mH4X/TeamSpeakClaw",
+              label: "爱发电",
+              href: "https://ifdian.net/a/dreamhax",
             },
           ],
         },
