@@ -15,6 +15,26 @@ sidebar_position: 3
 包含连接 TeamSpeak 服务器、LLM 提供商设置和机器人行为的基本配置。
 
 ```toml
+# Bot 配置
+[bot]
+nickname = "TSClaw"                       # 机器人名称（ServerQuery 会自动追加随机后缀）
+trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
+respond_to_private = true       # 私聊消息始终触发机器人
+max_concurrent_requests = 4     # 最大并发 LLM 请求数
+default_reply_mode = "channel"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)
+max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
+
+# Headless 语音服务配置
+[headless]
+enabled = false
+ts3_host = "127.0.0.1"
+ts3_port = 9987
+server_password = ""
+channel_password = ""
+channel_path = ""
+channel_id = ""
+
+# ServerQuery 配置
 [serverquery]
 host = "127.0.0.1"
 port = 10011
@@ -24,29 +44,29 @@ login_name = "serveradmin"
 login_pass = ""
 server_id = 1
 
-[music_backend]
-backend = "ts3audiobot"  # 音乐后端选择: "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
-base_url = "http://127.0.0.1:8009"   # 仅 backend = "tsbot_backend" 时生效
-
+# LLM 配置
 [llm]
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 
-[bot]
-nickname = "TSClaw"                       # 机器人名称（ServerQuery 会自动追加随机后缀）
-trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
-respond_to_private = true       # 私聊消息始终触发机器人
-max_concurrent_requests = 4     # 最大并发 LLM 请求数
-default_reply_mode = "private"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)，仅频道/广播触发时生效
-
-[logging]
-file_level = "info"       # 文件日志级别: error | warn | info | debug | trace
-
+# 限流配置
 [rate_limit]
 requests_per_minute = 10        # 每个用户的令牌桶限流设置
 burst_size = 3
 
+# 日志配置
+[logging]
+file_level = "info"
+
+# 联动项目配置
+# 音乐后端配置
+[music_backend]
+backend = "ts3audiobot"  # "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
+base_url = "http://127.0.0.1:8009"   # backend = "tsbot_backend" 时生效
+
+# NapCat 配置（可选，用于 QQ 机器人功能）
+# 前置要求：安装并运行 NapCat（https://napneko.github.io/）
 [napcat]
 enabled = false                           # 是否启用 NapCat 适配器
 ws_url = "ws://127.0.0.1:3001"           # NapCat WebSocket 服务地址
