@@ -14,6 +14,7 @@ service VoiceService {
   rpc Skip(Empty) returns (CommandResponse);
 
   rpc SendNotice(NoticeRequest) returns (CommandResponse);
+  rpc StreamTtsAudio(stream TtsAudioChunk) returns (CommandResponse);
 
   rpc SetClientDescription(SetClientDescriptionRequest) returns (CommandResponse);
 
@@ -50,6 +51,13 @@ message NoticeRequest {
   string message = 1;
   int32 target_mode = 2;
   uint32 target_client_id = 3;
+}
+
+message TtsAudioChunk {
+  bytes payload = 1;
+  string codec = 2;
+  bool end_of_stream = 3;
+  string trace_id = 4;
 }
 
 message SetClientDescriptionRequest {
