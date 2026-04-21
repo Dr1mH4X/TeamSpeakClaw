@@ -1,12 +1,19 @@
 use std::sync::Arc;
+use std::{io::ErrorKind, process::Stdio};
 
+use anyhow::{anyhow, Context};
+use audiopus::coder::Encoder;
 use futures::StreamExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use tsproto_packets::packets::{Direction, Flags, OutCommand, OutPacket, PacketType};
+use tsproto_packets::packets::{
+    AudioData, CodecType, Direction, Flags, OutAudio, OutCommand, OutPacket, PacketType,
+};
 
 use super::playback::playback_loop;
 use super::serverquery::{
@@ -84,6 +91,177 @@ impl VoiceServiceImpl {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
     }
+}
+
+struct ChildKillOnDrop {
+    child: Option<Child>,
+}
+
+impl ChildKillOnDrop {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl Drop for ChildKillOnDrop {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+async fn stream_tts_audio_loop(
+    mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
+    ts3_audio_tx: mpsc::Sender<OutPacket>,
+    mut paused_rx: watch::Receiver<bool>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let child = tokio::process::Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("mp3")
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-f")
+        .arg("s16le")
+        .arg("-ar")
+        .arg("48000")
+        .arg("-ac")
+        .arg("2")
+        .arg("pipe:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("failed to start ffmpeg: {e}"))?;
+    let mut child = ChildKillOnDrop::new(child);
+
+    if let Some(stderr) = child.child.as_mut().and_then(|c| c.stderr.take()) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                warn!("stream_tts ffmpeg: {line}");
+            }
+        });
+    }
+
+    let mut stdin = child
+        .child
+        .as_mut()
+        .and_then(|c| c.stdin.take())
+        .ok_or_else(|| anyhow!("ffmpeg stdin missing"))?;
+    let mut stdout = child
+        .child
+        .as_mut()
+        .and_then(|c| c.stdout.take())
+        .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
+
+    let writer_cancel = cancel.clone();
+    let writer_task = tokio::spawn(async move {
+        let mut saw_eos = false;
+        while let Some(chunk) = stream.message().await.context("recv tts chunk failed")? {
+            if !chunk.codec.is_empty() && !chunk.codec.eq_ignore_ascii_case("mp3") {
+                return Err(anyhow!("unsupported tts codec: {}", chunk.codec));
+            }
+            if !chunk.payload.is_empty() {
+                stdin
+                    .write_all(&chunk.payload)
+                    .await
+                    .context("write ffmpeg stdin failed")?;
+            }
+            if chunk.end_of_stream {
+                saw_eos = true;
+                break;
+            }
+            if writer_cancel.is_cancelled() {
+                break;
+            }
+        }
+        if !saw_eos {
+            warn!("stream_tts: upstream ended without explicit eos");
+        }
+        stdin
+            .shutdown()
+            .await
+            .context("shutdown ffmpeg stdin failed")?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let frame_samples_per_channel = 48_000 / 50;
+    let frame_bytes = frame_samples_per_channel * 2 * 2;
+    let mut pcm = vec![0u8; frame_bytes];
+    let mut float_buf = vec![0f32; frame_samples_per_channel * 2];
+    let mut opus_out = [0u8; 1275];
+    let encoder = Encoder::new(
+        audiopus::SampleRate::Hz48000,
+        audiopus::Channels::Stereo,
+        audiopus::Application::Audio,
+    )
+    .map_err(|e| anyhow!("opus encoder init failed: {e}"))?;
+
+    'encode: loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        while *paused_rx.borrow() {
+            tokio::select! {
+                _ = cancel.cancelled() => break 'encode,
+                r = paused_rx.changed() => {
+                    if r.is_err() {
+                        break 'encode;
+                    }
+                }
+            }
+        }
+        match stdout.read_exact(&mut pcm).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(anyhow!("read ffmpeg pcm failed: {e}")),
+        }
+
+        for i in 0..float_buf.len() {
+            let lo = pcm[i * 2];
+            let hi = pcm[i * 2 + 1];
+            float_buf[i] = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+        }
+
+        let len = encoder
+            .encode_float(&float_buf, &mut opus_out)
+            .map_err(|e| anyhow!("opus encode failed: {e}"))?;
+        let packet = OutAudio::new(&AudioData::C2S {
+            id: 0,
+            codec: CodecType::OpusMusic,
+            data: &opus_out[..len],
+        });
+        ts3_audio_tx
+            .send(packet)
+            .await
+            .map_err(|e| anyhow!("send ts3 audio failed: {e}"))?;
+    }
+
+    let eos = OutAudio::new(&AudioData::C2S {
+        id: 0,
+        codec: CodecType::OpusMusic,
+        data: &[],
+    });
+    if let Err(e) = ts3_audio_tx.send(eos).await {
+        warn!("send stream_tts eos failed: {e}");
+    }
+
+    match writer_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(anyhow!("tts stream writer task failed: {e}")),
+    }
+
+    if let Some(mut c) = child.child.take() {
+        let _ = c.start_kill();
+        let _ = c.wait().await;
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -371,6 +549,68 @@ impl VoiceService for VoiceServiceImpl {
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,
             message: "ok".to_string(),
+        }))
+    }
+
+    async fn stream_tts_audio(
+        &self,
+        req: Request<tonic::Streaming<voicev1::TtsAudioChunk>>,
+    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
+        self.stop_internal().await;
+
+        {
+            let mut st = self.status.lock().await;
+            st.now_playing_title = "LLM Reply Stream".to_string();
+            st.now_playing_source_url = "grpc://stream_tts_audio".to_string();
+            st.state = 2;
+        }
+        emit_playback(
+            &self.events_tx,
+            1,
+            "LLM Reply Stream".to_string(),
+            "grpc://stream_tts_audio".to_string(),
+            "",
+        );
+
+        let (paused_tx, paused_rx) = watch::channel(false);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let events_tx = self.events_tx.clone();
+        let tx = self.ts3_audio_tx.clone();
+        let cancel_child = cancel.clone();
+        let handle = tokio::spawn(async move {
+            match stream_tts_audio_loop(req.into_inner(), tx, paused_rx, cancel_child).await {
+                Ok(()) => {
+                    emit_playback(
+                        &events_tx,
+                        2,
+                        "LLM Reply Stream".to_string(),
+                        "grpc://stream_tts_audio".to_string(),
+                        "",
+                    );
+                }
+                Err(e) => {
+                    error!(%e, "stream tts audio loop failed");
+                    emit_playback(
+                        &events_tx,
+                        3,
+                        "LLM Reply Stream".to_string(),
+                        "grpc://stream_tts_audio".to_string(),
+                        format!("{e}"),
+                    );
+                }
+            }
+        });
+
+        let mut pb = self.playback.lock().await;
+        *pb = Some(PlaybackControl {
+            cancel,
+            paused_tx,
+            handle,
+        });
+
+        Ok(Response::new(voicev1::CommandResponse {
+            ok: true,
+            message: "accepted".to_string(),
         }))
     }
 
