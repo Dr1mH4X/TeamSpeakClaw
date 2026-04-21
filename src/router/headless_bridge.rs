@@ -399,12 +399,16 @@ impl HeadlessLlmBridge {
             }
 
             if response.tool_calls.is_empty() {
-                let stream_reply = self.collect_stream_reply(messages.clone()).await;
-                if let Ok(text) = stream_reply {
-                    return Ok(text);
+                if let Some(content) = response
+                    .content
+                    .as_ref()
+                    .filter(|content| !content.trim().is_empty())
+                {
+                    return Ok(content.clone());
                 }
-                if let Some(content) = response.content {
-                    return Ok(content);
+                let stream_reply = self.collect_stream_reply(messages.clone()).await?;
+                if !stream_reply.trim().is_empty() {
+                    return Ok(stream_reply);
                 }
                 return Err(anyhow!("empty llm response"));
             }
@@ -562,16 +566,19 @@ impl HeadlessLlmBridge {
     fn split_tts_segments(&self, text: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut buf = String::new();
+        let mut buf_char_count = 0usize;
         for ch in text.chars() {
             buf.push(ch);
+            buf_char_count += 1;
             let punct_boundary = matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；');
-            let len_boundary = buf.chars().count() >= Self::TTS_SEGMENT_SOFT_LIMIT;
+            let len_boundary = buf_char_count >= Self::TTS_SEGMENT_SOFT_LIMIT;
             if punct_boundary || len_boundary {
                 let s = buf.trim();
                 if !s.is_empty() {
                     out.push(s.to_string());
                 }
                 buf.clear();
+                buf_char_count = 0;
             }
         }
         let tail = buf.trim();
