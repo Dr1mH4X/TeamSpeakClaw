@@ -164,7 +164,16 @@ async fn stream_tts_audio_loop(
         let mut saw_eos = false;
         while let Some(chunk) = stream.message().await.context("recv tts chunk failed")? {
             if !chunk.codec.is_empty() && !chunk.codec.eq_ignore_ascii_case("mp3") {
-                return Err(anyhow!("unsupported tts codec: {}", chunk.codec));
+                let trace_id = if chunk.trace_id.is_empty() {
+                    "<empty>"
+                } else {
+                    &chunk.trace_id
+                };
+                return Err(anyhow!(
+                    "unsupported tts codec: {} trace_id={}",
+                    chunk.codec,
+                    trace_id
+                ));
             }
             if !chunk.payload.is_empty() {
                 stdin
