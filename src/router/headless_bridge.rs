@@ -1,22 +1,39 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
+use futures_util::StreamExt;
 use serde_json::json;
-use tokio_stream::StreamExt;
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+use crate::adapter::headless::speech::{
+    pcm16_mono_to_wav_bytes, preprocess_stt_text, preprocess_text_message, OpenAiSpeechProvider,
+    OpusSttPipeline,
+};
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::provider::ToolCall;
-use crate::llm::LlmEngine;
+use crate::llm::{LlmEngine, LlmStreamEvent};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
+
+struct CallerContext {
+    caller_id: u32,
+    caller_name: String,
+    caller_uid: String,
+    groups: Vec<u32>,
+    channel_group_id: u32,
+    reply_target_mode: i32,
+    reply_target_client_id: u32,
+}
 
 pub struct HeadlessLlmBridge {
     config: Arc<AppConfig>,
@@ -26,6 +43,8 @@ pub struct HeadlessLlmBridge {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
+    stt_pipeline: Mutex<Option<OpusSttPipeline>>,
+    speech_provider: Option<OpenAiSpeechProvider>,
 }
 
 impl HeadlessLlmBridge {
@@ -33,6 +52,8 @@ impl HeadlessLlmBridge {
     const OBS_LLM: bool = true;
     const OBS_TOOL: bool = true;
     const OBS_TEXT_MAX_LEN: usize = 240;
+    const TTS_SEGMENT_SOFT_LIMIT: usize = 120;
+    const TTS_CHUNK_SIZE: usize = 16 * 1024;
 
     pub fn new(
         config: Arc<AppConfig>,
@@ -43,7 +64,9 @@ impl HeadlessLlmBridge {
         ts_adapter: Arc<TsAdapter>,
         ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
+        let speech_provider = OpenAiSpeechProvider::new(config.clone()).ok();
         Self {
+            stt_pipeline: Mutex::new(config.headless.stt.enabled.then(OpusSttPipeline::new)),
             config,
             prompts,
             gate,
@@ -51,6 +74,7 @@ impl HeadlessLlmBridge {
             registry,
             ts_adapter,
             ts_clients,
+            speech_provider,
         }
     }
 
@@ -63,7 +87,7 @@ impl HeadlessLlmBridge {
             include_chat: true,
             include_playback: false,
             include_log: true,
-            include_audio: false,
+            include_audio: self.config.headless.stt.enabled,
         });
 
         let mut stream = client.subscribe_events(req).await?.into_inner();
@@ -75,17 +99,18 @@ impl HeadlessLlmBridge {
                     let Some(payload) = ev.payload else {
                         continue;
                     };
-                    if let voicev1::event::Payload::Chat(chat) = payload {
-                        let (caller_id, _, _) = self.resolve_caller(&chat);
-                        if self.should_ignore_chat(&chat, caller_id) {
-                            continue;
+                    match payload {
+                        voicev1::event::Payload::Chat(chat) => {
+                            if let Err(e) = self.handle_chat_event(&mut client, chat).await {
+                                error!("headless bridge chat handling failed: {e}");
+                            }
                         }
-                        if !chat.should_trigger_llm {
-                            continue;
+                        voicev1::event::Payload::Audio(audio) => {
+                            if let Err(e) = self.handle_audio_event(&mut client, audio).await {
+                                error!("headless bridge audio handling failed: {e}");
+                            }
                         }
-                        if let Err(e) = self.handle_chat(&mut client, chat).await {
-                            error!("headless bridge chat handling failed: {e}");
-                        }
+                        _ => {}
                     }
                 }
                 Err(e) => {
@@ -108,14 +133,54 @@ impl HeadlessLlmBridge {
         s
     }
 
-    fn resolve_caller(&self, chat: &voicev1::ChatEvent) -> (u32, Vec<u32>, u32) {
+    fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> CallerContext {
         for item in self.ts_clients.iter() {
             let c = item.value();
             if c.nickname == chat.invoker_name {
-                return (c.clid, c.server_groups.clone(), c.channel_group_id);
+                return CallerContext {
+                    caller_id: c.clid,
+                    caller_name: chat.invoker_name.clone(),
+                    caller_uid: chat.invoker_unique_id.clone(),
+                    groups: c.server_groups.clone(),
+                    channel_group_id: c.channel_group_id,
+                    reply_target_mode: chat.reply_target_mode,
+                    reply_target_client_id: chat.reply_target_client_id,
+                };
             }
         }
-        (0, vec![], 0)
+        CallerContext {
+            caller_id: 0,
+            caller_name: chat.invoker_name.clone(),
+            caller_uid: chat.invoker_unique_id.clone(),
+            groups: vec![],
+            channel_group_id: 0,
+            reply_target_mode: chat.reply_target_mode,
+            reply_target_client_id: chat.reply_target_client_id,
+        }
+    }
+
+    fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
+        if let Some(item) = self.ts_clients.get(&audio.from_client_id) {
+            let c = item.value();
+            return CallerContext {
+                caller_id: c.clid,
+                caller_name: c.nickname.clone(),
+                caller_uid: c.cldbid.to_string(),
+                groups: c.server_groups.clone(),
+                channel_group_id: c.channel_group_id,
+                reply_target_mode: 1,
+                reply_target_client_id: audio.from_client_id,
+            };
+        }
+        CallerContext {
+            caller_id: audio.from_client_id,
+            caller_name: audio.from_client_name.clone(),
+            caller_uid: audio.from_client_id.to_string(),
+            groups: vec![],
+            channel_group_id: 0,
+            reply_target_mode: 1,
+            reply_target_client_id: audio.from_client_id,
+        }
     }
 
     fn should_ignore_chat(&self, chat: &voicev1::ChatEvent, caller_id: u32) -> bool {
@@ -126,27 +191,20 @@ impl HeadlessLlmBridge {
         bot_clid != 0 && caller_id == bot_clid
     }
 
-    async fn execute_skill(
-        &self,
-        call: &ToolCall,
-        chat: &voicev1::ChatEvent,
-        groups: &[u32],
-        channel_group_id: u32,
-    ) -> String {
+    async fn execute_skill(&self, call: &ToolCall, ctx: &CallerContext) -> String {
         if let Some(skill) = self.registry.get(&call.name) {
-            let (caller_id, _, _) = self.resolve_caller(chat);
-            let ctx = ExecutionContext {
+            let exec_ctx = ExecutionContext {
                 adapter: self.ts_adapter.clone(),
                 clients: self.ts_clients.as_ref(),
-                caller_id,
-                caller_name: chat.invoker_name.clone(),
-                caller_groups: groups.to_vec(),
-                caller_channel_group_id: channel_group_id,
+                caller_id: ctx.caller_id,
+                caller_name: ctx.caller_name.clone(),
+                caller_groups: ctx.groups.clone(),
+                caller_channel_group_id: ctx.channel_group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
                 error_prompts: &self.prompts.error,
             };
-            let unified_ctx = UnifiedExecutionContext::from_ts(&ctx).with_cross_adapters(
+            let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx).with_cross_adapters(
                 Some(self.ts_adapter.clone()),
                 Some(self.ts_clients.as_ref()),
                 None,
@@ -155,7 +213,7 @@ impl HeadlessLlmBridge {
             let args = call.arguments.clone();
             let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
                 Ok(v) => Ok(v),
-                Err(_) => skill.execute(args, &ctx).await,
+                Err(_) => skill.execute(args, &exec_ctx).await,
             };
 
             match result {
@@ -171,31 +229,116 @@ impl HeadlessLlmBridge {
         }
     }
 
-    async fn handle_chat(
+    async fn handle_chat_event(
         &self,
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
-        let system_prompt = &self.prompts.system.content;
-        let (caller_id, groups, channel_group_id) = self.resolve_caller(&chat);
-        let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
-            chat.invoker_name, chat.invoker_unique_id, caller_id, groups, channel_group_id
+        let ctx = self.resolve_caller_from_chat(&chat);
+        if self.should_ignore_chat(&chat, ctx.caller_id) || !chat.should_trigger_llm {
+            return Ok(());
+        }
+        let Some(clean_text) = preprocess_text_message(&chat.message) else {
+            return Ok(());
+        };
+        self.handle_user_input(client, ctx, clean_text, "text")
+            .await
+    }
+
+    async fn handle_audio_event(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        audio: voicev1::AudioFrameEvent,
+    ) -> Result<()> {
+        let bot_clid = self.ts_adapter.get_bot_clid();
+        if bot_clid != 0 && audio.from_client_id == bot_clid {
+            return Ok(());
+        }
+
+        let chunk = {
+            let mut guard = self.stt_pipeline.lock().await;
+            let Some(pipeline) = guard.as_mut() else {
+                return Ok(());
+            };
+            pipeline.process_audio_frame(&audio)?
+        };
+
+        let Some(chunk) = chunk else {
+            return Ok(());
+        };
+        let Some(speech_provider) = self.speech_provider.as_ref() else {
+            warn!("speech provider unavailable, skip stt");
+            return Ok(());
+        };
+
+        let wav = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
+        let raw_text = match speech_provider.transcribe_wav(wav).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("stt failed for {}: {}", chunk.speaker_name, e);
+                return Ok(());
+            }
+        };
+        let Some(text) = preprocess_stt_text(&raw_text, &self.config.headless.stt) else {
+            return Ok(());
+        };
+
+        info!(
+            event = "headless.stt.result",
+            speaker = %chunk.speaker_name,
+            clid = chunk.speaker_client_id,
+            text = %self.truncate_for_log(&text),
+            "headless stt text"
         );
-        let user_msg = chat.message.clone();
+
+        let mut ctx = self.resolve_caller_from_audio(&audio);
+        ctx.caller_name = chunk.speaker_name;
+        self.handle_user_input(client, ctx, text, "voice").await
+    }
+
+    async fn handle_user_input(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        ctx: CallerContext,
+        user_msg: String,
+        source: &str,
+    ) -> Result<()> {
+        if self.config.headless.tts.enabled {
+            let _ = client.stop(tonic::Request::new(voicev1::Empty {})).await;
+        }
 
         if Self::OBS_CHAT {
             info!(
                 event = "headless.chat.user_message",
-                invoker = %chat.invoker_name,
-                uid = %chat.invoker_unique_id,
-                clid = caller_id,
+                source = source,
+                invoker = %ctx.caller_name,
+                uid = %ctx.caller_uid,
+                clid = ctx.caller_id,
                 message = %self.truncate_for_log(&user_msg),
-                "headless inbound chat"
+                "headless inbound message"
             );
         }
 
-        let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
+        let reply = self.run_llm_chain(&ctx, user_msg).await?;
+        if !reply.trim().is_empty() {
+            self.send_reply(client, &ctx, &reply).await?;
+            if let Err(e) = self.speak_reply(client, &reply).await {
+                warn!("tts playback failed, fallback text only: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
+        let system_prompt = &self.prompts.system.content;
+        let user_ctx = format!(
+            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
+            ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
+        );
+
+        let allowed_skills = self
+            .gate
+            .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
         let max_turns = self.config.bot.max_tool_turns;
 
@@ -245,10 +388,14 @@ impl HeadlessLlmBridge {
             }
 
             if response.tool_calls.is_empty() {
-                if let Some(content) = response.content {
-                    self.send_reply(client, &chat, &content).await?;
+                let stream_reply = self.collect_stream_reply(messages.clone()).await;
+                if let Ok(text) = stream_reply {
+                    return Ok(text);
                 }
-                return Ok(());
+                if let Some(content) = response.content {
+                    return Ok(content);
+                }
+                return Err(anyhow!("empty llm response"));
             }
 
             let assistant_tool_calls: Vec<_> = response
@@ -284,9 +431,7 @@ impl HeadlessLlmBridge {
                     );
                 }
 
-                let tool_result = self
-                    .execute_skill(call, &chat, &groups, channel_group_id)
-                    .await;
+                let tool_result = self.execute_skill(call, ctx).await;
 
                 if Self::OBS_TOOL {
                     info!(
@@ -308,23 +453,123 @@ impl HeadlessLlmBridge {
             }
         }
 
-        self.send_reply(client, &chat, "操作超时，请稍后再试")
-            .await?;
         Err(anyhow!("headless tool loop reached max turns"))
+    }
+
+    async fn collect_stream_reply(&self, messages: Vec<serde_json::Value>) -> Result<String> {
+        let mut stream = self.llm.chat_stream(messages, vec![]).await?;
+        let mut reply = String::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmStreamEvent::Token(token) => {
+                    reply.push_str(&token);
+                }
+                LlmStreamEvent::Done => {
+                    break;
+                }
+            }
+        }
+        if reply.trim().is_empty() {
+            return Err(anyhow!("llm stream returned empty reply"));
+        }
+        Ok(reply)
     }
 
     async fn send_reply(
         &self,
         client: &mut VoiceServiceClient<Channel>,
-        chat: &voicev1::ChatEvent,
+        ctx: &CallerContext,
         text: &str,
     ) -> Result<()> {
         let req = voicev1::NoticeRequest {
             message: text.to_string(),
-            target_mode: chat.reply_target_mode,
-            target_client_id: chat.reply_target_client_id,
+            target_mode: ctx.reply_target_mode,
+            target_client_id: ctx.reply_target_client_id,
         };
         let _ = client.send_notice(tonic::Request::new(req)).await?;
         Ok(())
+    }
+
+    async fn speak_reply(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        text: &str,
+    ) -> Result<()> {
+        if !self.config.headless.tts.enabled {
+            return Ok(());
+        }
+        let Some(speech_provider) = self.speech_provider.as_ref() else {
+            return Err(anyhow!("speech provider unavailable"));
+        };
+        let trace_id = format!(
+            "tts-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let segments = self.split_tts_segments(text);
+        let (tx, rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+        let send_fut = async {
+            for segment in segments {
+                let audio = speech_provider.synthesize(&segment).await?;
+                for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
+                    tx.send(voicev1::TtsAudioChunk {
+                        payload: payload.to_vec(),
+                        codec: "mp3".to_string(),
+                        end_of_stream: false,
+                        trace_id: trace_id.clone(),
+                    })
+                    .await
+                    .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
+                }
+            }
+            tx.send(voicev1::TtsAudioChunk {
+                payload: vec![],
+                codec: "mp3".to_string(),
+                end_of_stream: true,
+                trace_id,
+            })
+            .await
+            .map_err(|e| anyhow!("send tts eos failed: {e}"))?;
+            Ok::<(), anyhow::Error>(())
+        };
+        let stream_fut = async {
+            let rsp = client
+                .stream_tts_audio(tonic::Request::new(ReceiverStream::new(rx)))
+                .await?;
+            let body = rsp.into_inner();
+            if !body.ok {
+                return Err(anyhow!("stream_tts_audio rejected: {}", body.message));
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::try_join!(send_fut, stream_fut)?;
+        Ok(())
+    }
+
+    fn split_tts_segments(&self, text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut buf = String::new();
+        for ch in text.chars() {
+            buf.push(ch);
+            let punct_boundary = matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；');
+            let len_boundary = buf.chars().count() >= Self::TTS_SEGMENT_SOFT_LIMIT;
+            if punct_boundary || len_boundary {
+                let s = buf.trim();
+                if !s.is_empty() {
+                    out.push(s.to_string());
+                }
+                buf.clear();
+            }
+        }
+        let tail = buf.trim();
+        if !tail.is_empty() {
+            out.push(tail.to_string());
+        }
+        if out.is_empty() {
+            out.push(text.trim().to_string());
+        }
+        out
     }
 }
