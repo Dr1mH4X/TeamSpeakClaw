@@ -114,7 +114,6 @@ impl Drop for ChildKillOnDrop {
 async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
-    mut paused_rx: watch::Receiver<bool>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let child = tokio::process::Command::new("ffmpeg")
@@ -211,19 +210,9 @@ async fn stream_tts_audio_loop(
     )
     .map_err(|e| anyhow!("opus encoder init failed: {e}"))?;
 
-    'encode: loop {
+    loop {
         if cancel.is_cancelled() {
             break;
-        }
-        while *paused_rx.borrow() {
-            tokio::select! {
-                _ = cancel.cancelled() => break 'encode,
-                r = paused_rx.changed() => {
-                    if r.is_err() {
-                        break 'encode;
-                    }
-                }
-            }
         }
         match stdout.read_exact(&mut pcm).await {
             Ok(_) => {}
@@ -581,15 +570,9 @@ impl VoiceService for VoiceServiceImpl {
             "",
         );
 
-        let (_paused_tx, paused_rx) = watch::channel(false);
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = stream_tts_audio_loop(
-            req.into_inner(),
-            self.ts3_audio_tx.clone(),
-            paused_rx,
-            cancel,
-        )
-        .await;
+        let result =
+            stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone(), cancel).await;
 
         match result {
             Ok(()) => {

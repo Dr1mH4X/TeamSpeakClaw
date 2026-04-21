@@ -370,7 +370,7 @@ impl HeadlessLlmBridge {
                 );
             }
 
-            let response = match self.llm.chat(messages.clone(), tools.clone()).await {
+            let mut response = match self.llm.chat(messages.clone(), tools.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
                     error!(
@@ -401,10 +401,10 @@ impl HeadlessLlmBridge {
             if response.tool_calls.is_empty() {
                 if let Some(content) = response
                     .content
-                    .as_ref()
+                    .take()
                     .filter(|content| !content.trim().is_empty())
                 {
-                    return Ok(content.clone());
+                    return Ok(content);
                 }
                 let stream_reply = self.collect_stream_reply(messages.clone()).await?;
                 if !stream_reply.trim().is_empty() {
