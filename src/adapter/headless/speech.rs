@@ -243,9 +243,9 @@ impl OpenAiSpeechProvider {
         let api_key = fallback_str(&tts.api_key, &self.config.llm.api_key);
 
         let body = serde_json::json!({
-            "model": tts.model,
+            "model": tts.model.as_str(),
             "input": text,
-            "voice": tts.voice,
+            "voice": tts.voice.as_str(),
             "response_format": "mp3",
         });
 
