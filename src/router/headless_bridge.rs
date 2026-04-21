@@ -319,7 +319,18 @@ impl HeadlessLlmBridge {
             );
         }
 
-        let reply = self.run_llm_chain(&ctx, user_msg).await?;
+        let reply = match self.run_llm_chain(&ctx, user_msg).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                if e.to_string()
+                    .contains("headless tool loop reached max turns")
+                {
+                    let _ = self.send_reply(client, &ctx, "操作超时，请稍后再试").await;
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         if !reply.trim().is_empty() {
             self.send_reply(client, &ctx, &reply).await?;
             if let Err(e) = self.speak_reply(client, &reply).await {

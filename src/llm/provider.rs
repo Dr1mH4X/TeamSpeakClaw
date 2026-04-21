@@ -163,7 +163,7 @@ impl LlmProvider for OpenAiProvider {
         let mut byte_stream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(128);
         tokio::spawn(async move {
-            let mut pending = String::new();
+            let mut pending: Vec<u8> = Vec::new();
             while let Some(item) = byte_stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
@@ -172,11 +172,25 @@ impl LlmProvider for OpenAiProvider {
                         return;
                     }
                 };
-                pending.push_str(&String::from_utf8_lossy(&bytes));
+                pending.extend_from_slice(&bytes);
 
-                while let Some(pos) = pending.find('\n') {
-                    let line = pending[..pos].trim_end_matches('\r').to_string();
-                    pending.drain(..=pos);
+                while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+                    let mut line_bytes = pending.drain(..=pos).collect::<Vec<u8>>();
+                    if line_bytes.last() == Some(&b'\n') {
+                        line_bytes.pop();
+                    }
+                    if line_bytes.last() == Some(&b'\r') {
+                        line_bytes.pop();
+                    }
+                    let line = match std::str::from_utf8(&line_bytes) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!("invalid sse utf8 line: {e}").into()))
+                                .await;
+                            return;
+                        }
+                    };
                     if line.is_empty() || !line.starts_with("data: ") {
                         continue;
                     }

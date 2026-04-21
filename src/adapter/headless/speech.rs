@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use audiopus::coder::Decoder;
@@ -25,6 +26,7 @@ struct SpeakerState {
     speaking: bool,
     speech_ms: u64,
     silence_ms: u64,
+    last_seen: Instant,
 }
 
 pub struct OpusSttPipeline {
@@ -50,10 +52,26 @@ impl OpusSttPipeline {
         }
     }
 
+    fn evict_idle_speakers(&mut self, now: Instant, active_id: u32) {
+        const SPEAKER_IDLE_EVICT_AFTER_SECS: u64 = 300;
+        self.speakers.retain(|client_id, state| {
+            if *client_id == active_id {
+                return true;
+            }
+            if state.speaking || !state.pcm16_mono_16k.is_empty() {
+                return true;
+            }
+            now.duration_since(state.last_seen).as_secs() < SPEAKER_IDLE_EVICT_AFTER_SECS
+        });
+    }
+
     pub fn process_audio_frame(
         &mut self,
         event: &voicev1::AudioFrameEvent,
     ) -> Result<Option<SpeechChunk>> {
+        let now = Instant::now();
+        self.evict_idle_speakers(now, event.from_client_id);
+
         let codec = voicev1::audio_frame_event::Codec::try_from(event.codec)
             .unwrap_or(voicev1::audio_frame_event::Codec::Unspecified);
         if !matches!(
@@ -75,6 +93,7 @@ impl OpusSttPipeline {
                     speaking: false,
                     speech_ms: 0,
                     silence_ms: 0,
+                    last_seen: now,
                 },
             );
         }
@@ -82,6 +101,7 @@ impl OpusSttPipeline {
             .speakers
             .get_mut(&event.from_client_id)
             .ok_or_else(|| anyhow!("speaker state missing"))?;
+        state.last_seen = now;
 
         let mut decoded = vec![0i16; 5760 * 2];
         let packet = (&event.frame)
