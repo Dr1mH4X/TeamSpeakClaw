@@ -581,46 +581,42 @@ impl VoiceService for VoiceServiceImpl {
             "",
         );
 
-        let (paused_tx, paused_rx) = watch::channel(false);
+        let (_paused_tx, paused_rx) = watch::channel(false);
         let cancel = tokio_util::sync::CancellationToken::new();
-        let events_tx = self.events_tx.clone();
-        let tx = self.ts3_audio_tx.clone();
-        let cancel_child = cancel.clone();
-        let handle = tokio::spawn(async move {
-            match stream_tts_audio_loop(req.into_inner(), tx, paused_rx, cancel_child).await {
-                Ok(()) => {
-                    emit_playback(
-                        &events_tx,
-                        2,
-                        "LLM Reply Stream".to_string(),
-                        "grpc://stream_tts_audio".to_string(),
-                        "",
-                    );
-                }
-                Err(e) => {
-                    error!(%e, "stream tts audio loop failed");
-                    emit_playback(
-                        &events_tx,
-                        3,
-                        "LLM Reply Stream".to_string(),
-                        "grpc://stream_tts_audio".to_string(),
-                        format!("{e}"),
-                    );
-                }
-            }
-        });
-
-        let mut pb = self.playback.lock().await;
-        *pb = Some(PlaybackControl {
+        let result = stream_tts_audio_loop(
+            req.into_inner(),
+            self.ts3_audio_tx.clone(),
+            paused_rx,
             cancel,
-            paused_tx,
-            handle,
-        });
+        )
+        .await;
 
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "accepted".to_string(),
-        }))
+        match result {
+            Ok(()) => {
+                emit_playback(
+                    &self.events_tx,
+                    2,
+                    "LLM Reply Stream".to_string(),
+                    "grpc://stream_tts_audio".to_string(),
+                    "",
+                );
+                Ok(Response::new(voicev1::CommandResponse {
+                    ok: true,
+                    message: "ok".to_string(),
+                }))
+            }
+            Err(e) => {
+                error!(%e, "stream tts audio loop failed");
+                emit_playback(
+                    &self.events_tx,
+                    3,
+                    "LLM Reply Stream".to_string(),
+                    "grpc://stream_tts_audio".to_string(),
+                    format!("{e}"),
+                );
+                Err(Status::internal(format!("stream_tts_audio failed: {e}")))
+            }
+        }
     }
 
     async fn set_volume(
