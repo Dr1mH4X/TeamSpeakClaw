@@ -9,6 +9,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
+use tracing::info;
 
 use crate::config::AppConfig;
 
@@ -181,17 +182,28 @@ impl OpenAiSpeechProvider {
         if !stt.enabled {
             return Err(anyhow!("stt disabled"));
         }
-        if stt.provider != "openai" {
+        if !is_openai_compatible_provider(&stt.provider) {
             return Err(anyhow!("unsupported stt provider: {}", stt.provider));
         }
 
-        let url = format!(
-            "{}/audio/transcriptions",
-            resolve_base_url(&stt.base_url, &self.config.llm.base_url)
+        let url = resolve_stt_url(&stt.base_url, &self.config.llm.base_url);
+        let wav_size = wav_bytes.len();
+        info!(
+            event = "headless.stt.request",
+            url = %url,
+            model = %stt.model,
+            language = %stt.language,
+            payload_bytes = wav_size,
+            "sending stt request"
         );
-        let api_key = fallback_str(&stt.api_key, &self.config.llm.api_key);
 
-        let mut form = Form::new().text("model", stt.model.clone());
+        let mut form = Form::new();
+        if !stt.model.is_empty() {
+            form = form.text("model", stt.model.clone());
+        }
+        if !stt.api_key.is_empty() {
+            form = form.text("token", stt.api_key.clone());
+        }
         if !stt.language.is_empty() {
             form = form.text("language", stt.language.clone());
         }
@@ -203,13 +215,7 @@ impl OpenAiSpeechProvider {
                 .context("set wav mime failed")?,
         );
 
-        let resp = self
-            .client
-            .post(url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .multipart(form)
-            .send()
-            .await?;
+        let resp = self.client.post(url).multipart(form).send().await?;
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(anyhow!("stt request failed: {err}"));
@@ -224,6 +230,11 @@ impl OpenAiSpeechProvider {
         if text.is_empty() {
             return Err(anyhow!("stt returned empty text"));
         }
+        info!(
+            event = "headless.stt.response",
+            text_len = text.chars().count(),
+            "stt response received"
+        );
         Ok(text)
     }
 
@@ -232,14 +243,11 @@ impl OpenAiSpeechProvider {
         if !tts.enabled {
             return Err(anyhow!("tts disabled"));
         }
-        if tts.provider != "openai" {
+        if !is_openai_compatible_provider(&tts.provider) {
             return Err(anyhow!("unsupported tts provider: {}", tts.provider));
         }
 
-        let url = format!(
-            "{}/audio/speech",
-            resolve_base_url(&tts.base_url, &self.config.llm.base_url)
-        );
+        let url = resolve_tts_url(&tts.base_url, &self.config.llm.base_url);
         let api_key = fallback_str(&tts.api_key, &self.config.llm.api_key);
 
         let body = serde_json::json!({
@@ -333,6 +341,28 @@ fn fallback_str<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 fn resolve_base_url(value: &str, fallback: &str) -> String {
     let selected = if value.is_empty() { fallback } else { value };
     selected.trim_end_matches('/').to_string()
+}
+
+fn resolve_stt_url(value: &str, fallback: &str) -> String {
+    let base = resolve_base_url(value, fallback);
+    if base.ends_with("/audio/transcriptions") {
+        base
+    } else {
+        format!("{base}/audio/transcriptions")
+    }
+}
+
+fn resolve_tts_url(value: &str, fallback: &str) -> String {
+    let base = resolve_base_url(value, fallback);
+    if base.ends_with("/audio/speech") {
+        base
+    } else {
+        format!("{base}/audio/speech")
+    }
+}
+
+fn is_openai_compatible_provider(provider: &str) -> bool {
+    provider == "openai-compatibility" || provider == "openai"
 }
 
 pub fn preprocess_stt_text(

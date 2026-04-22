@@ -58,10 +58,10 @@ impl Default for HeadlessSttConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: "openai".to_string(),
+            provider: "openai-compatibility".to_string(),
             base_url: String::new(),
             api_key: String::new(),
-            model: "gpt-4o-mini-transcribe".to_string(),
+            model: String::new(),
             language: "zh".to_string(),
             wake_words: vec!["tsclaw".to_string()],
             wake_word_required: false,
@@ -73,7 +73,7 @@ impl Default for HeadlessTtsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            provider: "openai".to_string(),
+            provider: "openai-compatibility".to_string(),
             base_url: String::new(),
             api_key: String::new(),
             model: "gpt-4o-mini-tts".to_string(),
