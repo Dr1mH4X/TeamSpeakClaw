@@ -220,13 +220,8 @@ impl OpenAiSpeechProvider {
             let err = resp.text().await.unwrap_or_default();
             return Err(anyhow!("stt request failed: {err}"));
         }
-        let data: Value = resp.json().await?;
-        let text = data
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let body = resp.text().await?;
+        let text = parse_stt_text(&body);
         if text.is_empty() {
             return Err(anyhow!("stt returned empty text"));
         }
@@ -345,7 +340,7 @@ fn resolve_base_url(value: &str, fallback: &str) -> String {
 
 fn resolve_stt_url(value: &str, fallback: &str) -> String {
     let base = resolve_base_url(value, fallback);
-    if base.ends_with("/audio/transcriptions") {
+    if base.ends_with("/audio/transcriptions") || base.ends_with("/inference") {
         base
     } else {
         format!("{base}/audio/transcriptions")
@@ -359,6 +354,21 @@ fn resolve_tts_url(value: &str, fallback: &str) -> String {
     } else {
         format!("{base}/audio/speech")
     }
+}
+
+fn parse_stt_text(body: &str) -> String {
+    if let Ok(data) = serde_json::from_str::<Value>(body) {
+        if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+            return text.trim().to_string();
+        }
+        if let Some(text) = data.get("result").and_then(|v| v.as_str()) {
+            return text.trim().to_string();
+        }
+        if let Some(text) = data.as_str() {
+            return text.trim().to_string();
+        }
+    }
+    body.trim().to_string()
 }
 
 fn is_openai_compatible_provider(provider: &str) -> bool {

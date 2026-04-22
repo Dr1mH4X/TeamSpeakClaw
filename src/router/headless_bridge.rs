@@ -163,6 +163,12 @@ impl HeadlessLlmBridge {
     }
 
     fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
+        let reply_target_mode = self.default_reply_target_mode();
+        let reply_target_client_id = if reply_target_mode == 1 {
+            audio.from_client_id
+        } else {
+            0
+        };
         if let Some(item) = self.ts_clients.get(&audio.from_client_id) {
             let c = item.value();
             return CallerContext {
@@ -171,8 +177,8 @@ impl HeadlessLlmBridge {
                 caller_uid: c.cldbid.to_string(),
                 groups: c.server_groups.clone(),
                 channel_group_id: c.channel_group_id,
-                reply_target_mode: 1,
-                reply_target_client_id: audio.from_client_id,
+                reply_target_mode,
+                reply_target_client_id,
             };
         }
         CallerContext {
@@ -181,8 +187,16 @@ impl HeadlessLlmBridge {
             caller_uid: audio.from_client_id.to_string(),
             groups: vec![],
             channel_group_id: 0,
-            reply_target_mode: 1,
-            reply_target_client_id: audio.from_client_id,
+            reply_target_mode,
+            reply_target_client_id,
+        }
+    }
+
+    fn default_reply_target_mode(&self) -> i32 {
+        match self.config.bot.default_reply_mode.as_str() {
+            "channel" => 2,
+            "server" => 3,
+            _ => 1,
         }
     }
 
