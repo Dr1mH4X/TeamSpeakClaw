@@ -54,6 +54,9 @@ impl HeadlessLlmBridge {
     const OBS_TEXT_MAX_LEN: usize = 240;
     const TTS_SEGMENT_SOFT_LIMIT: usize = 120;
     const TTS_CHUNK_SIZE: usize = 16 * 1024;
+    const STREAM_TTS_MIN_CHARS: usize = 4;
+    const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
+    const STREAM_TTS_MAX_CHARS: usize = 28;
 
     pub fn new(
         config: Arc<AppConfig>,
@@ -319,7 +322,12 @@ impl HeadlessLlmBridge {
             );
         }
 
-        let reply = match self.run_llm_chain(&ctx, user_msg).await {
+        let stream_tts_enabled = self.config.headless.tts.enabled && self.config.llm.stream_output;
+        let reply = match if stream_tts_enabled {
+            self.run_llm_chain_streaming_tts(client, &ctx, user_msg).await
+        } else {
+            self.run_llm_chain(&ctx, user_msg).await
+        } {
             Ok(reply) => reply,
             Err(e) => {
                 if e.to_string()
@@ -333,31 +341,42 @@ impl HeadlessLlmBridge {
         };
         if !reply.trim().is_empty() {
             self.send_reply(client, &ctx, &reply).await?;
-            if let Err(e) = self.speak_reply(client, &reply).await {
-                warn!("tts playback failed, fallback text only: {e}");
+            if self.config.headless.tts.enabled && !stream_tts_enabled {
+                if let Err(e) = self.speak_reply(client, &reply).await {
+                    warn!("tts playback failed, fallback text only: {e}");
+                }
             }
         }
         Ok(())
     }
 
+    async fn run_llm_chain_streaming_tts(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        ctx: &CallerContext,
+        user_msg: String,
+    ) -> Result<String> {
+        let (messages, tools) = self.build_llm_request(ctx, user_msg.clone());
+        match self
+            .collect_stream_reply_and_speak(client, messages, tools)
+            .await
+        {
+            Ok(reply) => return Ok(reply),
+            Err(e) => {
+                warn!("streaming llm+tts fast path failed, fallback to normal chain: {e}");
+            }
+        }
+
+        let reply = self.run_llm_chain(ctx, user_msg).await?;
+        if !reply.trim().is_empty() {
+            self.speak_reply(client, &reply).await?;
+        }
+        Ok(reply)
+    }
+
     async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
-        let system_prompt = &self.prompts.system.content;
-        let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
-            ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
-        );
-
-        let allowed_skills = self
-            .gate
-            .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
+        let (mut messages, tools) = self.build_llm_request(ctx, user_msg);
         let max_turns = self.config.bot.max_tool_turns;
-
-        let mut messages = vec![
-            json!({"role":"system","content":system_prompt}),
-            json!({"role":"system","content":user_ctx}),
-            json!({"role":"user","content":user_msg}),
-        ];
 
         for turn in 0..max_turns {
             if Self::OBS_LLM {
@@ -471,6 +490,24 @@ impl HeadlessLlmBridge {
         Err(anyhow!("headless tool loop reached max turns"))
     }
 
+    fn build_llm_request(&self, ctx: &CallerContext, user_msg: String) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let system_prompt = &self.prompts.system.content;
+        let user_ctx = format!(
+            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
+            ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
+        );
+        let allowed_skills = self
+            .gate
+            .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
+        let tools = self.registry.to_tool_schemas(&allowed_skills);
+        let messages = vec![
+            json!({"role":"system","content":system_prompt}),
+            json!({"role":"system","content":user_ctx}),
+            json!({"role":"user","content":user_msg}),
+        ];
+        (messages, tools)
+    }
+
     async fn collect_stream_reply(&self, messages: Vec<serde_json::Value>) -> Result<String> {
         let mut stream = self.llm.chat_stream(messages, vec![]).await?;
         let mut reply = String::new();
@@ -488,6 +525,100 @@ impl HeadlessLlmBridge {
             return Err(anyhow!("llm stream returned empty reply"));
         }
         Ok(reply)
+    }
+
+    async fn collect_stream_reply_and_speak(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        messages: Vec<serde_json::Value>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<String> {
+        let Some(speech_provider) = self.speech_provider.as_ref() else {
+            return Err(anyhow!("speech provider unavailable"));
+        };
+
+        let mut stream = self.llm.chat_stream(messages, tools).await?;
+        let trace_id = format!(
+            "tts-stream-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let (tx, rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+
+        let send_fut = async {
+            let mut reply = String::new();
+            let mut chunker = StreamingSentenceChunker::new(
+                Self::STREAM_TTS_MIN_CHARS,
+                Self::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
+                Self::STREAM_TTS_MAX_CHARS,
+            );
+            while let Some(event) = stream.next().await {
+                match event? {
+                    LlmStreamEvent::Token(token) => {
+                        if token.is_empty() {
+                            continue;
+                        }
+                        reply.push_str(&token);
+                        for segment in chunker.push_token(&token) {
+                            self.enqueue_tts_segment(&tx, speech_provider, &trace_id, &segment)
+                                .await?;
+                        }
+                    }
+                    LlmStreamEvent::Done => break,
+                }
+            }
+            for segment in chunker.finish() {
+                self.enqueue_tts_segment(&tx, speech_provider, &trace_id, &segment)
+                    .await?;
+            }
+            if reply.trim().is_empty() {
+                return Err(anyhow!("llm stream returned empty reply"));
+            }
+            tx.send(voicev1::TtsAudioChunk {
+                payload: vec![],
+                codec: "mp3".to_string(),
+                end_of_stream: true,
+                trace_id,
+            })
+            .await
+            .map_err(|e| anyhow!("send tts eos failed: {e}"))?;
+            Ok::<String, anyhow::Error>(reply)
+        };
+        let stream_fut = async {
+            let rsp = client
+                .stream_tts_audio(tonic::Request::new(ReceiverStream::new(rx)))
+                .await?;
+            let body = rsp.into_inner();
+            if !body.ok {
+                return Err(anyhow!("stream_tts_audio rejected: {}", body.message));
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        let (reply, _) = tokio::try_join!(send_fut, stream_fut)?;
+        Ok(reply)
+    }
+
+    async fn enqueue_tts_segment(
+        &self,
+        tx: &mpsc::Sender<voicev1::TtsAudioChunk>,
+        speech_provider: &OpenAiSpeechProvider,
+        trace_id: &str,
+        segment: &str,
+    ) -> Result<()> {
+        let audio = speech_provider.synthesize(segment).await?;
+        for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
+            tx.send(voicev1::TtsAudioChunk {
+                payload: payload.to_vec(),
+                codec: "mp3".to_string(),
+                end_of_stream: false,
+                trace_id: trace_id.to_string(),
+            })
+            .await
+            .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
+        }
+        Ok(())
     }
 
     async fn send_reply(
@@ -589,5 +720,61 @@ impl HeadlessLlmBridge {
             out.push(text.trim().to_string());
         }
         out
+    }
+}
+
+struct StreamingSentenceChunker {
+    buffer: String,
+    min_chars: usize,
+    weak_punct_min_chars: usize,
+    max_chars: usize,
+}
+
+impl StreamingSentenceChunker {
+    fn new(min_chars: usize, weak_punct_min_chars: usize, max_chars: usize) -> Self {
+        Self {
+            buffer: String::new(),
+            min_chars,
+            weak_punct_min_chars,
+            max_chars,
+        }
+    }
+
+    fn push_token(&mut self, token: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for ch in token.chars() {
+            self.buffer.push(ch);
+            let len = self.buffer.chars().count();
+            let strong_punct = matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；');
+            let weak_punct = matches!(ch, '，' | ',' | '：' | ':');
+            let flush = strong_punct
+                || (weak_punct && len >= self.weak_punct_min_chars)
+                || len >= self.max_chars;
+            if flush {
+                if let Some(seg) = self.take_buffer(len >= self.min_chars || len >= self.max_chars)
+                {
+                    out.push(seg);
+                }
+            }
+        }
+        out
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        self.take_buffer(true).into_iter().collect()
+    }
+
+    fn take_buffer(&mut self, force: bool) -> Option<String> {
+        let text = self.buffer.trim();
+        if text.is_empty() {
+            self.buffer.clear();
+            return None;
+        }
+        if !force && text.chars().count() < self.min_chars {
+            return None;
+        }
+        let out = text.to_string();
+        self.buffer.clear();
+        Some(out)
     }
 }

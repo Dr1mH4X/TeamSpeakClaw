@@ -5,6 +5,8 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub stream_output: bool,
 }
 
 impl Default for LlmConfig {
@@ -13,6 +15,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
+            stream_output: false,
         }
     }
 }
