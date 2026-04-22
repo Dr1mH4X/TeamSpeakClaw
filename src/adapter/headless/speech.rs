@@ -9,7 +9,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::AppConfig;
 
@@ -105,16 +105,31 @@ impl OpusSttPipeline {
         state.last_seen = now;
 
         let mut decoded = vec![0i16; 5760 * 2];
-        let packet = (&event.frame)
-            .try_into()
-            .map_err(|e: audiopus::Error| anyhow!("opus packet invalid: {e}"))?;
+        let packet = match (&event.frame).try_into() {
+            Ok(packet) => packet,
+            Err(e) => {
+                warn!(
+                    clid = event.from_client_id,
+                    error = %e,
+                    "drop invalid opus packet"
+                );
+                return Ok(None);
+            }
+        };
         let decoded_mut = (&mut decoded)
             .try_into()
             .map_err(|e: audiopus::Error| anyhow!("opus output buffer invalid: {e}"))?;
-        let samples_per_channel = state
-            .decoder
-            .decode(Some(packet), decoded_mut, false)
-            .map_err(|e| anyhow!("opus decode failed: {e}"))?;
+        let samples_per_channel = match state.decoder.decode(Some(packet), decoded_mut, false) {
+            Ok(samples) => samples,
+            Err(e) => {
+                warn!(
+                    clid = event.from_client_id,
+                    error = %e,
+                    "drop undecodable opus frame"
+                );
+                return Ok(None);
+            }
+        };
 
         if samples_per_channel == 0 {
             return Ok(None);
@@ -380,6 +395,7 @@ pub fn preprocess_stt_text(
     cfg: &crate::config::headless::HeadlessSttConfig,
 ) -> Option<String> {
     const STT_TEXT_MAX_LEN: usize = 240;
+    const STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD: usize = 4;
     let mut text = normalize_text(raw);
 
     if text.is_empty() {
@@ -428,6 +444,12 @@ pub fn preprocess_stt_text(
     if text.is_empty() {
         return None;
     }
+    if !cfg.wake_word_required {
+        let cjk_count = count_cjk_chars(&text);
+        if cjk_count > 0 && cjk_count < STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD {
+            return None;
+        }
+    }
 
     if text.chars().count() > STT_TEXT_MAX_LEN {
         text = text.chars().take(STT_TEXT_MAX_LEN).collect();
@@ -453,4 +475,15 @@ fn strip_leading_punct(input: &str) -> String {
     input
         .trim_start_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
         .to_string()
+}
+
+fn count_cjk_chars(input: &str) -> usize {
+    input
+        .chars()
+        .filter(|c| {
+            ('\u{4E00}'..='\u{9FFF}').contains(c)
+                || ('\u{3400}'..='\u{4DBF}').contains(c)
+                || ('\u{F900}'..='\u{FAFF}').contains(c)
+        })
+        .count()
 }
