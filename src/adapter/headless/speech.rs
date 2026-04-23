@@ -436,21 +436,11 @@ pub fn preprocess_stt_text(
                 text.clear();
                 break;
             }
-            if let Some(rem) = lower.strip_prefix(&(wake.clone() + " ")) {
+            if let Some(rem) = lower.strip_prefix(&wake) {
                 let consumed = text.len() - rem.len();
-                text = text[consumed..].trim_start().to_string();
-                wake_hit = true;
-                break;
-            }
-            if let Some(rem) = lower.strip_prefix(&(wake.clone() + ",")) {
-                let consumed = text.len() - rem.len();
-                text = text[consumed..].trim_start().to_string();
-                wake_hit = true;
-                break;
-            }
-            if let Some(rem) = lower.strip_prefix(&(wake.clone() + ":")) {
-                let consumed = text.len() - rem.len();
-                text = text[consumed..].trim_start().to_string();
+                let after_wake = &text[consumed..];
+                let after_trimmed = skip_punct_and_whitespace(after_wake);
+                text = after_trimmed.to_string();
                 wake_hit = true;
                 break;
             }
@@ -490,6 +480,13 @@ pub fn preprocess_text_message(raw: &str) -> Option<String> {
 fn normalize_text(raw: &str) -> String {
     let replaced = raw.replace(['\r', '\n', '\t'], " ");
     replaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn skip_punct_and_whitespace(input: &str) -> &str {
+    let cjk_punct = ['，', '。', '！', '？', '；', '：', '、', '—', '…', '（', '）', '【', '】', '《', '》', '“', '”', '‘', '’'];
+    input.trim_start_matches(|c: char| {
+        c.is_whitespace() || c.is_ascii_punctuation() || cjk_punct.contains(&c)
+    })
 }
 
 fn strip_leading_punct(input: &str) -> String {
