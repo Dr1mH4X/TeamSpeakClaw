@@ -175,12 +175,37 @@ fn start_headless_if_enabled(
 
     info!("Headless voice service enabled");
 
-    let bridge = crate::router::HeadlessLlmBridge::new(
-        config, prompts, gate, llm, registry, ts_adapter, ts_clients,
-    );
+    let bridge_config = config.clone();
+    let bridge_prompts = prompts.clone();
+    let bridge_gate = gate.clone();
+    let bridge_llm = llm.clone();
+    let bridge_registry = registry.clone();
+    let bridge_ts_adapter = ts_adapter.clone();
+    let bridge_ts_clients = ts_clients.clone();
+    let shutdown_for_bridge = shutdown.clone();
     let bridge_handle = Some(tokio::spawn(async move {
-        if let Err(e) = bridge.run().await {
-            error!("headless LLM bridge failed: {}", e);
+        loop {
+            tokio::select! {
+                _ = shutdown_for_bridge.cancelled() => {
+                    break;
+                }
+                run_result = crate::router::HeadlessLlmBridge::new(
+                    bridge_config.clone(),
+                    bridge_prompts.clone(),
+                    bridge_gate.clone(),
+                    bridge_llm.clone(),
+                    bridge_registry.clone(),
+                    bridge_ts_adapter.clone(),
+                    bridge_ts_clients.clone(),
+                ).run() => {
+                    if let Err(e) = run_result {
+                        error!("headless LLM bridge failed: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
         }
     }));
 

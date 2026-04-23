@@ -25,6 +25,7 @@ mod actor;
 mod playback;
 mod serverquery;
 mod service;
+pub mod speech;
 mod types;
 
 pub use types::{PersistedVoiceState, SharedStatus};
