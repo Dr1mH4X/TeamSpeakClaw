@@ -659,7 +659,8 @@ impl HeadlessLlmBridge {
             return Ok(());
         }
         let Some(speech_provider) = self.speech_provider.as_ref() else {
-            return Err(anyhow!("speech provider unavailable"));
+            error!("tts unavailable: speech provider not initialized");
+            return Err(anyhow!("tts unavailable: speech provider not initialized"));
         };
         let trace_id = format!(
             "tts-{}",

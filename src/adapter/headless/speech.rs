@@ -9,7 +9,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 
@@ -251,9 +251,11 @@ impl OpenAiSpeechProvider {
     pub async fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
         let tts = &self.config.headless.tts;
         if !tts.enabled {
+            error!("tts unavailable: tts disabled in config");
             return Err(anyhow!("tts disabled"));
         }
         if !is_openai_compatible_provider(&tts.provider) {
+            error!("tts unavailable: unsupported provider {}", tts.provider);
             return Err(anyhow!("unsupported tts provider: {}", tts.provider));
         }
 
@@ -275,8 +277,10 @@ impl OpenAiSpeechProvider {
             .send()
             .await?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("tts request failed: {err}"));
+            error!("tts unavailable: request failed with status {}: {}", status, err);
+            return Err(anyhow!("tts request failed: status {} - {}", status, err));
         }
 
         Ok(resp.bytes().await?.to_vec())
