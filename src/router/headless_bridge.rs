@@ -385,8 +385,11 @@ impl HeadlessLlmBridge {
         }
 
         let reply = self.run_llm_chain(ctx, user_msg).await?;
-        if !reply.trim().is_empty() {
-            self.speak_reply(client, &reply).await?;
+        if !reply.trim().is_empty() && self.config.headless.tts.enabled {
+            info!(event = "headless.tts.fallback", reply_len = reply.chars().count(), "fallback to non-streaming tts");
+            if let Err(e) = self.speak_reply(client, &reply).await {
+                warn!(%e, "fallback tts playback failed, will send text only");
+            }
         }
         Ok(reply)
     }
@@ -607,7 +610,14 @@ impl HeadlessLlmBridge {
                     }
                     LlmStreamEvent::ToolCalls => {
                         warn!("stream_tts: llm returned tool_calls, aborting stream");
-                        drop(tx);
+                        let _ = tx
+                            .send(voicev1::TtsAudioChunk {
+                                payload: vec![],
+                                codec: "mp3".to_string(),
+                                end_of_stream: true,
+                                trace_id: trace_id.clone(),
+                            })
+                            .await;
                         return Err(anyhow!("streaming aborted due to tool_calls"));
                     }
                     LlmStreamEvent::Done => break,
