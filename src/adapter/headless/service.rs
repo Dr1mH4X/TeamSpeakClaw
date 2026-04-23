@@ -111,17 +111,45 @@ impl Drop for ChildKillOnDrop {
     }
 }
 
+fn detect_audio_format(data: &[u8]) -> &'static str {
+    if data.len() >= 4 && &data[0..4] == b"RIFF" {
+        "wav"
+    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+        "mp3"
+    } else if data.len() >= 1 && data[0] == 0xFF {
+        "mp3"
+    } else {
+        "mp3"
+    }
+}
+
 async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
+    let first_chunk = match stream.message().await.context("recv first tts chunk failed")? {
+        Some(chunk) => chunk,
+        None => return Ok(()),
+    };
+
+    let input_format = if first_chunk.codec.eq_ignore_ascii_case("wav") {
+        "wav"
+    } else if first_chunk.codec.eq_ignore_ascii_case("mp3") || first_chunk.codec.is_empty() {
+        detect_audio_format(&first_chunk.payload)
+    } else {
+        return Err(anyhow!(
+            "unsupported tts codec: {}",
+            first_chunk.codec
+        ));
+    };
+
     let child = tokio::process::Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-loglevel")
         .arg("error")
         .arg("-f")
-        .arg("mp3")
+        .arg(input_format)
         .arg("-i")
         .arg("pipe:0")
         .arg("-f")
@@ -160,20 +188,19 @@ async fn stream_tts_audio_loop(
 
     let writer_cancel = cancel.clone();
     let writer_task = tokio::spawn(async move {
-        let mut saw_eos = false;
+        let mut saw_eos = first_chunk.end_of_stream;
+        if !first_chunk.payload.is_empty() {
+            stdin
+                .write_all(&first_chunk.payload)
+                .await
+                .context("write ffmpeg stdin failed")?;
+        }
+        if first_chunk.end_of_stream {
+            drop(stdin);
+            return Ok::<(), anyhow::Error>(());
+        }
+
         while let Some(chunk) = stream.message().await.context("recv tts chunk failed")? {
-            if !chunk.codec.is_empty() && !chunk.codec.eq_ignore_ascii_case("mp3") {
-                let trace_id = if chunk.trace_id.is_empty() {
-                    "<empty>"
-                } else {
-                    &chunk.trace_id
-                };
-                return Err(anyhow!(
-                    "unsupported tts codec: {} trace_id={}",
-                    chunk.codec,
-                    trace_id
-                ));
-            }
             if !chunk.payload.is_empty() {
                 stdin
                     .write_all(&chunk.payload)
