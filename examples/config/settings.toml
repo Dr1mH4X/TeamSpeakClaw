@@ -20,6 +20,24 @@ channel_password = ""
 channel_path = ""
 channel_id = ""
 
+[headless.stt]
+enabled = false
+provider = "openai-compatibility"
+base_url = ""
+api_key = ""
+model = "tiny"
+language = "zh"
+wake_words = ["tsclaw"]
+wake_word_required = false
+
+[headless.tts]
+enabled = false
+provider = "openai-compatibility"
+base_url = ""
+api_key = ""
+model = "gpt-4o-mini-tts"
+voice = "alloy"
+
 # ServerQuery 配置
 [serverquery]
 host = "127.0.0.1"
@@ -35,6 +53,7 @@ server_id = 1
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
+stream_output = false  # 流式输出：false 或 true（TTS快速响应)
 
 # 限流配置
 [rate_limit]

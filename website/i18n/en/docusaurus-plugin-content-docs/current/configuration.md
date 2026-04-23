@@ -32,6 +32,25 @@ base_url = "http://127.0.0.1:8009"   # Only effective when backend = "tsbot_back
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
+stream_output = false  # false: wait for full reply before TTS; true: stream LLM output to TTS (text is still sent once after completion)
+
+[headless.stt]
+enabled = false
+provider = "openai-compatibility"
+base_url = ""          # OpenAI-compatible: .../v1; whisper.cpp server mode: .../inference
+api_key = ""           # Optional; use when your STT service requires token auth
+model = "tiny"         # Optional; forwarded to STT when non-empty
+language = "zh"
+wake_words = ["tsclaw"]
+wake_word_required = false
+
+[headless.tts]
+enabled = false
+provider = "openai-compatibility"
+base_url = ""
+api_key = ""
+model = "gpt-4o-mini-tts"
+voice = "alloy"
 
 [bot]
 nickname = "TSClaw"                       # Bot name (ServerQuery auto-appends a random suffix)
@@ -110,6 +129,7 @@ The `[music_backend]` section controls which backend is used for music functiona
 - `"server"` — Server broadcast
 
 Messages triggered via private message are always replied to via private message.
+Replies triggered from voice STT follow this mode as well.
 
 ## 2. Permission Configuration (acl.toml)
 
