@@ -34,10 +34,6 @@ impl Skill for PokeClient {
         })? as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
-        if clid == ctx.caller_id {
-            return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
-        }
-
         ctx.adapter.send_raw(&cmd_poke(clid, msg)).await?;
         Ok(json!({"status": "ok", "message": "Poke sent"}))
     }
@@ -145,9 +141,6 @@ impl Skill for SendMessage {
                         .replace("{param}", "clid"))
                 })? as u32;
 
-                if clid == ctx.caller_id {
-                    return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
-                }
                 (1, clid)
             }
             "channel" => (2, 0),
