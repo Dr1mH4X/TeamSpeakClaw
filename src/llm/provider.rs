@@ -36,6 +36,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone)]
 pub enum LlmStreamEvent {
     Token(String),
+    ToolCalls,
     Done,
 }
 
@@ -211,6 +212,11 @@ impl LlmProvider for OpenAiProvider {
                             let _ = tx
                                 .send(Ok(LlmStreamEvent::Token(content.to_string())))
                                 .await;
+                        }
+                    }
+                    if let Some(tool_calls) = event["choices"][0]["delta"]["tool_calls"].as_array() {
+                        if !tool_calls.is_empty() {
+                            let _ = tx.send(Ok(LlmStreamEvent::ToolCalls)).await;
                         }
                     }
                     if event["choices"][0]["finish_reason"].is_string() {

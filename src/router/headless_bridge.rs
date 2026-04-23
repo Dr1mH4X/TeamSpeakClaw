@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
@@ -530,6 +531,9 @@ impl HeadlessLlmBridge {
                 LlmStreamEvent::Token(token) => {
                     reply.push_str(&token);
                 }
+                LlmStreamEvent::ToolCalls => {
+                    return Err(anyhow!("collect_stream_reply got unexpected tool_calls"));
+                }
                 LlmStreamEvent::Done => {
                     break;
                 }
@@ -551,6 +555,15 @@ impl HeadlessLlmBridge {
             return Err(anyhow!("speech provider unavailable"));
         };
 
+        if Self::OBS_LLM {
+            info!(
+                event = "headless.llm.stream_start",
+                messages_count = messages.len(),
+                tools_count = tools.len(),
+                "stream tts: llm request started"
+            );
+        }
+
         let mut stream = self.llm.chat_stream(messages, tools).await?;
         let trace_id = format!(
             "tts-stream-{}",
@@ -560,6 +573,9 @@ impl HeadlessLlmBridge {
                 .as_millis()
         );
         let (tx, rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+        let first_token_time = Arc::new(AtomicI64::new(0));
+        let first_token_time_clone = first_token_time.clone();
+        let start_time = std::time::Instant::now();
 
         let send_fut = async {
             let mut reply = String::new();
@@ -574,11 +590,23 @@ impl HeadlessLlmBridge {
                         if token.is_empty() {
                             continue;
                         }
+                        if first_token_time_clone.load(Ordering::Relaxed) == 0 {
+                            let elapsed = start_time.elapsed().as_millis() as i64;
+                            first_token_time_clone.store(elapsed, Ordering::Relaxed);
+                            if Self::OBS_LLM {
+                                info!(event = "headless.llm.first_token", latency_ms = elapsed, "first token received");
+                            }
+                        }
                         reply.push_str(&token);
                         for segment in chunker.push_token(&token) {
                             self.enqueue_tts_segment(&tx, speech_provider, &trace_id, &segment)
                                 .await?;
                         }
+                    }
+                    LlmStreamEvent::ToolCalls => {
+                        warn!("stream_tts: llm returned tool_calls, aborting stream");
+                        drop(tx);
+                        return Err(anyhow!("streaming aborted due to tool_calls"));
                     }
                     LlmStreamEvent::Done => break,
                 }
@@ -589,6 +617,16 @@ impl HeadlessLlmBridge {
             }
             if reply.trim().is_empty() {
                 return Err(anyhow!("llm stream returned empty reply"));
+            }
+            let total_time = start_time.elapsed().as_millis() as i64;
+            if Self::OBS_LLM {
+                info!(
+                    event = "headless.llm.stream_end",
+                    total_ms = total_time,
+                    first_token_ms = first_token_time_clone.load(Ordering::Relaxed),
+                    reply_len = reply.chars().count(),
+                    "stream tts: llm reply completed"
+                );
             }
             tx.send(voicev1::TtsAudioChunk {
                 payload: vec![],
@@ -614,6 +652,18 @@ impl HeadlessLlmBridge {
         Ok(reply)
     }
 
+    fn detect_audio_format(data: &[u8]) -> &'static str {
+        if data.len() >= 4 && &data[0..4] == b"RIFF" {
+            "wav"
+        } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+            "mp3"
+        } else if data.len() >= 1 && data[0] == 0xFF {
+            "mp3"
+        } else {
+            "mp3"
+        }
+    }
+
     async fn enqueue_tts_segment(
         &self,
         tx: &mpsc::Sender<voicev1::TtsAudioChunk>,
@@ -622,10 +672,11 @@ impl HeadlessLlmBridge {
         segment: &str,
     ) -> Result<()> {
         let audio = speech_provider.synthesize(segment).await?;
+        let codec = Self::detect_audio_format(&audio);
         for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
             tx.send(voicev1::TtsAudioChunk {
                 payload: payload.to_vec(),
-                codec: "mp3".to_string(),
+                codec: codec.to_string(),
                 end_of_stream: false,
                 trace_id: trace_id.to_string(),
             })
@@ -674,10 +725,11 @@ impl HeadlessLlmBridge {
         let send_fut = async {
             for segment in segments {
                 let audio = speech_provider.synthesize(&segment).await?;
+                let codec = Self::detect_audio_format(&audio);
                 for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
                     tx.send(voicev1::TtsAudioChunk {
                         payload: payload.to_vec(),
-                        codec: "mp3".to_string(),
+                        codec: codec.to_string(),
                         end_of_stream: false,
                         trace_id: trace_id.clone(),
                     })
