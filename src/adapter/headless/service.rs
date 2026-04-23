@@ -19,6 +19,7 @@ use super::playback::playback_loop;
 use super::serverquery::{
     serverquery_set_client_description, ts3_escape_value, ServerQueryRuntimeConfig,
 };
+use super::speech::detect_audio_format;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::{emit_log, emit_playback, PersistedVoiceState, SharedStatus};
 use voicev1::voice_service_server::VoiceService;
@@ -111,22 +112,9 @@ impl Drop for ChildKillOnDrop {
     }
 }
 
-fn detect_audio_format(data: &[u8]) -> &'static str {
-    if data.len() >= 4 && &data[0..4] == b"RIFF" {
-        "wav"
-    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
-        "mp3"
-    } else if data.len() >= 1 && data[0] == 0xFF {
-        "mp3"
-    } else {
-        "mp3"
-    }
-}
-
 async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
-    cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let first_chunk = match stream.message().await.context("recv first tts chunk failed")? {
         Some(chunk) => chunk,
@@ -186,7 +174,6 @@ async fn stream_tts_audio_loop(
         .and_then(|c| c.stdout.take())
         .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
 
-    let writer_cancel = cancel.clone();
     let writer_task = tokio::spawn(async move {
         let mut saw_eos = first_chunk.end_of_stream;
         if !first_chunk.payload.is_empty() {
@@ -209,9 +196,6 @@ async fn stream_tts_audio_loop(
             }
             if chunk.end_of_stream {
                 saw_eos = true;
-                break;
-            }
-            if writer_cancel.is_cancelled() {
                 break;
             }
         }
@@ -238,9 +222,6 @@ async fn stream_tts_audio_loop(
     .map_err(|e| anyhow!("opus encoder init failed: {e}"))?;
 
     loop {
-        if cancel.is_cancelled() {
-            break;
-        }
         match stdout.read_exact(&mut pcm).await {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
@@ -597,9 +578,8 @@ impl VoiceService for VoiceServiceImpl {
             "",
         );
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result =
-            stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone(), cancel).await;
+            stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone()).await;
 
         match result {
             Ok(()) => {

@@ -11,9 +11,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+#[derive(Debug, thiserror::Error)]
+#[error("headless tool loop reached max turns")]
+struct HeadlessToolLoopTimeoutError;
+
 use crate::adapter::headless::speech::{
-    pcm16_mono_to_wav_bytes, preprocess_stt_text, preprocess_text_message, OpenAiSpeechProvider,
-    OpusSttPipeline,
+    detect_audio_format, pcm16_mono_to_wav_bytes, preprocess_stt_text,
+    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
@@ -345,9 +349,7 @@ impl HeadlessLlmBridge {
         } {
             Ok(reply) => reply,
             Err(e) => {
-                if e.to_string()
-                    .contains("headless tool loop reached max turns")
-                {
+                if e.downcast_ref::<HeadlessToolLoopTimeoutError>().is_some() {
                     let _ = self.send_reply(client, &ctx, "操作超时，请稍后再试").await;
                     return Ok(());
                 }
@@ -502,7 +504,7 @@ impl HeadlessLlmBridge {
             }
         }
 
-        Err(anyhow!("headless tool loop reached max turns"))
+        Err(HeadlessToolLoopTimeoutError.into())
     }
 
     fn build_llm_request(&self, ctx: &CallerContext, user_msg: String) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
@@ -652,18 +654,6 @@ impl HeadlessLlmBridge {
         Ok(reply)
     }
 
-    fn detect_audio_format(data: &[u8]) -> &'static str {
-        if data.len() >= 4 && &data[0..4] == b"RIFF" {
-            "wav"
-        } else if data.len() >= 3 && &data[0..3] == b"ID3" {
-            "mp3"
-        } else if data.len() >= 1 && data[0] == 0xFF {
-            "mp3"
-        } else {
-            "mp3"
-        }
-    }
-
     async fn enqueue_tts_segment(
         &self,
         tx: &mpsc::Sender<voicev1::TtsAudioChunk>,
@@ -672,7 +662,7 @@ impl HeadlessLlmBridge {
         segment: &str,
     ) -> Result<()> {
         let audio = speech_provider.synthesize(segment).await?;
-        let codec = Self::detect_audio_format(&audio);
+        let codec = detect_audio_format(&audio);
         for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
             tx.send(voicev1::TtsAudioChunk {
                 payload: payload.to_vec(),
@@ -725,7 +715,7 @@ impl HeadlessLlmBridge {
         let send_fut = async {
             for segment in segments {
                 let audio = speech_provider.synthesize(&segment).await?;
-                let codec = Self::detect_audio_format(&audio);
+                let codec = detect_audio_format(&audio);
                 for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
                     tx.send(voicev1::TtsAudioChunk {
                         payload: payload.to_vec(),

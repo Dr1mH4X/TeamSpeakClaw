@@ -212,12 +212,11 @@ impl OpenAiSpeechProvider {
             "sending stt request"
         );
 
+        let api_key = fallback_str(&stt.api_key, &self.config.llm.api_key);
+
         let mut form = Form::new();
         if !stt.model.is_empty() {
             form = form.text("model", stt.model.clone());
-        }
-        if !stt.api_key.is_empty() {
-            form = form.text("token", stt.api_key.clone());
         }
         if !stt.language.is_empty() {
             form = form.text("language", stt.language.clone());
@@ -230,7 +229,13 @@ impl OpenAiSpeechProvider {
                 .context("set wav mime failed")?,
         );
 
-        let resp = self.client.post(url).multipart(form).send().await?;
+        let resp = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .multipart(form)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(anyhow!("stt request failed: {err}"));
@@ -392,6 +397,18 @@ fn parse_stt_text(body: &str) -> String {
 
 fn is_openai_compatible_provider(provider: &str) -> bool {
     provider == "openai-compatibility" || provider == "openai"
+}
+
+pub fn detect_audio_format(data: &[u8]) -> &'static str {
+    if data.len() >= 4 && &data[0..4] == b"RIFF" {
+        "wav"
+    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+        "mp3"
+    } else if data.len() >= 1 && data[0] == 0xFF {
+        "mp3"
+    } else {
+        "mp3"
+    }
 }
 
 pub fn preprocess_stt_text(
