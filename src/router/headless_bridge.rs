@@ -591,10 +591,32 @@ impl HeadlessLlmBridge {
         ctx: &CallerContext,
     ) -> (String, String, Vec<serde_json::Value>) {
         let system_prompt = self.prompts.system.content.clone();
+
+        // Build online clients list for LLM context
+        let online_clients: Vec<_> = self
+            .ts_clients
+            .iter()
+            .map(|item| {
+                let c = item.value();
+                json!({
+                    "clid": c.clid,
+                    "nickname": c.nickname,
+                    "uid": c.cldbid,
+                    "groups": c.server_groups,
+                })
+            })
+            .collect();
+
         let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
-            ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
+            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})\nOnline clients: {}",
+            ctx.caller_name,
+            ctx.caller_uid,
+            ctx.caller_id,
+            ctx.groups,
+            ctx.channel_group_id,
+            serde_json::to_string(&online_clients).unwrap_or_default()
         );
+
         let allowed_skills = self
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
