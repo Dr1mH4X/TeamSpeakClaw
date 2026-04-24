@@ -9,7 +9,7 @@ use audiopus::coder::Encoder;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use tsproto_packets::packets::OutPacket;
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
@@ -115,7 +115,7 @@ pub async fn playback_loop(
     status: Arc<Mutex<SharedStatus>>,
 ) -> Result<()> {
     let playback_started = Instant::now();
-    info!(source_url = %source_url, "playback starting");
+    debug!(source_url = %source_url, "playback starting");
 
     let child = tokio::process::Command::new("ffmpeg")
         .arg("-nostdin")
@@ -150,7 +150,7 @@ pub async fn playback_loop(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                info!(source_url = %src, "ffmpeg: {line}");
+                debug!(source_url = %src, "ffmpeg: {line}");
             }
         });
     }
@@ -275,7 +275,7 @@ pub async fn playback_loop(
         if !logged_first_pcm {
             if !pcm_buf.is_empty() {
                 logged_first_pcm = true;
-                info!(source_url = %source_url, first_pcm_ms = %playback_started.elapsed().as_millis(), "first pcm frame received");
+                debug!(source_url = %source_url, first_pcm_ms = %playback_started.elapsed().as_millis(), "first pcm frame received");
             } else if playback_started.elapsed() >= Duration::from_secs(5) {
                 return Err(anyhow!("no pcm received from ffmpeg"));
             }
@@ -334,7 +334,7 @@ pub async fn playback_loop(
         }
 
         if underruns_total > 0 && underruns_total % 50 == 0 {
-            info!(underruns_total = %underruns_total, "playback underrun (sending silence frames to keep cadence)");
+            debug!(underruns_total = %underruns_total, "playback underrun (sending silence frames to keep cadence)");
         }
 
         let (vol, fx_pan, fx_width, fx_swap_lr, fx_bass_db, fx_reverb_mix) = {
@@ -471,7 +471,7 @@ pub async fn playback_loop(
                     "audio_encode_diag"
                 );
             } else {
-                info!(
+                debug!(
                     source_url = %source_url,
                     underruns_total = %underruns_total,
                     underruns_window = %underruns_window,
