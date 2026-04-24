@@ -10,6 +10,9 @@ pub struct LlmConfig {
     /// Enable omni-modal model support (voice input/output directly)
     #[serde(default)]
     pub omni_model: bool,
+    /// 最大上下文对话轮数（0 表示禁用上下文）
+    #[serde(default)]
+    pub max_context_turns: usize,
 }
 
 impl Default for LlmConfig {
@@ -20,6 +23,7 @@ impl Default for LlmConfig {
             model: "gpt-4o".to_string(),
             stream_output: false,
             omni_model: false,
+            max_context_turns: 0,
         }
     }
 }

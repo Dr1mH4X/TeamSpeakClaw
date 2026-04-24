@@ -53,8 +53,9 @@ server_id = 1
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-stream_output = false  # 流式输出：false 或 true（TTS快速响应)
+stream_output = false  # 流式输出：false 或 true（TTS快速响应）
 omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
+max_context_turns = 0  # 最大上下文对话轮数（0 表示禁用上下文）
 
 # 限流配置
 [rate_limit]
