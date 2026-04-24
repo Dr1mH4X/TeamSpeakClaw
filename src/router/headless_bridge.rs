@@ -1,8 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde_json::json;
@@ -16,8 +17,8 @@ use tracing::{error, info, warn};
 struct HeadlessToolLoopTimeoutError;
 
 use crate::adapter::headless::speech::{
-    detect_audio_format, pcm16_mono_to_wav_bytes, preprocess_stt_text,
-    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline,
+    detect_audio_format, pcm16_mono_to_wav_bytes, preprocess_stt_text, preprocess_text_message,
+    OpenAiSpeechProvider, OpusSttPipeline,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
@@ -48,7 +49,7 @@ pub struct HeadlessLlmBridge {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
-    stt_pipeline: Mutex<Option<OpusSttPipeline>>,
+    audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<OpenAiSpeechProvider>,
 }
 
@@ -73,8 +74,10 @@ impl HeadlessLlmBridge {
         ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
         let speech_provider = OpenAiSpeechProvider::new(config.clone()).ok();
+        // Create audio pipeline if STT is enabled OR omni_model is true (needs audio framing)
+        let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
-            stt_pipeline: Mutex::new(config.headless.stt.enabled.then(OpusSttPipeline::new)),
+            audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
             prompts,
             gate,
@@ -86,6 +89,11 @@ impl HeadlessLlmBridge {
         }
     }
 
+    /// Check if TTS is effectively enabled (disabled when omni_model is true)
+    fn is_tts_effectively_enabled(&self) -> bool {
+        !self.config.llm.omni_model && self.config.headless.tts.enabled
+    }
+
     pub async fn run(self) -> Result<()> {
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
@@ -95,7 +103,7 @@ impl HeadlessLlmBridge {
             include_chat: true,
             include_playback: false,
             include_log: true,
-            include_audio: self.config.headless.stt.enabled,
+            include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
 
         let mut stream = client.subscribe_events(req).await?.into_inner();
@@ -277,8 +285,13 @@ impl HeadlessLlmBridge {
             return Ok(());
         }
 
+        // Omni model: skip STT, send audio directly to LLM
+        if self.config.llm.omni_model {
+            return self.handle_omni_audio_event(client, audio).await;
+        }
+
         let chunk = {
-            let mut guard = self.stt_pipeline.lock().await;
+            let mut guard = self.audio_pipeline.lock().await;
             let Some(pipeline) = guard.as_mut() else {
                 return Ok(());
             };
@@ -318,6 +331,48 @@ impl HeadlessLlmBridge {
         self.handle_user_input(client, ctx, text, "voice").await
     }
 
+    /// Handle audio event for omni models (skip STT, send audio directly to LLM)
+    async fn handle_omni_audio_event(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        audio: voicev1::AudioFrameEvent,
+    ) -> Result<()> {
+        let chunk = {
+            let mut guard = self.audio_pipeline.lock().await;
+            let Some(pipeline) = guard.as_mut() else {
+                warn!(
+                    event = "headless.omni.no_pipeline",
+                    "omni model: audio pipeline not available, dropping audio frame"
+                );
+                return Ok(());
+            };
+            pipeline.process_audio_frame(&audio)?
+        };
+
+        let Some(chunk) = chunk else {
+            return Ok(());
+        };
+
+        // Convert audio to WAV and base64 encode
+        let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
+        let audio_base64 = BASE64.encode(&wav_bytes);
+        let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
+
+        let mut ctx = self.resolve_caller_from_audio(&audio);
+        ctx.caller_name = chunk.speaker_name;
+
+        info!(
+            event = "headless.omni.audio_input",
+            speaker = %ctx.caller_name,
+            clid = ctx.caller_id,
+            audio_size = wav_bytes.len(),
+            "omni model: sending audio directly to LLM"
+        );
+
+        self.handle_omni_user_input(client, ctx, audio_data, "voice")
+            .await
+    }
+
     async fn handle_user_input(
         &self,
         client: &mut VoiceServiceClient<Channel>,
@@ -325,7 +380,8 @@ impl HeadlessLlmBridge {
         user_msg: String,
         source: &str,
     ) -> Result<()> {
-        if self.config.headless.tts.enabled {
+        // Stop TTS if effectively enabled (considers omni_model)
+        if self.is_tts_effectively_enabled() {
             let _ = client.stop(tonic::Request::new(voicev1::Empty {})).await;
         }
 
@@ -341,9 +397,11 @@ impl HeadlessLlmBridge {
             );
         }
 
-        let stream_tts_enabled = self.config.headless.tts.enabled && self.config.llm.stream_output;
+        let stream_tts_enabled = self.is_tts_effectively_enabled() && self.config.llm.stream_output;
+
         let reply = match if stream_tts_enabled {
-            self.run_llm_chain_streaming_tts(client, &ctx, user_msg).await
+            self.run_llm_chain_streaming_tts(client, &ctx, user_msg)
+                .await
         } else {
             self.run_llm_chain(&ctx, user_msg).await
         } {
@@ -358,7 +416,7 @@ impl HeadlessLlmBridge {
         };
         if !reply.trim().is_empty() {
             self.send_reply(client, &ctx, &reply).await?;
-            if self.config.headless.tts.enabled && !stream_tts_enabled {
+            if self.is_tts_effectively_enabled() && !stream_tts_enabled {
                 if let Err(e) = self.speak_reply(client, &reply).await {
                     warn!("tts playback failed, fallback text only: {e}");
                 }
@@ -385,8 +443,12 @@ impl HeadlessLlmBridge {
         }
 
         let reply = self.run_llm_chain(ctx, user_msg).await?;
-        if !reply.trim().is_empty() && self.config.headless.tts.enabled {
-            info!(event = "headless.tts.fallback", reply_len = reply.chars().count(), "fallback to non-streaming tts");
+        if !reply.trim().is_empty() && self.is_tts_effectively_enabled() {
+            info!(
+                event = "headless.tts.fallback",
+                reply_len = reply.chars().count(),
+                "fallback to non-streaming tts"
+            );
             if let Err(e) = self.speak_reply(client, &reply).await {
                 warn!(%e, "fallback tts playback failed, will send text only");
             }
@@ -395,7 +457,29 @@ impl HeadlessLlmBridge {
     }
 
     async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
-        let (mut messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, content) = self.execute_llm_with_tools(ctx, messages, tools).await?;
+
+        if let Some(content) = content {
+            return Ok(content);
+        }
+
+        // Try stream reply if no content from chat
+        let stream_reply = self.collect_stream_reply(messages.clone()).await?;
+        if !stream_reply.trim().is_empty() {
+            return Ok(stream_reply);
+        }
+        Err(anyhow!("empty llm response"))
+    }
+
+    /// Shared LLM execution with tool loop
+    /// Returns (messages, content) where content is Some if LLM returned content without tool calls
+    async fn execute_llm_with_tools(
+        &self,
+        ctx: &CallerContext,
+        mut messages: Vec<serde_json::Value>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
         let max_turns = self.config.bot.max_tool_turns;
 
         for turn in 0..max_turns {
@@ -409,7 +493,7 @@ impl HeadlessLlmBridge {
                 );
             }
 
-            let mut response = match self.llm.chat(messages.clone(), tools.clone()).await {
+            let response = match self.llm.chat(messages.clone(), tools.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
                     error!(
@@ -438,20 +522,11 @@ impl HeadlessLlmBridge {
             }
 
             if response.tool_calls.is_empty() {
-                if let Some(content) = response
-                    .content
-                    .take()
-                    .filter(|content| !content.trim().is_empty())
-                {
-                    return Ok(content);
-                }
-                let stream_reply = self.collect_stream_reply(messages.clone()).await?;
-                if !stream_reply.trim().is_empty() {
-                    return Ok(stream_reply);
-                }
-                return Err(anyhow!("empty llm response"));
+                let content = response.content.filter(|c| !c.trim().is_empty());
+                return Ok((messages, content));
             }
 
+            // Build assistant tool calls JSON
             let assistant_tool_calls: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -510,8 +585,12 @@ impl HeadlessLlmBridge {
         Err(HeadlessToolLoopTimeoutError.into())
     }
 
-    fn build_llm_request(&self, ctx: &CallerContext, user_msg: String) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-        let system_prompt = &self.prompts.system.content;
+    /// Shared helper: build system prompt, user context, and tools
+    fn build_llm_base_context(
+        &self,
+        ctx: &CallerContext,
+    ) -> (String, String, Vec<serde_json::Value>) {
+        let system_prompt = self.prompts.system.content.clone();
         let user_ctx = format!(
             "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
             ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
@@ -520,12 +599,82 @@ impl HeadlessLlmBridge {
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
+        (system_prompt, user_ctx, tools)
+    }
+
+    fn build_llm_request(
+        &self,
+        ctx: &CallerContext,
+        user_msg: String,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
         let messages = vec![
             json!({"role":"system","content":system_prompt}),
             json!({"role":"system","content":user_ctx}),
             json!({"role":"user","content":user_msg}),
         ];
         (messages, tools)
+    }
+
+    /// Build LLM request for omni models with audio input
+    fn build_omni_llm_request(
+        &self,
+        ctx: &CallerContext,
+        audio_data: String,
+        text_prompt: Option<String>,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
+
+        let mut content = vec![json!({
+            "type": "input_audio",
+            "input_audio": {
+                "data": audio_data
+            }
+        })];
+
+        if let Some(prompt) = text_prompt {
+            content.push(json!({
+                "type": "text",
+                "text": prompt
+            }));
+        }
+
+        let messages = vec![
+            json!({"role": "system", "content": system_prompt}),
+            json!({"role": "system", "content": user_ctx}),
+            json!({"role": "user", "content": content}),
+        ];
+        (messages, tools)
+    }
+
+    /// Handle user input for omni models (skip TTS, use audio input)
+    async fn handle_omni_user_input(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        ctx: CallerContext,
+        audio_data: String,
+        source: &str,
+    ) -> Result<()> {
+        if Self::OBS_CHAT {
+            info!(
+                event = "headless.omni.user_input",
+                source = source,
+                invoker = %ctx.caller_name,
+                uid = %ctx.caller_uid,
+                clid = ctx.caller_id,
+                "omni model: processing audio input"
+            );
+        }
+
+        let (messages, tools) = self.build_omni_llm_request(&ctx, audio_data, None);
+        let (_, content) = self.execute_llm_with_tools(&ctx, messages, tools).await?;
+
+        if let Some(content) = content {
+            self.send_reply(client, &ctx, &content).await?;
+            return Ok(());
+        }
+
+        Err(anyhow!("empty omni llm response"))
     }
 
     async fn collect_stream_reply(&self, messages: Vec<serde_json::Value>) -> Result<String> {
@@ -599,7 +748,11 @@ impl HeadlessLlmBridge {
                             let elapsed = start_time.elapsed().as_millis() as i64;
                             first_token_time_clone.store(elapsed, Ordering::Relaxed);
                             if Self::OBS_LLM {
-                                info!(event = "headless.llm.first_token", latency_ms = elapsed, "first token received");
+                                info!(
+                                    event = "headless.llm.first_token",
+                                    latency_ms = elapsed,
+                                    "first token received"
+                                );
                             }
                         }
                         reply.push_str(&token);

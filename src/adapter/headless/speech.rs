@@ -284,7 +284,10 @@ impl OpenAiSpeechProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
-            error!("tts unavailable: request failed with status {}: {}", status, err);
+            error!(
+                "tts unavailable: request failed with status {}: {}",
+                status, err
+            );
             return Err(anyhow!("tts request failed: status {} - {}", status, err));
         }
 
@@ -483,7 +486,10 @@ fn normalize_text(raw: &str) -> String {
 }
 
 fn skip_punct_and_whitespace(input: &str) -> &str {
-    let cjk_punct = ['，', '。', '！', '？', '；', '：', '、', '—', '…', '（', '）', '【', '】', '《', '》', '“', '”', '‘', '’'];
+    let cjk_punct = [
+        '，', '。', '！', '？', '；', '：', '、', '—', '…', '（', '）', '【', '】', '《', '》',
+        '“', '”', '‘', '’',
+    ];
     input.trim_start_matches(|c: char| {
         c.is_whitespace() || c.is_ascii_punctuation() || cjk_punct.contains(&c)
     })
