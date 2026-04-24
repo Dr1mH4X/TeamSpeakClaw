@@ -441,7 +441,7 @@ impl HeadlessLlmBridge {
             Ok(reply) => {
                 let ctx_window = self.config.llm.context_window as usize;
                 self.history
-                    .save_turn(ctx.caller_id, &user_msg, &reply, ctx_window);
+                    .save_turn(ctx.caller_id as i64, &user_msg, &reply, ctx_window);
                 return Ok(reply);
             }
             Err(e) => {
@@ -470,7 +470,7 @@ impl HeadlessLlmBridge {
         if let Some(content) = content {
             let ctx_window = self.config.llm.context_window as usize;
             self.history
-                .save_turn(ctx.caller_id, &user_msg, &content, ctx_window);
+                .save_turn(ctx.caller_id as i64, &user_msg, &content, ctx_window);
             return Ok(content);
         }
 
@@ -479,7 +479,7 @@ impl HeadlessLlmBridge {
         if !stream_reply.trim().is_empty() {
             let ctx_window = self.config.llm.context_window as usize;
             self.history
-                .save_turn(ctx.caller_id, &user_msg, &stream_reply, ctx_window);
+                .save_turn(ctx.caller_id as i64, &user_msg, &stream_reply, ctx_window);
             return Ok(stream_reply);
         }
         Err(anyhow!("empty llm response"))
@@ -595,8 +595,8 @@ impl HeadlessLlmBridge {
             }
         }
 
-        // Handle timeout: save truncated content if available
-        // Note: This path is reached when max_turns exceeded without final content
+        // Handle timeout: no final content was produced within the max turn limit.
+        // We currently do not persist partial content on timeout; just propagate the error.
         Err(HeadlessToolLoopTimeoutError.into())
     }
 
@@ -650,8 +650,10 @@ impl HeadlessLlmBridge {
             json!({"role":"system","content":user_ctx}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
-        for msg in self.history.get_history(ctx.caller_id, ctx_window) {
-            messages.push(msg);
+        if ctx_window > 0 {
+            for msg in self.history.get_history(ctx.caller_id as i64, ctx_window) {
+                messages.push(msg);
+            }
         }
         messages.push(json!({"role":"user","content":user_msg}));
         (messages, tools)
@@ -685,8 +687,10 @@ impl HeadlessLlmBridge {
             json!({"role": "system", "content": user_ctx}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
-        for msg in self.history.get_history(ctx.caller_id, ctx_window) {
-            messages.push(msg);
+        if ctx_window > 0 {
+            for msg in self.history.get_history(ctx.caller_id as i64, ctx_window) {
+                messages.push(msg);
+            }
         }
         messages.push(json!({"role": "user", "content": content}));
         (messages, tools)
@@ -717,7 +721,7 @@ impl HeadlessLlmBridge {
         if let Some(content) = content {
             let ctx_window = self.config.llm.context_window as usize;
             self.history
-                .save_turn(ctx.caller_id, "[audio]", &content, ctx_window);
+                .save_turn(ctx.caller_id as i64, "[audio]", &content, ctx_window);
             self.send_reply(client, &ctx, &content).await?;
             return Ok(());
         }

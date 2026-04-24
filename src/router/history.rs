@@ -7,15 +7,19 @@ use std::sync::Arc;
 /// 因此实际保留消息数 = min(ctx_window * 2, MAX_HISTORY_MSGS)。
 const MAX_HISTORY_MSGS: usize = 20;
 
+/// 最大追踪客户端数量，防止内存无限增长。
+const MAX_CLIENTS: usize = 1000;
+
 /// 共享的每客户端对话历史管理器。
 ///
 /// 统一语义：
 /// - `context_window` 代表保留的对话轮数（每轮包含 user + assistant 各一条消息）
 /// - 每次保存完整轮次，避免重复追加
 /// - 自动截断超出上限的旧消息
+/// - 当客户端数量超过 MAX_CLIENTS 时，自动清理最早的客户端
 #[derive(Clone)]
 pub struct ChatHistory {
-    store: Arc<DashMap<u32, Vec<serde_json::Value>>>,
+    store: Arc<DashMap<i64, Vec<serde_json::Value>>>,
 }
 
 impl ChatHistory {
@@ -28,7 +32,7 @@ impl ChatHistory {
     /// 获取指定客户端的历史消息，用于构建 LLM 上下文。
     ///
     /// 返回最近 `ctx_window * 2` 条消息（不超过 `MAX_HISTORY_MSGS`）。
-    pub fn get_history(&self, client_id: u32, ctx_window: usize) -> Vec<serde_json::Value> {
+    pub fn get_history(&self, client_id: i64, ctx_window: usize) -> Vec<serde_json::Value> {
         if ctx_window == 0 {
             return Vec::new();
         }
@@ -49,13 +53,28 @@ impl ChatHistory {
     /// 这避免了重复追加历史消息的问题。
     pub fn save_turn(
         &self,
-        client_id: u32,
+        client_id: i64,
         user_msg: &str,
         assistant_msg: &str,
         ctx_window: usize,
     ) {
         if ctx_window == 0 {
             return;
+        }
+
+        // 当客户端数量超过上限时，清理部分最早的客户端
+        if self.store.len() >= MAX_CLIENTS {
+            // 移除 10% 的客户端（至少移除 1 个）
+            let remove_count = (MAX_CLIENTS / 10).max(1);
+            let keys: Vec<i64> = self
+                .store
+                .iter()
+                .take(remove_count)
+                .map(|e| *e.key())
+                .collect();
+            for key in keys {
+                self.store.remove(&key);
+            }
         }
 
         let mut hist = self.store.entry(client_id).or_default();

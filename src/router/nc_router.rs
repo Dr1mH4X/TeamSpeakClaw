@@ -422,10 +422,11 @@ impl NcRouter {
             json!({"role": "system", "content": user_ctx}),
         ];
 
-        let session_key = user_id.unsigned_abs() as u32;
         let ctx_window = self.config.llm.context_window as usize;
-        for msg in self.history.get_history(session_key, ctx_window) {
-            messages.push(msg);
+        if ctx_window > 0 {
+            for msg in self.history.get_history(user_id, ctx_window) {
+                messages.push(msg);
+            }
         }
         messages.push(json!({"role": "user", "content": user_msg}));
 
@@ -441,7 +442,7 @@ impl NcRouter {
                         let content = response.content.clone().unwrap_or_default();
                         info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
                         self.history
-                            .save_turn(session_key, user_msg, &content, ctx_window);
+                            .save_turn(user_id, user_msg, &content, ctx_window);
                         return content;
                     }
 

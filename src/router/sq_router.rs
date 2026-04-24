@@ -320,7 +320,10 @@ impl EventRouter {
         // 注入对话历史（如果启用）
         let ctx_window = self.config.llm.context_window as usize;
         if ctx_window > 0 {
-            for msg in self.history.get_history(event.invoker_id, ctx_window) {
+            for msg in self
+                .history
+                .get_history(event.invoker_id as i64, ctx_window)
+            {
                 messages.push(msg);
             }
         }
@@ -347,7 +350,7 @@ impl EventRouter {
                                 .send_raw(&cmd_send_text(reply_mode, reply_target, content))
                                 .await;
                             self.history.save_turn(
-                                event.invoker_id,
+                                event.invoker_id as i64,
                                 msg_content,
                                 content,
                                 ctx_window,
