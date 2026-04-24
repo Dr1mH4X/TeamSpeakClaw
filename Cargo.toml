@@ -46,6 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
 audiopus = "0.3.0-rc.0"
 md5 = "0.7"
+base64 = "0.22"
 prost = "0.12"
 prost-types = "0.12"
 tonic = "0.11"
