@@ -13,6 +13,13 @@ pub struct LlmConfig {
     /// 最大上下文对话轮数（0 表示禁用上下文）
     #[serde(default)]
     pub max_context_turns: usize,
+    /// 最大会话数（0 表示不限制）
+    #[serde(default = "default_max_context_sessions")]
+    pub max_context_sessions: usize,
+}
+
+fn default_max_context_sessions() -> usize {
+    1000
 }
 
 impl Default for LlmConfig {
@@ -24,6 +31,7 @@ impl Default for LlmConfig {
             stream_output: false,
             omni_model: false,
             max_context_turns: 0,
+            max_context_sessions: 1000,
         }
     }
 }

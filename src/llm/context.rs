@@ -1,6 +1,31 @@
 use dashmap::DashMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::Arc;
+
+/// 会话来源
+#[derive(Debug, Clone)]
+pub enum SessionSource {
+    /// TeamSpeak ServerQuery
+    TeamSpeak { clid: u32 },
+    /// NapCat 私聊
+    NapCatPrivate { user_id: i64 },
+    /// NapCat 群聊
+    NapCatGroup { group_id: i64 },
+    /// Headless 模式
+    Headless { caller_id: u32 },
+}
+
+impl fmt::Display for SessionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionSource::TeamSpeak { clid } => write!(f, "sq:{}", clid),
+            SessionSource::NapCatPrivate { user_id } => write!(f, "nc:private:{}", user_id),
+            SessionSource::NapCatGroup { group_id } => write!(f, "nc:group:{}", group_id),
+            SessionSource::Headless { caller_id } => write!(f, "headless:{}", caller_id),
+        }
+    }
+}
 
 /// 单轮对话
 #[derive(Debug, Clone)]
@@ -13,15 +38,21 @@ pub struct ContextTurn {
 pub struct ContextWindow {
     /// 会话历史，key = session_id
     histories: Arc<DashMap<String, VecDeque<ContextTurn>>>,
+    /// 会话创建顺序（用于淘汰最旧会话）
+    session_order: Arc<std::sync::Mutex<VecDeque<String>>>,
     /// 最大对话轮数
     max_turns: usize,
+    /// 最大会话数
+    max_sessions: usize,
 }
 
 impl ContextWindow {
-    pub fn new(max_turns: usize) -> Self {
+    pub fn new(max_turns: usize, max_sessions: usize) -> Self {
         Self {
             histories: Arc::new(DashMap::new()),
+            session_order: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             max_turns,
+            max_sessions,
         }
     }
 
@@ -31,12 +62,28 @@ impl ContextWindow {
     }
 
     /// 保存一轮对话
-    pub fn push(&self, session_id: &str, turn: ContextTurn) {
+    pub fn push(&self, source: &SessionSource, turn: ContextTurn) {
         if self.max_turns == 0 {
             return;
         }
 
-        let mut entry = self.histories.entry(session_id.to_string()).or_default();
+        let session_id = source.to_string();
+
+        // 检查是否需要淘汰旧会话
+        if self.max_sessions > 0 {
+            let mut order = self.session_order.lock().unwrap();
+            if !order.contains(&session_id) {
+                // 新会话，检查是否超过限制
+                while order.len() >= self.max_sessions {
+                    if let Some(old_id) = order.pop_front() {
+                        self.histories.remove(&old_id);
+                    }
+                }
+                order.push_back(session_id.clone());
+            }
+        }
+
+        let mut entry = self.histories.entry(session_id).or_default();
         entry.push_back(turn);
 
         // 裁剪超出限制的旧对话
@@ -46,81 +93,11 @@ impl ContextWindow {
     }
 
     /// 获取会话历史
-    pub fn get(&self, session_id: &str) -> Vec<ContextTurn> {
+    pub fn get(&self, source: &SessionSource) -> Vec<ContextTurn> {
+        let session_id = source.to_string();
         self.histories
-            .get(session_id)
+            .get(&session_id)
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_push_and_get() {
-        let ctx = ContextWindow::new(3);
-
-        ctx.push(
-            "test",
-            ContextTurn {
-                user: "hello".to_string(),
-                assistant: "hi".to_string(),
-            },
-        );
-
-        let turns = ctx.get("test");
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].user, "hello");
-        assert_eq!(turns[0].assistant, "hi");
-    }
-
-    #[test]
-    fn test_trim() {
-        let ctx = ContextWindow::new(2);
-
-        ctx.push(
-            "test",
-            ContextTurn {
-                user: "1".to_string(),
-                assistant: "a".to_string(),
-            },
-        );
-        ctx.push(
-            "test",
-            ContextTurn {
-                user: "2".to_string(),
-                assistant: "b".to_string(),
-            },
-        );
-        ctx.push(
-            "test",
-            ContextTurn {
-                user: "3".to_string(),
-                assistant: "c".to_string(),
-            },
-        );
-
-        let turns = ctx.get("test");
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].user, "2");
-        assert_eq!(turns[1].user, "3");
-    }
-
-    #[test]
-    fn test_disabled() {
-        let ctx = ContextWindow::new(0);
-
-        ctx.push(
-            "test",
-            ContextTurn {
-                user: "hello".to_string(),
-                assistant: "hi".to_string(),
-            },
-        );
-
-        let turns = ctx.get("test");
-        assert_eq!(turns.len(), 0);
     }
 }

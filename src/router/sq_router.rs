@@ -2,7 +2,7 @@ use crate::adapter::command::cmd_send_text;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{provider::ToolCall, LlmEngine};
+use crate::llm::{context::SessionSource, provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -304,16 +304,18 @@ impl EventRouter {
         };
 
         // 1. 准备上下文
-        let session_id = format!("sq:{}", event.invoker_id);
+        let source = SessionSource::TeamSpeak {
+            clid: event.invoker_id,
+        };
         let system_prompt = &self.prompts.system.content;
         let user_ctx = format!(
             "User: {} (clid: {}, groups: {:?}, channel_group: {})",
             event.invoker_name, event.invoker_id, groups, channel_group_id
         );
 
-        let mut messages =
-            self.llm
-                .build_messages(&session_id, system_prompt, &user_ctx, msg_content);
+        let mut messages = self
+            .llm
+            .build_messages(&source, system_prompt, &user_ctx, msg_content);
 
         // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
@@ -331,11 +333,8 @@ impl EventRouter {
                         if let Some(content) = response.content {
                             info!("[SQ] LLM final reply (turn {}): {}", turn + 1, content);
                             // 保存对话到上下文
-                            self.llm.save_turn(
-                                &session_id,
-                                msg_content.to_string(),
-                                content.clone(),
-                            );
+                            self.llm
+                                .save_turn(&source, msg_content.to_string(), content.clone());
                             let _ = self
                                 .adapter
                                 .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
