@@ -320,11 +320,12 @@ impl TsAdapter {
 
     /// 拉取当前在线客户端快照（用于启动阶段预热路由缓存）。
     pub async fn fetch_client_snapshot(&self) -> Result<Vec<ClientEnterEvent>> {
+        debug!("fetch_client_snapshot: sending clientlist command");
         let response = self
             .send_query_internal("clientlist -uid -groups", true)
             .await?;
 
-        let clients = response
+        let clients: Vec<_> = response
             .lines()
             .flat_map(parse_events)
             .filter_map(|event| match event {
@@ -332,6 +333,11 @@ impl TsAdapter {
                 _ => None,
             })
             .collect();
+
+        info!(
+            "fetch_client_snapshot: returning {} clients",
+            clients.len()
+        );
 
         Ok(clients)
     }
@@ -381,11 +387,49 @@ impl TsAdapter {
                     error!("ServerQuery connection closed by remote");
                     break;
                 }
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                debug!("<< {trimmed}");
+
+                if trimmed.starts_with("error id=") {
+                    if trimmed.contains("id=0") {
+                        debug!("<< {trimmed}");
+                    } else {
+                        error!("TS3 Error: {trimmed}");
                     }
+                }
+
+                // 广播事件通知
+                debug!("reader_loop: received line: {}", trimmed);
+                
+                for event in parse_events(trimmed) {
+                    if let Err(e) = self.event_tx.send(event) {
+                        debug!("No active subscribers for event: {e}");
+                    }
+                }
+                debug!("<< {trimmed}");
+
+                if trimmed.starts_with("error id=") {
+                    if trimmed.contains("id=0") {
+                        debug!("<< {trimmed}");
+                    } else {
+                        error!("TS3 Error: {trimmed}");
+                    }
+                }
+
+                // 广播事件通知
+                let is_event = trimmed.starts_with("notify") || trimmed.starts_with("clid=");
+                if is_event {
+                    info!("reader_loop: received event line: {}", trimmed);
+                }
+                for event in parse_events(trimmed) {
+                    if let Err(e) = self.event_tx.send(event) {
+                        debug!("No active subscribers for event: {e}");
+                    }
+                }
                     debug!("<< {trimmed}");
 
                     if trimmed.starts_with("error id=") {
@@ -428,6 +472,11 @@ impl TsAdapter {
 
                     // error 行标志着当前查询响应结束
                     if trimmed.starts_with("error id=") {
+                        // 当 include_event_lines=true 时，延迟一小段时间等待可能延迟到达的数据行
+                        // 例如 clientlist 的数据行可能在 error 行之后才到达
+                        if self.include_event_lines_active.load(Ordering::Relaxed) {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
                         self.query_active.store(false, Ordering::Relaxed);
                         let mut q = self.query_tx.lock().await;
                         if let Some(tx) = q.take() {
