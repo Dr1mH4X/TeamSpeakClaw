@@ -214,7 +214,8 @@ impl LlmProvider for OpenAiProvider {
                                 .await;
                         }
                     }
-                    if let Some(tool_calls) = event["choices"][0]["delta"]["tool_calls"].as_array() {
+                    if let Some(tool_calls) = event["choices"][0]["delta"]["tool_calls"].as_array()
+                    {
                         if !tool_calls.is_empty() {
                             let _ = tx.send(Ok(LlmStreamEvent::ToolCalls)).await;
                         }
