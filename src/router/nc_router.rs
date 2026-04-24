@@ -421,7 +421,6 @@ impl NcRouter {
         let mut messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "system", "content": user_ctx}),
-            json!({"role": "user", "content": user_msg}),
         ];
 
         let session_key = user_id.unsigned_abs() as u32;
@@ -435,6 +434,7 @@ impl NcRouter {
                 }
             }
         }
+        messages.push(json!({"role": "user", "content": user_msg}));
 
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
@@ -505,9 +505,9 @@ impl NcRouter {
             return;
         }
         let mut hist = self.history.entry(session_key).or_default();
-        if hist.len() > Self::MAX_HISTORY_MSGS {
-            let keep = ctx_window * 2;
-            let drop_count = hist.len().saturating_sub(keep);
+        let keep = usize::min(ctx_window * 2, Self::MAX_HISTORY_MSGS);
+        if hist.len() > keep {
+            let drop_count = hist.len() - keep;
             hist.drain(..drop_count);
         }
         if let Some(content) = response_content {

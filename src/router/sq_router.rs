@@ -339,11 +339,10 @@ impl EventRouter {
         let max_turns = self.config.bot.max_tool_turns;
 
         // 3. 多轮 LLM 调用循环
-        let mut full_messages = messages.clone();
         for turn in 0..max_turns {
             debug!("[SQ] LLM turn {}/{}", turn + 1, max_turns);
 
-            match self.llm.chat(full_messages.clone(), tools.clone()).await {
+            match self.llm.chat(messages.clone(), tools.clone()).await {
                 Ok(response) => {
                     // 没有工具调用，发送最终内容
                     if response.tool_calls.is_empty() {
@@ -355,8 +354,8 @@ impl EventRouter {
                                 .await;
                         }
 
-                        // 保存对话历史
-                        self.save_history(event.invoker_id, &messages, &response, ctx_window);
+                        // 保存完整对话历史
+                        self.save_history(event.invoker_id, &messages, ctx_window);
                         return;
                     }
 
@@ -376,25 +375,23 @@ impl EventRouter {
                         })
                         .collect();
 
-                    let assistant_msg = json!({
+                    messages.push(json!({
                         "role": "assistant",
                         "content": response.content,
                         "tool_calls": assistant_tool_calls
-                    });
-                    full_messages.push(assistant_msg.clone());
+                    }));
 
                     // 执行所有工具调用
                     for call in &response.tool_calls {
                         let tool_result = self
                             .execute_skill(call, &event, &groups, channel_group_id)
                             .await;
-                        let tool_msg = json!({
+                        messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call.id,
                             "name": call.name,
                             "content": tool_result
-                        });
-                        full_messages.push(tool_msg);
+                        }));
                     }
 
                     // 继续下一轮
@@ -426,32 +423,27 @@ impl EventRouter {
             .await;
     }
 
-    fn save_history(
-        &self,
-        clid: u32,
-        _messages: &[serde_json::Value],
-        response: &crate::llm::provider::LlmResponse,
-        ctx_window: usize,
-    ) {
+    fn save_history(&self, clid: u32, messages: &[serde_json::Value], ctx_window: usize) {
         if ctx_window == 0 {
             return;
         }
 
         let mut hist = self.history.entry(clid).or_default();
 
-        // 保留最近的消息
-        if hist.len() > MAX_HISTORY_MSGS {
-            let keep = ctx_window * 2;
-            let drop_count = hist.len().saturating_sub(keep);
+        // 基于 ctx_window 和 MAX_HISTORY_MSGS 截断
+        let keep = usize::min(ctx_window * 2, MAX_HISTORY_MSGS);
+        if hist.len() > keep {
+            let drop_count = hist.len() - keep;
             hist.drain(..drop_count);
         }
 
-        // 保存 assistant 回复
-        if let Some(content) = &response.content {
-            hist.push(json!({
-                "role": "assistant",
-                "content": content
-            }));
+        // 保存完整的用户/assistant 对话轮次
+        for msg in messages {
+            if let Some(role) = msg.get("role").and_then(|v| v.as_str()) {
+                if role == "user" || role == "assistant" {
+                    hist.push(msg.clone());
+                }
+            }
         }
     }
 }

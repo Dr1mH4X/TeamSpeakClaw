@@ -603,9 +603,9 @@ impl HeadlessLlmBridge {
             return;
         }
         let mut hist = self.history.entry(clid).or_default();
-        if hist.len() > Self::MAX_HISTORY_MSGS {
-            let keep = ctx_window * 2;
-            let drop_count = hist.len().saturating_sub(keep);
+        let keep = usize::min(ctx_window * 2, Self::MAX_HISTORY_MSGS);
+        if hist.len() > keep {
+            let drop_count = hist.len() - keep;
             hist.drain(..drop_count);
         }
         if let Some(content) = response_content {
@@ -661,7 +661,6 @@ impl HeadlessLlmBridge {
         let mut messages = vec![
             json!({"role":"system","content":system_prompt}),
             json!({"role":"system","content":user_ctx}),
-            json!({"role":"user","content":user_msg}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
         if ctx_window > 0 {
@@ -673,6 +672,7 @@ impl HeadlessLlmBridge {
                 }
             }
         }
+        messages.push(json!({"role":"user","content":user_msg}));
         (messages, tools)
     }
 
@@ -702,7 +702,6 @@ impl HeadlessLlmBridge {
         let mut messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "system", "content": user_ctx}),
-            json!({"role": "user", "content": content}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
         if ctx_window > 0 {
@@ -714,6 +713,7 @@ impl HeadlessLlmBridge {
                 }
             }
         }
+        messages.push(json!({"role": "user", "content": content}));
         (messages, tools)
     }
 
