@@ -259,13 +259,21 @@ impl OpenAiSpeechProvider {
             error!("tts unavailable: tts disabled in config");
             return Err(anyhow!("tts disabled"));
         }
+
+        let api_key = fallback_str(&tts.api_key, &self.config.llm.api_key);
+
+        // MiMo TTS: uses /chat/completions with audio field
+        if tts.provider == "mimo" {
+            return self.synthesize_mimo(text, &api_key).await;
+        }
+
+        // OpenAI-compatible format
         if !is_openai_compatible_provider(&tts.provider) {
             error!("tts unavailable: unsupported provider {}", tts.provider);
             return Err(anyhow!("unsupported tts provider: {}", tts.provider));
         }
 
         let url = resolve_tts_url(&tts.base_url, &self.config.llm.base_url);
-        let api_key = fallback_str(&tts.api_key, &self.config.llm.api_key);
 
         let body = serde_json::json!({
             "model": tts.model.as_str(),
@@ -289,6 +297,58 @@ impl OpenAiSpeechProvider {
                 status, err
             );
             return Err(anyhow!("tts request failed: status {} - {}", status, err));
+        }
+
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// MiMo TTS: uses /chat/completions with messages + audio field
+    async fn synthesize_mimo(
+        &self,
+        text: &str,
+        api_key: &str,
+    ) -> Result<Vec<u8>> {
+        let tts = &self.config.headless.tts;
+        // Resolve URL: use base_url or fallback to llm.base_url
+        let base = if tts.base_url.is_empty() {
+            &self.config.llm.base_url
+        } else {
+            &tts.base_url
+        };
+        let base = base.trim_end_matches('/');
+        let url = format!("{}/chat/completions", base);
+
+        let body = serde_json::json!({
+            "model": tts.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            "audio": {
+                "format": "wav",
+                "voice": tts.voice
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err = resp.text().await.unwrap_or_default();
+            error!("mimo tts request failed with status {}: {}", status, err);
+            return Err(anyhow!(
+                "mimo tts request failed: status {} - {}",
+                status,
+                err
+            ));
         }
 
         Ok(resp.bytes().await?.to_vec())
