@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::llm::context::ContextWindow;
+use crate::llm::context::{ContextWindow, SessionSource};
 use crate::llm::provider::{LlmProvider, LlmResponse, LlmStreamEvent, OpenAiProvider};
 use anyhow::Result;
 use futures_util::stream::BoxStream;
@@ -15,7 +15,7 @@ impl LlmEngine {
     pub fn new(config: Arc<AppConfig>) -> Self {
         let cfg = &config;
         let provider = Box::new(OpenAiProvider::new(cfg.llm.clone()));
-        let context = ContextWindow::new(cfg.llm.max_context_turns);
+        let context = ContextWindow::new(cfg.llm.max_context_turns, cfg.llm.max_context_sessions);
         Self { provider, context }
     }
 
@@ -34,7 +34,7 @@ impl LlmEngine {
     /// 构建带历史上下文的 messages
     pub fn build_messages(
         &self,
-        session_id: &str,
+        source: &SessionSource,
         system_prompt: &str,
         user_ctx: &str,
         user_msg: &str,
@@ -46,7 +46,7 @@ impl LlmEngine {
 
         // 插入历史对话
         if self.context.is_enabled() {
-            let history = self.context.get(session_id);
+            let history = self.context.get(source);
             for turn in history {
                 messages.push(json!({"role": "user", "content": turn.user}));
                 messages.push(json!({"role": "assistant", "content": turn.assistant}));
@@ -60,10 +60,8 @@ impl LlmEngine {
     }
 
     /// 保存一轮对话到上下文
-    pub fn save_turn(&self, session_id: &str, user: String, assistant: String) {
-        self.context.push(
-            session_id,
-            crate::llm::context::ContextTurn { user, assistant },
-        );
+    pub fn save_turn(&self, source: &SessionSource, user: String, assistant: String) {
+        self.context
+            .push(source, crate::llm::context::ContextTurn { user, assistant });
     }
 }
