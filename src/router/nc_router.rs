@@ -405,17 +405,21 @@ impl NcRouter {
         let error_msg = self.prompts.error.llm_error.clone();
         let max_turns = self.config.bot.max_tool_turns;
 
+        // 生成 session_id
+        let session_id = match group_id {
+            Some(gid) => format!("nc:group:{}", gid),
+            None => format!("nc:private:{}", user_id),
+        };
+
         let system_prompt = &self.prompts.system.content;
         let user_ctx = match group_id {
             Some(gid) => format!("User: {} (QQ: {}, Group: {})", sender_name, user_id, gid),
             None => format!("User: {} (QQ: {}, Private Chat)", sender_name, user_id),
         };
 
-        let mut messages = vec![
-            json!({"role": "system", "content": system_prompt}),
-            json!({"role": "system", "content": user_ctx}),
-            json!({"role": "user", "content": user_msg}),
-        ];
+        let mut messages = self
+            .llm
+            .build_messages(&session_id, system_prompt, &user_ctx, user_msg);
 
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
@@ -428,6 +432,9 @@ impl NcRouter {
                     if response.tool_calls.is_empty() {
                         let content = response.content.unwrap_or_default();
                         info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
+                        // 保存对话到上下文
+                        self.llm
+                            .save_turn(&session_id, user_msg.to_string(), content.clone());
                         return content;
                     }
 

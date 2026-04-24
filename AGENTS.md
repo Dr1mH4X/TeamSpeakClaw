@@ -4,7 +4,7 @@
 
 - 构建: `cargo build --release`
 - 运行: `cargo run`
-- 测试: `cargo test`
+- 检查: `cargo check`
 - 格式化: `cargo fmt`
 - 清理构建: `cargo clean`
 

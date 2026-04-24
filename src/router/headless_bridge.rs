@@ -431,12 +431,17 @@ impl HeadlessLlmBridge {
         ctx: &CallerContext,
         user_msg: String,
     ) -> Result<String> {
-        let (messages, tools) = self.build_llm_request(ctx, user_msg.clone());
+        let (messages, tools, session_id) = self.build_llm_request(ctx, user_msg.clone());
         match self
             .collect_stream_reply_and_speak(client, messages, tools)
             .await
         {
-            Ok(reply) => return Ok(reply),
+            Ok(reply) => {
+                if !reply.trim().is_empty() {
+                    self.llm.save_turn(&session_id, user_msg, reply.clone());
+                }
+                return Ok(reply);
+            }
             Err(e) => {
                 warn!("streaming llm+tts fast path failed, fallback to normal chain: {e}");
             }
@@ -457,16 +462,19 @@ impl HeadlessLlmBridge {
     }
 
     async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
-        let (messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, tools, session_id) = self.build_llm_request(ctx, user_msg.clone());
         let (messages, content) = self.execute_llm_with_tools(ctx, messages, tools).await?;
 
         if let Some(content) = content {
+            self.llm.save_turn(&session_id, user_msg, content.clone());
             return Ok(content);
         }
 
         // Try stream reply if no content from chat
         let stream_reply = self.collect_stream_reply(messages.clone()).await?;
         if !stream_reply.trim().is_empty() {
+            self.llm
+                .save_turn(&session_id, user_msg, stream_reply.clone());
             return Ok(stream_reply);
         }
         Err(anyhow!("empty llm response"))
@@ -628,14 +636,13 @@ impl HeadlessLlmBridge {
         &self,
         ctx: &CallerContext,
         user_msg: String,
-    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, String) {
         let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
-        let messages = vec![
-            json!({"role":"system","content":system_prompt}),
-            json!({"role":"system","content":user_ctx}),
-            json!({"role":"user","content":user_msg}),
-        ];
-        (messages, tools)
+        let session_id = format!("headless:{}", ctx.caller_id);
+        let messages = self
+            .llm
+            .build_messages(&session_id, &system_prompt, &user_ctx, &user_msg);
+        (messages, tools, session_id)
     }
 
     /// Build LLM request for omni models with audio input
