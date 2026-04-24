@@ -74,8 +74,10 @@ impl HeadlessLlmBridge {
         ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
         let speech_provider = OpenAiSpeechProvider::new(config.clone()).ok();
+        // Create audio pipeline if STT is enabled OR omni_model is true (needs audio framing)
+        let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
-            stt_pipeline: Mutex::new(config.headless.stt.enabled.then(OpusSttPipeline::new)),
+            stt_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
             prompts,
             gate,
@@ -87,6 +89,11 @@ impl HeadlessLlmBridge {
         }
     }
 
+    /// Check if TTS is effectively enabled (disabled when omni_model is true)
+    fn is_tts_effectively_enabled(&self) -> bool {
+        !self.config.llm.omni_model && self.config.headless.tts.enabled
+    }
+
     pub async fn run(self) -> Result<()> {
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
@@ -96,7 +103,7 @@ impl HeadlessLlmBridge {
             include_chat: true,
             include_playback: false,
             include_log: true,
-            include_audio: self.config.headless.stt.enabled,
+            include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
 
         let mut stream = client.subscribe_events(req).await?.into_inner();
@@ -333,6 +340,10 @@ impl HeadlessLlmBridge {
         let chunk = {
             let mut guard = self.stt_pipeline.lock().await;
             let Some(pipeline) = guard.as_mut() else {
+                warn!(
+                    event = "headless.omni.no_pipeline",
+                    "omni model: audio pipeline not available, dropping audio frame"
+                );
                 return Ok(());
             };
             pipeline.process_audio_frame(&audio)?
@@ -369,8 +380,8 @@ impl HeadlessLlmBridge {
         user_msg: String,
         source: &str,
     ) -> Result<()> {
-        // Omni model: skip TTS entirely
-        if !self.config.llm.omni_model && self.config.headless.tts.enabled {
+        // Stop TTS if effectively enabled (considers omni_model)
+        if self.is_tts_effectively_enabled() {
             let _ = client.stop(tonic::Request::new(voicev1::Empty {})).await;
         }
 
@@ -386,12 +397,7 @@ impl HeadlessLlmBridge {
             );
         }
 
-        // Omni model: skip TTS
-        let stream_tts_enabled = if self.config.llm.omni_model {
-            false
-        } else {
-            self.config.headless.tts.enabled && self.config.llm.stream_output
-        };
+        let stream_tts_enabled = self.is_tts_effectively_enabled() && self.config.llm.stream_output;
 
         let reply = match if stream_tts_enabled {
             self.run_llm_chain_streaming_tts(client, &ctx, user_msg)
@@ -410,11 +416,7 @@ impl HeadlessLlmBridge {
         };
         if !reply.trim().is_empty() {
             self.send_reply(client, &ctx, &reply).await?;
-            // Omni model: skip TTS
-            if !self.config.llm.omni_model
-                && self.config.headless.tts.enabled
-                && !stream_tts_enabled
-            {
+            if self.is_tts_effectively_enabled() && !stream_tts_enabled {
                 if let Err(e) = self.speak_reply(client, &reply).await {
                     warn!("tts playback failed, fallback text only: {e}");
                 }
@@ -441,7 +443,7 @@ impl HeadlessLlmBridge {
         }
 
         let reply = self.run_llm_chain(ctx, user_msg).await?;
-        if !reply.trim().is_empty() && self.config.headless.tts.enabled {
+        if !reply.trim().is_empty() && self.is_tts_effectively_enabled() {
             info!(
                 event = "headless.tts.fallback",
                 reply_len = reply.chars().count(),
@@ -455,7 +457,29 @@ impl HeadlessLlmBridge {
     }
 
     async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
-        let (mut messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, content) = self.execute_llm_with_tools(ctx, messages, tools).await?;
+
+        if let Some(content) = content {
+            return Ok(content);
+        }
+
+        // Try stream reply if no content from chat
+        let stream_reply = self.collect_stream_reply(messages.clone()).await?;
+        if !stream_reply.trim().is_empty() {
+            return Ok(stream_reply);
+        }
+        Err(anyhow!("empty llm response"))
+    }
+
+    /// Shared LLM execution with tool loop
+    /// Returns (messages, content) where content is Some if LLM returned content without tool calls
+    async fn execute_llm_with_tools(
+        &self,
+        ctx: &CallerContext,
+        mut messages: Vec<serde_json::Value>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
         let max_turns = self.config.bot.max_tool_turns;
 
         for turn in 0..max_turns {
@@ -469,7 +493,7 @@ impl HeadlessLlmBridge {
                 );
             }
 
-            let mut response = match self.llm.chat(messages.clone(), tools.clone()).await {
+            let response = match self.llm.chat(messages.clone(), tools.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
                     error!(
@@ -498,20 +522,11 @@ impl HeadlessLlmBridge {
             }
 
             if response.tool_calls.is_empty() {
-                if let Some(content) = response
-                    .content
-                    .take()
-                    .filter(|content| !content.trim().is_empty())
-                {
-                    return Ok(content);
-                }
-                let stream_reply = self.collect_stream_reply(messages.clone()).await?;
-                if !stream_reply.trim().is_empty() {
-                    return Ok(stream_reply);
-                }
-                return Err(anyhow!("empty llm response"));
+                let content = response.content.filter(|c| !c.trim().is_empty());
+                return Ok((messages, content));
             }
 
+            // Build assistant tool calls JSON
             let assistant_tool_calls: Vec<_> = response
                 .tool_calls
                 .iter()
@@ -650,75 +665,15 @@ impl HeadlessLlmBridge {
             );
         }
 
-        let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data, None);
-        let max_turns = self.config.bot.max_tool_turns;
+        let (messages, tools) = self.build_omni_llm_request(&ctx, audio_data, None);
+        let (_, content) = self.execute_llm_with_tools(&ctx, messages, tools).await?;
 
-        for turn in 0..max_turns {
-            if Self::OBS_LLM {
-                info!(
-                    event = "headless.omni.llm_request",
-                    turn = turn + 1,
-                    messages_count = messages.len(),
-                    tools_count = tools.len(),
-                    "omni llm request"
-                );
-            }
-
-            let response = match self.llm.chat(messages.clone(), tools.clone()).await {
-                Ok(r) => r,
-                Err(e) => {
-                    error!(
-                        event = "headless.omni.llm_error",
-                        turn = turn + 1,
-                        error = %e,
-                        "omni llm request failed"
-                    );
-                    return Err(e);
-                }
-            };
-
-            if response.tool_calls.is_empty() {
-                if let Some(content) = response.content.filter(|c| !c.trim().is_empty()) {
-                    self.send_reply(client, &ctx, &content).await?;
-                    return Ok(());
-                }
-                return Err(anyhow!("empty omni llm response"));
-            }
-
-            // Handle tool calls
-            let assistant_tool_calls: Vec<_> = response
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string()
-                        }
-                    })
-                })
-                .collect();
-
-            messages.push(json!({
-                "role": "assistant",
-                "content": response.content,
-                "tool_calls": assistant_tool_calls
-            }));
-
-            for call in &response.tool_calls {
-                let tool_result = self.execute_skill(call, &ctx).await;
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": tool_result
-                }));
-            }
+        if let Some(content) = content {
+            self.send_reply(client, &ctx, &content).await?;
+            return Ok(());
         }
 
-        Err(HeadlessToolLoopTimeoutError.into())
+        Err(anyhow!("empty omni llm response"))
     }
 
     async fn collect_stream_reply(&self, messages: Vec<serde_json::Value>) -> Result<String> {
