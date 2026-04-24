@@ -64,7 +64,7 @@ wake_word_required = false
 
 [headless.tts]
 enabled = false
-provider = "openai-compatibility"
+provider = "openai-compatibility"   # OpenAI兼容或mimo
 base_url = ""
 api_key = ""
 model = "gpt-4o-mini-tts"
