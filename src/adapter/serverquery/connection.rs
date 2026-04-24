@@ -303,9 +303,9 @@ impl TsAdapter {
 
     pub async fn send_raw(&self, cmd: &str) -> Result<()> {
         if cmd.starts_with("login ") {
-            info!(">> login [REDACTED]");
+            debug!(">> login [REDACTED]");
         } else {
-            info!(">> {cmd}");
+            debug!(">> {cmd}");
         }
         let mut w = self.writer.lock().await;
         w.write_all(format!("{cmd}\n").as_bytes()).await?;
@@ -319,20 +319,47 @@ impl TsAdapter {
     }
 
     /// 拉取当前在线客户端快照（用于启动阶段预热路由缓存）。
+    /// 通过订阅事件流而非依赖 query 返回字符串，避免数据行延迟到达的问题。
     pub async fn fetch_client_snapshot(&self) -> Result<Vec<ClientEnterEvent>> {
         debug!("fetch_client_snapshot: sending clientlist command");
-        let response = self
-            .send_query_internal("clientlist -uid -groups", true)
-            .await?;
 
-        let clients: Vec<_> = response
-            .lines()
-            .flat_map(parse_events)
-            .filter_map(|event| match event {
-                TsEvent::ClientEnterView(client) if client.clid != 0 => Some(client),
-                _ => None,
-            })
-            .collect();
+        // 订阅事件流，用于接收 ClientEnterView 事件
+        let mut rx = self.subscribe();
+
+        // 发送命令（不通过 send_query_internal，避免 query_active 状态问题）
+        self.send_raw("clientlist -uid -groups").await?;
+
+        let mut clients = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                break;
+            }
+
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(event)) => {
+                    match event {
+                        TsEvent::ClientEnterView(client) if client.clid != 0 => {
+                            debug!(
+                                "fetch_client_snapshot: got client clid={}, nickname={}",
+                                client.clid, client.client_nickname
+                            );
+                            clients.push(client);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Err(_)) => {
+                    // channel closed
+                    break;
+                }
+                Err(_) => {
+                    // deadline reached
+                    break;
+                }
+            }
+        }
 
         info!(
             "fetch_client_snapshot: returning {} clients",
@@ -346,9 +373,9 @@ impl TsAdapter {
         let _guard = self.query_lock.lock().await;
 
         if cmd.starts_with("login ") {
-            info!(">> login [REDACTED]");
+            debug!(">> login [REDACTED]");
         } else {
-            info!(">> {cmd}");
+            debug!(">> {cmd}");
         }
 
         let (tx, rx) = oneshot::channel::<String>();
@@ -380,6 +407,8 @@ impl TsAdapter {
     async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
         let mut line = String::new();
         let mut result_lines: Vec<String> = Vec::new();
+        let mut waiting_for_data = false; // 收到 error 行后，等待可能延迟的数据行
+
         loop {
             line.clear();
             match reader.read_line(&mut line).await {
@@ -387,58 +416,12 @@ impl TsAdapter {
                     error!("ServerQuery connection closed by remote");
                     break;
                 }
-            Ok(_) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                debug!("<< {trimmed}");
-
-                if trimmed.starts_with("error id=") {
-                    if trimmed.contains("id=0") {
-                        debug!("<< {trimmed}");
-                    } else {
-                        error!("TS3 Error: {trimmed}");
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
                     }
-                }
-
-                // 广播事件通知
-                debug!("reader_loop: received line: {}", trimmed);
-                
-                for event in parse_events(trimmed) {
-                    if let Err(e) = self.event_tx.send(event) {
-                        debug!("No active subscribers for event: {e}");
-                    }
-                }
-                debug!("<< {trimmed}");
-
-                if trimmed.starts_with("error id=") {
-                    if trimmed.contains("id=0") {
-                        debug!("<< {trimmed}");
-                    } else {
-                        error!("TS3 Error: {trimmed}");
-                    }
-                }
-
-                // 广播事件通知
-                let is_event = trimmed.starts_with("notify") || trimmed.starts_with("clid=");
-                if is_event {
-                    info!("reader_loop: received event line: {}", trimmed);
-                }
-                for event in parse_events(trimmed) {
-                    if let Err(e) = self.event_tx.send(event) {
-                        debug!("No active subscribers for event: {e}");
-                    }
-                }
                     debug!("<< {trimmed}");
-
-                    if trimmed.starts_with("error id=") {
-                        if trimmed.contains("id=0") {
-                            debug!("<< {trimmed}");
-                        } else {
-                            error!("TS3 Error: {trimmed}");
-                        }
-                    }
 
                     // 解析 whoami 响应以获取我们自己的 client_id
                     if trimmed.contains("client_id=") && trimmed.contains("virtualserver_status=") {
@@ -455,34 +438,77 @@ impl TsAdapter {
 
                     // 广播事件通知
                     let is_event = trimmed.starts_with("notify") || trimmed.starts_with("clid=");
+                    if is_event {
+                        if trimmed.starts_with("clid=") && trimmed.contains('|') {
+                            for (i, client) in trimmed.split('|').enumerate() {
+                                info!("reader_loop: clientlist[{}]: {}", i, client.trim());
+                            }
+                        } else {
+                            debug!("reader_loop: event: {}", trimmed);
+                        }
+                    }
                     for event in parse_events(trimmed) {
                         if let Err(e) = self.event_tx.send(event) {
                             debug!("No active subscribers for event: {e}");
                         }
                     }
 
+                    // 查询活跃时，收集数据行
                     let query_active = self.query_active.load(Ordering::Relaxed);
-                    let include_event_lines =
-                        self.include_event_lines_active.load(Ordering::Relaxed);
-
-                    // 收集查询响应数据行：默认忽略事件；按需保留事件行（例如 clientlist）
+                    let include_event_lines = self.include_event_lines_active.load(Ordering::Relaxed);
                     if query_active && (!is_event || include_event_lines) {
                         result_lines.push(trimmed.to_string());
                     }
 
-                    // error 行标志着当前查询响应结束
+                    // error 行处理
                     if trimmed.starts_with("error id=") {
-                        // 当 include_event_lines=true 时，延迟一小段时间等待可能延迟到达的数据行
-                        // 例如 clientlist 的数据行可能在 error 行之后才到达
-                        if self.include_event_lines_active.load(Ordering::Relaxed) {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        if trimmed.contains("id=0") {
+                            debug!("<< {trimmed}");
+                        } else {
+                            error!("TS3 Error: {trimmed}");
                         }
-                        self.query_active.store(false, Ordering::Relaxed);
-                        let mut q = self.query_tx.lock().await;
-                        if let Some(tx) = q.take() {
-                            let response = result_lines.join("\n");
-                            let _ = tx.send(response);
-                            result_lines.clear();
+
+                        if query_active {
+                            // 如果 result_lines 为空且 include_event_lines=true，等待可能延迟到达的数据行
+                            if result_lines.is_empty() && include_event_lines {
+                                waiting_for_data = true;
+                                // 不立即返回，继续循环等待数据行
+                                continue;
+                            }
+                            // 否则正常返回
+                            self.query_active.store(false, Ordering::Relaxed);
+                            let mut q = self.query_tx.lock().await;
+                            if let Some(tx) = q.take() {
+                                let response = result_lines.join("\n");
+                                let _ = tx.send(response);
+                                result_lines.clear();
+                            }
+                        }
+                    }
+
+                    // 如果正在等待数据行，检查当前行是否是数据行
+                    if waiting_for_data {
+                        if is_event && trimmed.starts_with("clid=") {
+                            // 收到延迟的数据行，收集它并返回
+                            result_lines.push(trimmed.to_string());
+                            self.query_active.store(false, Ordering::Relaxed);
+                            let mut q = self.query_tx.lock().await;
+                            if let Some(tx) = q.take() {
+                                let response = result_lines.join("\n");
+                                let _ = tx.send(response);
+                                result_lines.clear();
+                            }
+                            waiting_for_data = false;
+                        } else {
+                            // 收到了其他行（可能是另一个命令的响应），返回当前结果（可能为空）
+                            self.query_active.store(false, Ordering::Relaxed);
+                            let mut q = self.query_tx.lock().await;
+                            if let Some(tx) = q.take() {
+                                let response = result_lines.join("\n");
+                                let _ = tx.send(response);
+                                result_lines.clear();
+                            }
+                            waiting_for_data = false;
                         }
                     }
                 }
