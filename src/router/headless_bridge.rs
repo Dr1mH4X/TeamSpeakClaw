@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, thiserror::Error)]
 #[error("headless tool loop reached max turns")]
@@ -318,7 +318,7 @@ impl HeadlessLlmBridge {
             return Ok(());
         };
 
-        info!(
+        debug!(
             event = "headless.stt.result",
             speaker = %chunk.speaker_name,
             clid = chunk.speaker_client_id,

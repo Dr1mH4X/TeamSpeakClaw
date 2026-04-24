@@ -9,7 +9,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::AppConfig;
 
@@ -203,7 +203,7 @@ impl OpenAiSpeechProvider {
 
         let url = resolve_stt_url(&stt.base_url, &self.config.llm.base_url);
         let wav_size = wav_bytes.len();
-        info!(
+        debug!(
             event = "headless.stt.request",
             url = %url,
             model = %stt.model,
@@ -245,7 +245,7 @@ impl OpenAiSpeechProvider {
         if text.is_empty() {
             return Err(anyhow!("stt returned empty text"));
         }
-        info!(
+        debug!(
             event = "headless.stt.response",
             text_len = text.chars().count(),
             "stt response received"

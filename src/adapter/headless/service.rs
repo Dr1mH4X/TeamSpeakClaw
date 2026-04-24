@@ -9,7 +9,7 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tsproto_packets::packets::{
     AudioData, CodecType, Direction, Flags, OutAudio, OutCommand, OutPacket, PacketType,
@@ -399,7 +399,7 @@ impl VoiceService for VoiceServiceImpl {
         let encoded = ts3_escape_value(&compact);
 
         if encoded.len() != desc.len() {
-            info!(
+            debug!(
                 "client_description encoded: orig_len={} encoded_len={}",
                 desc.len(),
                 encoded.len()
