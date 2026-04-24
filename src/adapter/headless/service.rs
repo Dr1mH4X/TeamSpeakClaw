@@ -116,7 +116,11 @@ async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
 ) -> anyhow::Result<()> {
-    let first_chunk = match stream.message().await.context("recv first tts chunk failed")? {
+    let first_chunk = match stream
+        .message()
+        .await
+        .context("recv first tts chunk failed")?
+    {
         Some(chunk) => chunk,
         None => return Ok(()),
     };
@@ -126,10 +130,7 @@ async fn stream_tts_audio_loop(
     } else if first_chunk.codec.eq_ignore_ascii_case("mp3") || first_chunk.codec.is_empty() {
         detect_audio_format(&first_chunk.payload)
     } else {
-        return Err(anyhow!(
-            "unsupported tts codec: {}",
-            first_chunk.codec
-        ));
+        return Err(anyhow!("unsupported tts codec: {}", first_chunk.codec));
     };
 
     let child = tokio::process::Command::new("ffmpeg")
@@ -578,8 +579,7 @@ impl VoiceService for VoiceServiceImpl {
             "",
         );
 
-        let result =
-            stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone()).await;
+        let result = stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone()).await;
 
         match result {
             Ok(()) => {

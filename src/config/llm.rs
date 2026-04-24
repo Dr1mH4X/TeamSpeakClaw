@@ -7,6 +7,9 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default)]
     pub stream_output: bool,
+    /// Enable omni-modal model support (voice input/output directly)
+    #[serde(default)]
+    pub omni_model: bool,
 }
 
 impl Default for LlmConfig {
@@ -16,6 +19,7 @@ impl Default for LlmConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
             stream_output: false,
+            omni_model: false,
         }
     }
 }
