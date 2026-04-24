@@ -50,6 +50,7 @@ api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 stream_output = false  # false: 等完整回复后再TTS；true: 边生成边TTS（文字仍完整后一次发送）
+omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
 
 [headless.stt]
 enabled = false
