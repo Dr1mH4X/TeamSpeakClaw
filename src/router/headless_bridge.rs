@@ -49,7 +49,7 @@ pub struct HeadlessLlmBridge {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
-    stt_pipeline: Mutex<Option<OpusSttPipeline>>,
+    audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<OpenAiSpeechProvider>,
 }
 
@@ -77,7 +77,7 @@ impl HeadlessLlmBridge {
         // Create audio pipeline if STT is enabled OR omni_model is true (needs audio framing)
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
-            stt_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
+            audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
             prompts,
             gate,
@@ -291,7 +291,7 @@ impl HeadlessLlmBridge {
         }
 
         let chunk = {
-            let mut guard = self.stt_pipeline.lock().await;
+            let mut guard = self.audio_pipeline.lock().await;
             let Some(pipeline) = guard.as_mut() else {
                 return Ok(());
             };
@@ -338,7 +338,7 @@ impl HeadlessLlmBridge {
         audio: voicev1::AudioFrameEvent,
     ) -> Result<()> {
         let chunk = {
-            let mut guard = self.stt_pipeline.lock().await;
+            let mut guard = self.audio_pipeline.lock().await;
             let Some(pipeline) = guard.as_mut() else {
                 warn!(
                     event = "headless.omni.no_pipeline",
@@ -585,12 +585,12 @@ impl HeadlessLlmBridge {
         Err(HeadlessToolLoopTimeoutError.into())
     }
 
-    fn build_llm_request(
+    /// Shared helper: build system prompt, user context, and tools
+    fn build_llm_base_context(
         &self,
         ctx: &CallerContext,
-        user_msg: String,
-    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-        let system_prompt = &self.prompts.system.content;
+    ) -> (String, String, Vec<serde_json::Value>) {
+        let system_prompt = self.prompts.system.content.clone();
         let user_ctx = format!(
             "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
             ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
@@ -599,6 +599,15 @@ impl HeadlessLlmBridge {
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
+        (system_prompt, user_ctx, tools)
+    }
+
+    fn build_llm_request(
+        &self,
+        ctx: &CallerContext,
+        user_msg: String,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
         let messages = vec![
             json!({"role":"system","content":system_prompt}),
             json!({"role":"system","content":user_ctx}),
@@ -614,15 +623,7 @@ impl HeadlessLlmBridge {
         audio_data: String,
         text_prompt: Option<String>,
     ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-        let system_prompt = &self.prompts.system.content;
-        let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})",
-            ctx.caller_name, ctx.caller_uid, ctx.caller_id, ctx.groups, ctx.channel_group_id
-        );
-        let allowed_skills = self
-            .gate
-            .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
 
         let mut content = vec![json!({
             "type": "input_audio",
