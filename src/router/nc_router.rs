@@ -7,7 +7,7 @@ use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
-use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{ChatHistory, ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
@@ -26,11 +26,10 @@ pub struct NcRouter {
     semaphore: Arc<Semaphore>,
     ts_adapter: Option<Arc<TsAdapter>>,
     ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
-    history: Arc<DashMap<u32, Vec<serde_json::Value>>>,
+    history: ChatHistory,
 }
 
 impl NcRouter {
-    const MAX_HISTORY_MSGS: usize = 20;
     fn resolve_nc_allowed_skills(&self, user_id: i64, group_id: Option<i64>) -> Vec<String> {
         // NC -> ACL 映射使用虚拟 server_group_ids：
         // 9000: 任意 NC 用户
@@ -87,7 +86,7 @@ impl NcRouter {
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             ts_adapter,
             ts_clients,
-            history: Arc::new(DashMap::new()),
+            history: ChatHistory::new(),
         }
     }
 
@@ -425,14 +424,8 @@ impl NcRouter {
 
         let session_key = user_id.unsigned_abs() as u32;
         let ctx_window = self.config.llm.context_window as usize;
-        if ctx_window > 0 {
-            if let Some(hist) = self.history.get(&session_key) {
-                let total = hist.len();
-                let start = total.saturating_sub(ctx_window * 2);
-                for msg in hist.iter().skip(start) {
-                    messages.push(msg.clone());
-                }
-            }
+        for msg in self.history.get_history(session_key, ctx_window) {
+            messages.push(msg);
         }
         messages.push(json!({"role": "user", "content": user_msg}));
 
@@ -447,7 +440,8 @@ impl NcRouter {
                     if response.tool_calls.is_empty() {
                         let content = response.content.clone().unwrap_or_default();
                         info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
-                        self.save_history(session_key, response.content.as_deref(), ctx_window);
+                        self.history
+                            .save_turn(session_key, user_msg, &content, ctx_window);
                         return content;
                     }
 
@@ -498,20 +492,5 @@ impl NcRouter {
         // 达到最大轮数，尝试获取最后一个可用的回复
         warn!("[NC] Reached max tool turns ({})", max_turns);
         "操作超时，请稍后再试".to_string()
-    }
-
-    fn save_history(&self, session_key: u32, response_content: Option<&str>, ctx_window: usize) {
-        if ctx_window == 0 {
-            return;
-        }
-        let mut hist = self.history.entry(session_key).or_default();
-        let keep = usize::min(ctx_window * 2, Self::MAX_HISTORY_MSGS);
-        if hist.len() > keep {
-            let drop_count = hist.len() - keep;
-            hist.drain(..drop_count);
-        }
-        if let Some(content) = response_content {
-            hist.push(json!({"role": "assistant", "content": content}));
-        }
     }
 }

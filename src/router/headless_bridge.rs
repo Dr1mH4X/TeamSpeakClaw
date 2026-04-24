@@ -27,7 +27,7 @@ use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::provider::ToolCall;
 use crate::llm::{LlmEngine, LlmStreamEvent};
 use crate::permission::PermissionGate;
-use crate::router::ClientInfo;
+use crate::router::{ChatHistory, ClientInfo};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -51,7 +51,7 @@ pub struct HeadlessLlmBridge {
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<OpenAiSpeechProvider>,
-    history: Arc<DashMap<u32, Vec<serde_json::Value>>>,
+    history: ChatHistory,
 }
 
 impl HeadlessLlmBridge {
@@ -64,7 +64,6 @@ impl HeadlessLlmBridge {
     const STREAM_TTS_MIN_CHARS: usize = 4;
     const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
     const STREAM_TTS_MAX_CHARS: usize = 28;
-    const MAX_HISTORY_MSGS: usize = 20;
 
     pub fn new(
         config: Arc<AppConfig>,
@@ -88,7 +87,7 @@ impl HeadlessLlmBridge {
             ts_adapter,
             ts_clients,
             speech_provider,
-            history: Arc::new(DashMap::new()),
+            history: ChatHistory::new(),
         }
     }
 
@@ -441,7 +440,8 @@ impl HeadlessLlmBridge {
         {
             Ok(reply) => {
                 let ctx_window = self.config.llm.context_window as usize;
-                self.save_history(ctx.caller_id, Some(&reply), ctx_window);
+                self.history
+                    .save_turn(ctx.caller_id, &user_msg, &reply, ctx_window);
                 return Ok(reply);
             }
             Err(e) => {
@@ -464,12 +464,13 @@ impl HeadlessLlmBridge {
     }
 
     async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
-        let (messages, tools) = self.build_llm_request(ctx, user_msg);
+        let (messages, tools) = self.build_llm_request(ctx, user_msg.clone());
         let (messages, content) = self.execute_llm_with_tools(ctx, messages, tools).await?;
 
         if let Some(content) = content {
             let ctx_window = self.config.llm.context_window as usize;
-            self.save_history(ctx.caller_id, Some(&content), ctx_window);
+            self.history
+                .save_turn(ctx.caller_id, &user_msg, &content, ctx_window);
             return Ok(content);
         }
 
@@ -477,7 +478,8 @@ impl HeadlessLlmBridge {
         let stream_reply = self.collect_stream_reply(messages.clone()).await?;
         if !stream_reply.trim().is_empty() {
             let ctx_window = self.config.llm.context_window as usize;
-            self.save_history(ctx.caller_id, Some(&stream_reply), ctx_window);
+            self.history
+                .save_turn(ctx.caller_id, &user_msg, &stream_reply, ctx_window);
             return Ok(stream_reply);
         }
         Err(anyhow!("empty llm response"))
@@ -598,21 +600,6 @@ impl HeadlessLlmBridge {
         Err(HeadlessToolLoopTimeoutError.into())
     }
 
-    fn save_history(&self, clid: u32, response_content: Option<&str>, ctx_window: usize) {
-        if ctx_window == 0 {
-            return;
-        }
-        let mut hist = self.history.entry(clid).or_default();
-        let keep = usize::min(ctx_window * 2, Self::MAX_HISTORY_MSGS);
-        if hist.len() > keep {
-            let drop_count = hist.len() - keep;
-            hist.drain(..drop_count);
-        }
-        if let Some(content) = response_content {
-            hist.push(json!({"role": "assistant", "content": content}));
-        }
-    }
-
     /// Shared helper: build system prompt, user context, and tools
     fn build_llm_base_context(
         &self,
@@ -663,14 +650,8 @@ impl HeadlessLlmBridge {
             json!({"role":"system","content":user_ctx}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
-        if ctx_window > 0 {
-            if let Some(hist) = self.history.get(&ctx.caller_id) {
-                let total = hist.len();
-                let start = total.saturating_sub(ctx_window * 2);
-                for msg in hist.iter().skip(start) {
-                    messages.push(msg.clone());
-                }
-            }
+        for msg in self.history.get_history(ctx.caller_id, ctx_window) {
+            messages.push(msg);
         }
         messages.push(json!({"role":"user","content":user_msg}));
         (messages, tools)
@@ -704,14 +685,8 @@ impl HeadlessLlmBridge {
             json!({"role": "system", "content": user_ctx}),
         ];
         let ctx_window = self.config.llm.context_window as usize;
-        if ctx_window > 0 {
-            if let Some(hist) = self.history.get(&ctx.caller_id) {
-                let total = hist.len();
-                let start = total.saturating_sub(ctx_window * 2);
-                for msg in hist.iter().skip(start) {
-                    messages.push(msg.clone());
-                }
-            }
+        for msg in self.history.get_history(ctx.caller_id, ctx_window) {
+            messages.push(msg);
         }
         messages.push(json!({"role": "user", "content": content}));
         (messages, tools)
@@ -741,7 +716,8 @@ impl HeadlessLlmBridge {
 
         if let Some(content) = content {
             let ctx_window = self.config.llm.context_window as usize;
-            self.save_history(ctx.caller_id, Some(&content), ctx_window);
+            self.history
+                .save_turn(ctx.caller_id, "[audio]", &content, ctx_window);
             self.send_reply(client, &ctx, &content).await?;
             return Ok(());
         }

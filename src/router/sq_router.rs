@@ -4,7 +4,7 @@ use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{ChatHistory, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
@@ -12,8 +12,6 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
-
-const MAX_HISTORY_MSGS: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
@@ -34,7 +32,7 @@ pub struct EventRouter {
     registry: Arc<SkillRegistry>,
     semaphore: Arc<Semaphore>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
-    history: Arc<DashMap<u32, Vec<serde_json::Value>>>,
+    history: ChatHistory,
 }
 
 impl EventRouter {
@@ -59,7 +57,7 @@ impl EventRouter {
             registry,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             nc_adapter,
-            history: Arc::new(DashMap::new()),
+            history: ChatHistory::new(),
         }
     }
 
@@ -322,12 +320,8 @@ impl EventRouter {
         // 注入对话历史（如果启用）
         let ctx_window = self.config.llm.context_window as usize;
         if ctx_window > 0 {
-            if let Some(hist) = self.history.get(&event.invoker_id) {
-                let total = hist.len();
-                let start = total.saturating_sub(ctx_window * 2);
-                for msg in hist.iter().skip(start) {
-                    messages.push(msg.clone());
-                }
+            for msg in self.history.get_history(event.invoker_id, ctx_window) {
+                messages.push(msg);
             }
         }
 
@@ -350,12 +344,15 @@ impl EventRouter {
                             info!("[SQ] LLM final reply (turn {}): {}", turn + 1, content);
                             let _ = self
                                 .adapter
-                                .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
+                                .send_raw(&cmd_send_text(reply_mode, reply_target, content))
                                 .await;
+                            self.history.save_turn(
+                                event.invoker_id,
+                                msg_content,
+                                content,
+                                ctx_window,
+                            );
                         }
-
-                        // 保存完整对话历史
-                        self.save_history(event.invoker_id, &messages, ctx_window);
                         return;
                     }
 
@@ -421,29 +418,5 @@ impl EventRouter {
                 "操作超时，请稍后再试",
             ))
             .await;
-    }
-
-    fn save_history(&self, clid: u32, messages: &[serde_json::Value], ctx_window: usize) {
-        if ctx_window == 0 {
-            return;
-        }
-
-        let mut hist = self.history.entry(clid).or_default();
-
-        // 基于 ctx_window 和 MAX_HISTORY_MSGS 截断
-        let keep = usize::min(ctx_window * 2, MAX_HISTORY_MSGS);
-        if hist.len() > keep {
-            let drop_count = hist.len() - keep;
-            hist.drain(..drop_count);
-        }
-
-        // 保存完整的用户/assistant 对话轮次
-        for msg in messages {
-            if let Some(role) = msg.get("role").and_then(|v| v.as_str()) {
-                if role == "user" || role == "assistant" {
-                    hist.push(msg.clone());
-                }
-            }
-        }
     }
 }
