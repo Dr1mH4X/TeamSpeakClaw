@@ -33,6 +33,7 @@ api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 stream_output = false  # false: wait for full reply before TTS; true: stream LLM output to TTS (text is still sent once after completion)
+omni_model = false    # Omni-modal model: when true, automatically disables TTS/STT and uses voice input/output directly
 
 [headless.stt]
 enabled = false
