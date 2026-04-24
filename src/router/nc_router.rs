@@ -26,9 +26,11 @@ pub struct NcRouter {
     semaphore: Arc<Semaphore>,
     ts_adapter: Option<Arc<TsAdapter>>,
     ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
+    history: Arc<DashMap<u32, Vec<serde_json::Value>>>,
 }
 
 impl NcRouter {
+    const MAX_HISTORY_MSGS: usize = 20;
     fn resolve_nc_allowed_skills(&self, user_id: i64, group_id: Option<i64>) -> Vec<String> {
         // NC -> ACL 映射使用虚拟 server_group_ids：
         // 9000: 任意 NC 用户
@@ -85,6 +87,7 @@ impl NcRouter {
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             ts_adapter,
             ts_clients,
+            history: Arc::new(DashMap::new()),
         }
     }
 
@@ -141,6 +144,7 @@ impl NcRouter {
         let semaphore = self.semaphore.clone();
         let ts_adapter = self.ts_adapter.clone();
         let ts_clients = self.ts_clients.clone();
+        let history = self.history.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -160,6 +164,7 @@ impl NcRouter {
                 semaphore: Arc::new(Semaphore::new(1)),
                 ts_adapter,
                 ts_clients,
+                history,
             };
             router.handle_private(msg).await;
         });
@@ -175,6 +180,7 @@ impl NcRouter {
         let semaphore = self.semaphore.clone();
         let ts_adapter = self.ts_adapter.clone();
         let ts_clients = self.ts_clients.clone();
+        let history = self.history.clone();
 
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
@@ -194,6 +200,7 @@ impl NcRouter {
                 semaphore: Arc::new(Semaphore::new(1)),
                 ts_adapter,
                 ts_clients,
+                history,
             };
             router.handle_group(msg).await;
         });
@@ -417,6 +424,18 @@ impl NcRouter {
             json!({"role": "user", "content": user_msg}),
         ];
 
+        let session_key = user_id.unsigned_abs() as u32;
+        let ctx_window = self.config.llm.context_window as usize;
+        if ctx_window > 0 {
+            if let Some(hist) = self.history.get(&session_key) {
+                let total = hist.len();
+                let start = total.saturating_sub(ctx_window * 2);
+                for msg in hist.iter().skip(start) {
+                    messages.push(msg.clone());
+                }
+            }
+        }
+
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
         for turn in 0..max_turns {
@@ -426,8 +445,9 @@ impl NcRouter {
                 Ok(response) => {
                     // 没有工具调用，返回最终内容
                     if response.tool_calls.is_empty() {
-                        let content = response.content.unwrap_or_default();
+                        let content = response.content.clone().unwrap_or_default();
                         info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
+                        self.save_history(session_key, response.content.as_deref(), ctx_window);
                         return content;
                     }
 
@@ -478,5 +498,20 @@ impl NcRouter {
         // 达到最大轮数，尝试获取最后一个可用的回复
         warn!("[NC] Reached max tool turns ({})", max_turns);
         "操作超时，请稍后再试".to_string()
+    }
+
+    fn save_history(&self, session_key: u32, response_content: Option<&str>, ctx_window: usize) {
+        if ctx_window == 0 {
+            return;
+        }
+        let mut hist = self.history.entry(session_key).or_default();
+        if hist.len() > Self::MAX_HISTORY_MSGS {
+            let keep = ctx_window * 2;
+            let drop_count = hist.len().saturating_sub(keep);
+            hist.drain(..drop_count);
+        }
+        if let Some(content) = response_content {
+            hist.push(json!({"role": "assistant", "content": content}));
+        }
     }
 }

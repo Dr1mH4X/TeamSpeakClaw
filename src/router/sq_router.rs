@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
+const MAX_HISTORY_MSGS: usize = 20;
+
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
     pub clid: u32,
@@ -32,6 +34,7 @@ pub struct EventRouter {
     registry: Arc<SkillRegistry>,
     semaphore: Arc<Semaphore>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
+    history: Arc<DashMap<u32, Vec<serde_json::Value>>>,
 }
 
 impl EventRouter {
@@ -56,6 +59,7 @@ impl EventRouter {
             registry,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             nc_adapter,
+            history: Arc::new(DashMap::new()),
         }
     }
 
@@ -313,8 +317,21 @@ impl EventRouter {
         let mut messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "system", "content": user_ctx}),
-            json!({"role": "user", "content": msg_content}),
         ];
+
+        // 注入对话历史（如果启用）
+        let ctx_window = self.config.llm.context_window as usize;
+        if ctx_window > 0 {
+            if let Some(hist) = self.history.get(&event.invoker_id) {
+                let total = hist.len();
+                let start = total.saturating_sub(ctx_window * 2);
+                for msg in hist.iter().skip(start) {
+                    messages.push(msg.clone());
+                }
+            }
+        }
+
+        messages.push(json!({"role": "user", "content": msg_content}));
 
         // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
@@ -322,20 +339,24 @@ impl EventRouter {
         let max_turns = self.config.bot.max_tool_turns;
 
         // 3. 多轮 LLM 调用循环
+        let mut full_messages = messages.clone();
         for turn in 0..max_turns {
             debug!("[SQ] LLM turn {}/{}", turn + 1, max_turns);
 
-            match self.llm.chat(messages.clone(), tools.clone()).await {
+            match self.llm.chat(full_messages.clone(), tools.clone()).await {
                 Ok(response) => {
                     // 没有工具调用，发送最终内容
                     if response.tool_calls.is_empty() {
-                        if let Some(content) = response.content {
+                        if let Some(ref content) = response.content {
                             info!("[SQ] LLM final reply (turn {}): {}", turn + 1, content);
                             let _ = self
                                 .adapter
                                 .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
                                 .await;
                         }
+
+                        // 保存对话历史
+                        self.save_history(event.invoker_id, &messages, &response, ctx_window);
                         return;
                     }
 
@@ -355,23 +376,25 @@ impl EventRouter {
                         })
                         .collect();
 
-                    messages.push(json!({
+                    let assistant_msg = json!({
                         "role": "assistant",
                         "content": response.content,
                         "tool_calls": assistant_tool_calls
-                    }));
+                    });
+                    full_messages.push(assistant_msg.clone());
 
                     // 执行所有工具调用
                     for call in &response.tool_calls {
                         let tool_result = self
                             .execute_skill(call, &event, &groups, channel_group_id)
                             .await;
-                        messages.push(json!({
+                        let tool_msg = json!({
                             "role": "tool",
                             "tool_call_id": call.id,
                             "name": call.name,
                             "content": tool_result
-                        }));
+                        });
+                        full_messages.push(tool_msg);
                     }
 
                     // 继续下一轮
@@ -401,5 +424,34 @@ impl EventRouter {
                 "操作超时，请稍后再试",
             ))
             .await;
+    }
+
+    fn save_history(
+        &self,
+        clid: u32,
+        _messages: &[serde_json::Value],
+        response: &crate::llm::provider::LlmResponse,
+        ctx_window: usize,
+    ) {
+        if ctx_window == 0 {
+            return;
+        }
+
+        let mut hist = self.history.entry(clid).or_default();
+
+        // 保留最近的消息
+        if hist.len() > MAX_HISTORY_MSGS {
+            let keep = ctx_window * 2;
+            let drop_count = hist.len().saturating_sub(keep);
+            hist.drain(..drop_count);
+        }
+
+        // 保存 assistant 回复
+        if let Some(content) = &response.content {
+            hist.push(json!({
+                "role": "assistant",
+                "content": content
+            }));
+        }
     }
 }
