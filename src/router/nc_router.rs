@@ -74,7 +74,7 @@ impl NcRouter {
         ts_adapter: Option<Arc<TsAdapter>>,
         ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
     ) -> Self {
-        let max_concurrent = config.bot.max_concurrent_requests;
+        let max_concurrent = config.llm.max_concurrent_requests;
         Self {
             config,
             prompts,
@@ -403,7 +403,7 @@ impl NcRouter {
         allowed_skills: &[String],
     ) -> String {
         let error_msg = self.prompts.error.llm_error.clone();
-        let max_turns = self.config.bot.max_tool_turns;
+        let max_turns = self.config.llm.max_tool_turns;
 
         // 生成 SessionSource
         let source = match group_id {

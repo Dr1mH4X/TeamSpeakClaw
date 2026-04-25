@@ -45,7 +45,7 @@ impl EventRouter {
         clients: Arc<DashMap<u32, ClientInfo>>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> Self {
-        let max_concurrent = config.bot.max_concurrent_requests;
+        let max_concurrent = config.llm.max_concurrent_requests;
         Self {
             config,
             prompts,
@@ -320,7 +320,7 @@ impl EventRouter {
         // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
-        let max_turns = self.config.bot.max_tool_turns;
+        let max_turns = self.config.llm.max_tool_turns;
 
         // 3. 多轮 LLM 调用循环
         for turn in 0..max_turns {
