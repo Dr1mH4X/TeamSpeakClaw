@@ -49,6 +49,7 @@ impl OpenAiProvider {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .user_agent("Version: 5.10.0 (c3d4709c)")
             .build()
             .unwrap_or_default();
         Self { client, config }
