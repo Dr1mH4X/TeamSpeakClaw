@@ -40,3 +40,10 @@ empty_message = "消息内容不能为空"
 missing_parameter = "缺少必要参数: {param}"
 invalid_mode = "无效的模式，必须是 {allowed}"
 client_offline = "客户端 {clid} 不在线或不存在"
+
+# TTS 风格提示配置 (用于 MiMo TTS API)
+# 控制语音的语调、语速、情感表达等
+[tts]
+# 风格提示，用于指导 TTS 模型生成语音
+# 示例值: "Bright, bouncy, slightly sing-song tone — like you are bursting with good news."
+style_prompt = "Natural, friendly tone, moderate pace."

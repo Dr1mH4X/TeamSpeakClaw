@@ -73,7 +73,8 @@ impl HeadlessLlmBridge {
         ts_adapter: Arc<TsAdapter>,
         ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
-        let speech_provider = OpenAiSpeechProvider::new(config.clone()).ok();
+        let speech_provider =
+            OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone()).ok();
         // Create audio pipeline if STT is enabled OR omni_model is true (needs audio framing)
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {

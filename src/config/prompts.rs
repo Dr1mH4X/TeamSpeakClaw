@@ -6,6 +6,7 @@ use std::path::Path;
 pub struct PromptsConfig {
     pub system: SystemPrompts,
     pub error: ErrorPrompts,
+    pub tts: TtsPrompts,
 }
 
 impl Default for PromptsConfig {
@@ -13,6 +14,7 @@ impl Default for PromptsConfig {
         Self {
             system: SystemPrompts::default(),
             error: ErrorPrompts::default(),
+            tts: TtsPrompts::default(),
         }
     }
 }
@@ -26,6 +28,20 @@ impl Default for SystemPrompts {
     fn default() -> Self {
         Self {
             content: "You are a helpful TeamSpeak assistant powered by LLM.".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TtsPrompts {
+    /// MiMo TTS 风格提示，用于控制语音的语调、语速、情感等
+    pub style_prompt: String,
+}
+
+impl Default for TtsPrompts {
+    fn default() -> Self {
+        Self {
+            style_prompt: "Natural, friendly tone, moderate pace.".to_string(),
         }
     }
 }
