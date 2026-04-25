@@ -264,7 +264,22 @@ empty_message = "Message content cannot be empty"
 missing_parameter = "Missing required parameter: {param}"
 invalid_mode = "Invalid mode, must be one of {allowed}"
 client_offline = "Client {clid} is not online or does not exist"
+
+# TTS style prompt configuration (for MiMo TTS API)
+[tts]
+style_prompt = "Natural, friendly tone, moderate pace."
 ```
+
+### TTS Style Prompt Configuration
+
+| Field | Description |
+|---|---|
+| `style_prompt` | MiMo TTS style prompt, controls voice tone, pace, and emotional expression |
+
+When using MiMo TTS provider, `style_prompt` is sent as the `user` message to the TTS API to guide the voice generation style. Examples:
+- `"Natural, friendly tone, moderate pace."` — Natural and friendly tone
+- `"Bright, bouncy, slightly sing-song tone — like you are bursting with good news."` — Cheerful and excited tone
+- `"Calm, soothing tone, slow pace."` — Calm and soothing tone
 
 ### Error Prompt Field Descriptions
 
