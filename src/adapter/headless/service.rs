@@ -116,105 +116,6 @@ async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
     ts3_audio_tx: mpsc::Sender<OutPacket>,
 ) -> anyhow::Result<()> {
-    let first_chunk = match stream
-        .message()
-        .await
-        .context("recv first tts chunk failed")?
-    {
-        Some(chunk) => chunk,
-        None => return Ok(()),
-    };
-
-    let input_format = if first_chunk.codec.eq_ignore_ascii_case("wav") {
-        "wav"
-    } else if first_chunk.codec.eq_ignore_ascii_case("mp3") || first_chunk.codec.is_empty() {
-        detect_audio_format(&first_chunk.payload)
-    } else {
-        return Err(anyhow!("unsupported tts codec: {}", first_chunk.codec));
-    };
-
-    let child = tokio::process::Command::new("ffmpeg")
-        .arg("-nostdin")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-f")
-        .arg(input_format)
-        .arg("-i")
-        .arg("pipe:0")
-        .arg("-f")
-        .arg("s16le")
-        .arg("-ar")
-        .arg("48000")
-        .arg("-ac")
-        .arg("2")
-        .arg("pipe:1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("failed to start ffmpeg: {e}"))?;
-    let mut child = ChildKillOnDrop::new(child);
-
-    if let Some(stderr) = child.child.as_mut().and_then(|c| c.stderr.take()) {
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!("stream_tts ffmpeg: {line}");
-            }
-        });
-    }
-
-    let mut stdin = child
-        .child
-        .as_mut()
-        .and_then(|c| c.stdin.take())
-        .ok_or_else(|| anyhow!("ffmpeg stdin missing"))?;
-    let mut stdout = child
-        .child
-        .as_mut()
-        .and_then(|c| c.stdout.take())
-        .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
-
-    let writer_task = tokio::spawn(async move {
-        let mut saw_eos = first_chunk.end_of_stream;
-        if !first_chunk.payload.is_empty() {
-            stdin
-                .write_all(&first_chunk.payload)
-                .await
-                .context("write ffmpeg stdin failed")?;
-        }
-        if first_chunk.end_of_stream {
-            drop(stdin);
-            return Ok::<(), anyhow::Error>(());
-        }
-
-        while let Some(chunk) = stream.message().await.context("recv tts chunk failed")? {
-            if !chunk.payload.is_empty() {
-                stdin
-                    .write_all(&chunk.payload)
-                    .await
-                    .context("write ffmpeg stdin failed")?;
-            }
-            if chunk.end_of_stream {
-                saw_eos = true;
-                break;
-            }
-        }
-        if !saw_eos {
-            warn!("stream_tts: upstream ended without explicit eos");
-        }
-        stdin
-            .shutdown()
-            .await
-            .context("shutdown ffmpeg stdin failed")?;
-        Ok::<(), anyhow::Error>(())
-    });
-
-    let frame_samples_per_channel = 48_000 / 50;
-    let frame_bytes = frame_samples_per_channel * 2 * 2;
-    let mut pcm = vec![0u8; frame_bytes];
-    let mut float_buf = vec![0f32; frame_samples_per_channel * 2];
-    let mut opus_out = [0u8; 1275];
     let encoder = Encoder::new(
         audiopus::SampleRate::Hz48000,
         audiopus::Channels::Stereo,
@@ -222,35 +123,143 @@ async fn stream_tts_audio_loop(
     )
     .map_err(|e| anyhow!("opus encoder init failed: {e}"))?;
 
+    let frame_samples_per_channel = 48_000 / 50;
+    let frame_bytes = frame_samples_per_channel * 2 * 2;
+    let mut packet_id = 0u16;
+
     loop {
-        match stdout.read_exact(&mut pcm).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(anyhow!("read ffmpeg pcm failed: {e}")),
+        let chunk = match stream.message().await.context("recv tts chunk failed")? {
+            Some(c) => c,
+            None => break,
+        };
+
+        if chunk.end_of_stream {
+            break;
         }
 
-        for i in 0..float_buf.len() {
-            let lo = pcm[i * 2];
-            let hi = pcm[i * 2 + 1];
-            float_buf[i] = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+        if chunk.payload.is_empty() {
+            continue;
         }
 
-        let len = encoder
-            .encode_float(&float_buf, &mut opus_out)
-            .map_err(|e| anyhow!("opus encode failed: {e}"))?;
-        let packet = OutAudio::new(&AudioData::C2S {
-            id: 0,
-            codec: CodecType::OpusMusic,
-            data: &opus_out[..len],
-        });
-        ts3_audio_tx
-            .send(packet)
-            .await
-            .map_err(|e| anyhow!("send ts3 audio failed: {e}"))?;
+        let input_format = if chunk.codec.eq_ignore_ascii_case("wav") {
+            "wav"
+        } else if chunk.codec.eq_ignore_ascii_case("mp3") || chunk.codec.is_empty() {
+            detect_audio_format(&chunk.payload)
+        } else {
+            warn!("unsupported tts codec: {}, skipping", chunk.codec);
+            continue;
+        };
+
+        let child_result = tokio::process::Command::new("ffmpeg")
+            .arg("-nostdin")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg(input_format)
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-f")
+            .arg("s16le")
+            .arg("-ar")
+            .arg("48000")
+            .arg("-ac")
+            .arg("2")
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        let child = match child_result {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("failed to start ffmpeg: {e}, skipping chunk");
+                continue;
+            }
+        };
+
+        let mut child = ChildKillOnDrop::new(child);
+
+        if let Some(stderr) = child.child.as_mut().and_then(|c| c.stderr.take()) {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    warn!("stream_tts ffmpeg: {line}");
+                }
+            });
+        }
+
+        let stdin_result = child
+            .child
+            .as_mut()
+            .and_then(|c| c.stdin.take());
+        let mut stdin = match stdin_result {
+            Some(s) => s,
+            None => {
+                warn!("ffmpeg stdin missing, skipping chunk");
+                continue;
+            }
+        };
+
+        if let Err(e) = stdin.write_all(&chunk.payload).await {
+            warn!("write ffmpeg stdin failed: {e}, skipping chunk");
+            continue;
+        }
+        drop(stdin);
+
+        let mut stdout = child
+            .child
+            .as_mut()
+            .and_then(|c| c.stdout.take())
+            .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
+
+        let mut pcm = vec![0u8; frame_bytes];
+        let mut float_buf = vec![0f32; frame_samples_per_channel * 2];
+        let mut opus_out = [0u8; 1275];
+
+        loop {
+            match stdout.read_exact(&mut pcm).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    warn!("read ffmpeg pcm failed: {e}, skipping chunk");
+                    break;
+                }
+            }
+
+            for i in 0..float_buf.len() {
+                let lo = pcm[i * 2];
+                let hi = pcm[i * 2 + 1];
+                float_buf[i] = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+            }
+
+            let len = match encoder.encode_float(&float_buf, &mut opus_out) {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("opus encode failed: {e}, skipping chunk");
+                    break;
+                }
+            };
+            let packet = OutAudio::new(&AudioData::C2S {
+                id: packet_id,
+                codec: CodecType::OpusMusic,
+                data: &opus_out[..len],
+            });
+            packet_id = packet_id.wrapping_add(1);
+            if let Err(e) = ts3_audio_tx.send(packet).await {
+                warn!("send ts3 audio failed: {e}");
+                break;
+            }
+        }
+
+        if let Some(mut c) = child.child.take() {
+            let _ = c.start_kill();
+            let _ = c.wait().await;
+        }
     }
 
     let eos = OutAudio::new(&AudioData::C2S {
-        id: 0,
+        id: packet_id,
         codec: CodecType::OpusMusic,
         data: &[],
     });
@@ -258,16 +267,6 @@ async fn stream_tts_audio_loop(
         warn!("send stream_tts eos failed: {e}");
     }
 
-    match writer_task.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(e),
-        Err(e) => return Err(anyhow!("tts stream writer task failed: {e}")),
-    }
-
-    if let Some(mut c) = child.child.take() {
-        let _ = c.start_kill();
-        let _ = c.wait().await;
-    }
     Ok(())
 }
 
