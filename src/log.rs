@@ -14,8 +14,11 @@ use tracing_subscriber::{
 };
 
 pub fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
-    let console_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("{console_level},russh::client=off,russh=off")));
+    let console_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "{console_level},russh::client=off,russh=off,h2::codec=trace"
+        ))
+    });
 
     let console_layer = fmt::layer()
         .with_target(true)
@@ -33,7 +36,7 @@ pub fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
     let file_appender = DailyFileAppender::new(log_dir, "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let file_filter = EnvFilter::new(file_level);
+    let file_filter = EnvFilter::new(format!("{file_level},h2::codec=trace"));
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
