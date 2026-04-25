@@ -12,6 +12,7 @@ use std::convert::TryInto;
 use tracing::{debug, error, warn};
 
 use crate::config::AppConfig;
+use base64::Engine;
 
 use super::tsbot::voice::v1 as voicev1;
 
@@ -181,15 +182,20 @@ impl OpusSttPipeline {
 pub struct OpenAiSpeechProvider {
     client: Client,
     config: std::sync::Arc<AppConfig>,
+    tts_style_prompt: String,
 }
 
 impl OpenAiSpeechProvider {
-    pub fn new(config: std::sync::Arc<AppConfig>) -> Result<Self> {
+    pub fn new(config: std::sync::Arc<AppConfig>, tts_style_prompt: String) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(45))
             .build()
             .context("build speech http client failed")?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            tts_style_prompt,
+        })
     }
 
     pub async fn transcribe_wav(&self, wav_bytes: Vec<u8>) -> Result<String> {
@@ -303,11 +309,7 @@ impl OpenAiSpeechProvider {
     }
 
     /// MiMo TTS: uses /chat/completions with messages + audio field
-    async fn synthesize_mimo(
-        &self,
-        text: &str,
-        api_key: &str,
-    ) -> Result<Vec<u8>> {
+    async fn synthesize_mimo(&self, text: &str, api_key: &str) -> Result<Vec<u8>> {
         let tts = &self.config.headless.tts;
         // Resolve URL: use base_url or fallback to llm.base_url
         let base = if tts.base_url.is_empty() {
@@ -323,6 +325,10 @@ impl OpenAiSpeechProvider {
             "messages": [
                 {
                     "role": "user",
+                    "content": self.tts_style_prompt
+                },
+                {
+                    "role": "assistant",
                     "content": text
                 }
             ],
@@ -351,7 +357,27 @@ impl OpenAiSpeechProvider {
             ));
         }
 
-        Ok(resp.bytes().await?.to_vec())
+        // MiMo TTS returns JSON response with base64-encoded audio data
+        let resp_text = resp.text().await?;
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
+            .context("Failed to parse MiMo TTS response as JSON")?;
+
+        // Extract base64 audio data from choices[0].message.audio.data
+        let audio_data = resp_json
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("audio"))
+            .and_then(|a| a.get("data"))
+            .and_then(|d| d.as_str())
+            .context("MiMo TTS response missing audio data field")?;
+
+        // Decode base64 to raw audio bytes
+        let audio_bytes = base64::prelude::BASE64_STANDARD
+            .decode(audio_data)
+            .context("Failed to decode base64 audio data")?;
+
+        Ok(audio_bytes)
     }
 }
 
