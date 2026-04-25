@@ -40,10 +40,13 @@ Manually create the configuration file before first run. See [Configuration Guid
 src/
 ├── main.rs                  # Entry: Initialize components, start event loop
 ├── cli.rs                   # CLI argument parsing
+├── log.rs                   # Logging initialization
 ├── router.rs                # Module re-exports (→ router/)
 ├── router/
 │   ├── sq_router.rs         # TeamSpeak event router
-│   └── nc_router.rs         # NapCat/QQ event router
+│   ├── nc_router.rs         # NapCat/QQ event router
+│   ├── unified.rs           # Unified event model (cross-platform)
+│   └── headless_bridge.rs   # Headless voice LLM bridge
 ├── adapter/
 │   ├── mod.rs
 │   ├── serverquery/         # TeamSpeak ServerQuery adapter
@@ -51,16 +54,25 @@ src/
 │   │   ├── connection.rs    # TCP/SSH connection management
 │   │   ├── command.rs       # Command building
 │   │   └── event.rs         # Event parsing
-│   └── napcat/              # NapCat OneBot 11 adapter
+│   ├── napcat/              # NapCat OneBot 11 adapter
+│   │   ├── mod.rs
+│   │   ├── ws.rs            # WebSocket connection and reconnection
+│   │   ├── api.rs           # OneBot API action definitions
+│   │   ├── event.rs         # Event parsing
+│   │   └── types.rs         # Message segments and response types
+│   └── headless/            # Headless voice service
 │       ├── mod.rs
-│       ├── ws.rs            # WebSocket connection and reconnection
-│       ├── api.rs           # OneBot API action definitions
-│       ├── event.rs         # Event parsing
-│       └── types.rs         # Message segments and response types
+│       ├── service.rs        # Voice service main logic
+│       ├── actor.rs          # Voice actor management
+│       ├── playback.rs       # Playback control
+│       ├── speech.rs         # STT/TTS processing
+│       ├── serverquery.rs    # ServerQuery client for Headless
+│       └── types.rs         # Type definitions
 ├── config/
 │   ├── mod.rs               # AppConfig aggregation
 │   ├── serverquery.rs       # ServerQuery config
 │   ├── napcat.rs            # NapCat config
+│   ├── headless.rs          # Headless voice service config
 │   ├── bot.rs               # Bot behavior config
 │   ├── llm.rs               # LLM config
 │   ├── music_backend.rs     # Music backend config
@@ -71,7 +83,8 @@ src/
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM engine wrapper
-│   └── provider.rs          # Provider trait and OpenAI implementation
+│   ├── provider.rs          # Provider trait and OpenAI implementation
+│   └── context.rs           # Context window management
 ├── permission/
 │   ├── mod.rs
 │   └── gate.rs              # Permission gating logic
@@ -89,48 +102,63 @@ src/
 
 ```
 User Message → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
-                                                ↓
-                                           Tool Call Request
-                                                ↓
-                                    PermissionGate (Auth Check)
-                                                ↓
-                                    SkillRegistry → Skill.execute()
-                                                ↓
-                                    Result → LlmEngine → TsAdapter → Reply to User
+                                                 ↓
+                                            Tool Call Request
+                                                 ↓
+                                     PermissionGate (Auth Check)
+                                                 ↓
+                                     SkillRegistry → Skill.execute()
+                                                 ↓
+                                     Result → LlmEngine → TsAdapter → Reply to User
 ```
 
 **NapCat / QQ Path**:
 
 ```
 User Message → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
-                                                      ↓
-                                                 Tool Call Request
-                                                      ↓
-                                          PermissionGate (Auth Check)
-                                                      ↓
-                                    SkillRegistry → Skill.execute_unified()
-                                          ↓              ↓
-                                    NC native exec    Forward to TS exec
-                                          ↓              ↓
-                                    Reply NC user     Reply NC user
+                                                       ↓
+                                                  Tool Call Request
+                                                       ↓
+                                           PermissionGate (Auth Check)
+                                                       ↓
+                                     SkillRegistry → Skill.execute_unified()
+                                           ↓              ↓
+                                     NC native exec    Forward to TS exec
+                                           ↓              ↓
+                                     Reply NC user     Reply NC user
+```
+
+**Headless Voice Path**:
+
+```
+Voice Input → STT (Speech-to-Text) → HeadlessService → HeadlessLlmBridge
+                                                        ↓
+                                                    Tool Call Request
+                                                        ↓
+                                            PermissionGate (Auth Check)
+                                                        ↓
+                                          SkillRegistry → Skill.execute()
+                                                        ↓
+                                             Result → LlmEngine → TTS → Voice Output
 ```
 
 ### Cross-platform Behavior Matrix
 
-| Skill | TS entry | NC entry (default) | NC entry + `ts_route=true` |
-|---|---|---|---|
-| `poke_client` | ✅ TS execution | ❌ | ❌ |
-| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (NapCat native) | ✅ routed to TS |
-| `kick_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
-| `ban_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
-| `move_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a |
-| `get_client_list` | ✅ TS execution | ✅ queries TS online cache and returns | n/a |
-| `get_client_info` | ✅ TS execution | ✅ queries TS online cache and returns | n/a |
-| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS, waits for TS3AudioBot actual reply then returns | n/a |
+| Skill | TS entry | NC entry (default) | NC entry + `ts_route=true` | Headless entry |
+|---|---|---|---|---|
+| `poke_client` | ✅ TS execution | ❌ | ❌ | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group` (NapCat native) | ✅ routed to TS | ✅ via TS execution |
+| `kick_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a | ✅ TS execution |
+| `ban_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a | ✅ TS execution |
+| `move_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a | ✅ TS execution |
+| `get_client_list` | ✅ TS execution | ✅ queries TS online cache and returns | n/a | ✅ TS execution |
+| `get_client_info` | ✅ TS execution | ✅ queries TS online cache and returns | n/a | ✅ TS execution |
+| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS, waits for TS3AudioBot actual reply then returns | n/a | ✅ TS execution |
 
 Notes:
 - NC side unified execution follows "first `execute_unified`, fallback to `execute_nc` on failure".
 - TS side unified execution follows "first `execute_unified`, fallback to `execute` on failure".
+- Headless mode uses `HeadlessLlmBridge` as bridge, reusing TS execution context.
 - NC permissions are enforced via ACL virtual group mapping (`9000~9003`), see configuration docs.
 
 ## Core Modules Detail
@@ -193,6 +221,20 @@ pub struct NapCatAdapter {
 | `NcEvent::PrivateMessage` | QQ private message received |
 | `NcEvent::GroupMessage` | QQ group message received |
 
+#### Headless Voice Service (`adapter/headless/`)
+
+Provides headless voice interaction capability, integrating STT (Speech-to-Text) and TTS (Text-to-Speech).
+
+**Core Components**:
+- `service.rs` — Voice service main logic, manages voice connections and audio streams
+- `actor.rs` — Voice actor management, handles voice client state
+- `playback.rs` — Playback control, manages audio playback queue
+- `speech.rs` — STT/TTS processing, calls external voice service APIs
+- `serverquery.rs` — ServerQuery client for Headless
+- `types.rs` — Type definitions
+
+**Configuration**: Configure via `[headless]`, `[headless.stt]`, `[headless.tts]` sections in `settings.toml`.
+
 ### llm — LLM Integration
 
 Encapsulates interactions with LLM APIs, supporting OpenAI-compatible interfaces.
@@ -227,6 +269,34 @@ pub struct ToolCall {
 
 **Integration**: `LlmEngine::new()` in `src/llm/engine.rs` directly creates an `OpenAiProvider`. All OpenAI-compatible APIs (DeepSeek, ChatGPT, etc.) can be configured via `base_url` and `model`.
 
+#### Context Window Management (`llm/context.rs`)
+
+Manages multi-turn conversation context, supporting session isolation and automatic eviction.
+
+**Session Sources**: `SessionSource` enum
+
+| Source | Description |
+| --- | --- |
+| `TeamSpeak { clid }` | TeamSpeak user |
+| `NapCatPrivate { user_id }` | NapCat private message |
+| `NapCatGroup { group_id }` | NapCat group chat |
+| `Headless { caller_id }` | Headless voice mode |
+
+**Core Structure**: `ContextWindow`
+
+```rust
+pub struct ContextWindow {
+    histories: Arc<DashMap<String, VecDeque<ContextTurn>>>,  // Session history
+    session_order: Arc<Mutex<VecDeque<String>>>,            // Session order (for eviction)
+    max_turns: usize,     // Maximum conversation turns
+    max_sessions: usize,  // Maximum number of sessions
+}
+```
+
+**Configuration**: Set in `[llm]` section of `settings.toml`:
+- `max_context_turns` — Maximum context conversation turns (0 to disable)
+- `max_context_sessions` — Maximum number of sessions (evicts oldest when exceeded)
+
 ### permission — Access Control
 
 Access control based on TeamSpeak Server Groups and Channel Groups.
@@ -248,6 +318,29 @@ Prevents regular users from performing actions (kick/ban) on administrative grou
 **Rule Matching Logic**: Iterate all rules, collect `allowed_skills` from all matching rules as a union. Empty array means "match all".
 
 ### router — Event Router
+
+#### Unified Event Model (`router/unified.rs`)
+
+Provides cross-platform event abstraction, unifying message handling from different sources.
+
+**Event Sources**: `InboundSource` enum
+
+| Source | Description |
+| --- | --- |
+| `TeamSpeakText` | TeamSpeak text message |
+| `NapCatPrivate` | NapCat private message |
+| `NapCatGroup` | NapCat group message |
+| `HeadlessText` | Headless text input |
+| `HeadlessVoiceStt` | Headless voice-to-text |
+
+**Reply Policy**: `ReplyPolicy` enum
+
+| Policy | Description |
+| --- | --- |
+| `TeamSpeak { target_mode, target }` | TS reply (PM/channel/server) |
+| `NapCatPrivate { user_id }` | QQ private reply |
+| `NapCatGroup { group_id, at_user_id }` | QQ group reply |
+| `Headless { target_mode, target_client_id }` | Headless reply |
 
 #### SqRouter (TeamSpeak)
 
@@ -275,7 +368,7 @@ Key differences from SqRouter:
 
 ### Skill Trait
 
-All skills must implement the `Skill` trait: `src/skills/mod.rs:126-152`
+All skills must implement the `Skill` trait: `src/skills/mod.rs:152-177`
 
 ```rust
 #[async_trait]
@@ -287,23 +380,36 @@ pub trait Skill: Send + Sync {
     /// TeamSpeak execution (must implement)
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
-    /// NapCat/QQ execution (defaults to not supported, override as needed)
-    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value>;
+    /// NapCat/QQ execution (defaults to "not supported", override as needed)
+    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support the NapCat platform",
+            self.name()
+        ))
+    }
 
-    /// Unified execution (cross-platform, defaults to not supported, override as needed)
-    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value>;
+    /// Unified execution (cross-platform, defaults to "not supported", override as needed)
+    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support unified execution",
+            self.name()
+        ))
+    }
 }
 ```
 
 ### ExecutionContext
 
-Context during TeamSpeak skill execution: `src/skills/mod.rs:31-40`
+Context during TeamSpeak skill execution: `src/skills/mod.rs:31-41`
 
 ```rust
 pub struct ExecutionContext<'a> {
     pub adapter: Arc<TsAdapter>,
     pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
+    pub caller_name: String,
     pub caller_groups: Vec<u32>,
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
@@ -314,12 +420,13 @@ pub struct ExecutionContext<'a> {
 
 ### NcExecutionContext
 
-Context during NapCat skill execution: `src/skills/mod.rs:46-53`
+Context during NapCat skill execution: `src/skills/mod.rs:47-55`
 
 ```rust
 pub struct NcExecutionContext<'a> {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
+    pub caller_name: String,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
@@ -329,7 +436,7 @@ pub struct NcExecutionContext<'a> {
 
 ### UnifiedExecutionContext
 
-Cross-platform unified context, built via `from_ts()` or `from_nc()`, with cross-end adapters injected via `with_cross_adapters()`: `src/skills/mod.rs:59-120`
+Cross-platform unified context, built via `from_ts()` or `from_nc()`, with cross-end adapters injected via `with_cross_adapters()`: `src/skills/mod.rs:61-75`
 
 ```rust
 pub struct UnifiedExecutionContext<'a> {
@@ -339,12 +446,36 @@ pub struct UnifiedExecutionContext<'a> {
     pub nc_adapter: Option<Arc<NapCatAdapter>>,
     pub caller_id: u32,
     pub caller_id_nc: i64,
+    pub caller_name: String,
     pub caller_groups: Vec<u32>,
     pub caller_channel_group_id: u32,
     pub nc_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
     pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+**Helper Methods**:
+
+```rust
+impl<'a> UnifiedExecutionContext<'a> {
+    // Build from TS context
+    pub fn from_ts(ctx: &ExecutionContext<'a>) -> Self { ... }
+
+    // Build from NC context
+    pub fn from_nc(ctx: &NcExecutionContext<'a>) -> Self { ... }
+
+    // Inject cross-platform adapters
+    pub fn with_cross_adapters(
+        mut self,
+        ts_adapter: Option<Arc<TsAdapter>>,
+        ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+        nc_adapter: Option<Arc<NapCatAdapter>>,
+    ) -> Self { ... }
+
+    // Restore to TS execution context (for cross-platform skill execution)
+    pub fn to_ts_ctx(&self) -> Result<ExecutionContext<'a>> { ... }
 }
 ```
 
@@ -392,11 +523,28 @@ impl Skill for ExampleSkill {
         }))
     }
 
+    // NapCat execution (override as needed)
+    async fn execute_nc(&self, args: Value, ctx: &NcExecutionContext) -> Result<Value> {
+        // Platform-specific implementation for NapCat
+        let name = args["name"].as_str().unwrap_or("Unknown");
+        Ok(json!({
+            "message": format!("Hello from NC, {}!", name)
+        }))
+    }
+
     // Cross-platform support: use ctx.to_ts_ctx()? for simplified context restoration
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         info!("ExampleSkill: unified execution, platform={:?}", ctx.platform);
-        let ts_ctx = ctx.to_ts_ctx()?;
-        self.execute(args, &ts_ctx).await
+        match ctx.platform {
+            Platform::TeamSpeak => {
+                let ts_ctx = ctx.to_ts_ctx()?;
+                self.execute(args, &ts_ctx).await
+            }
+            Platform::NapCat => {
+                // If you have NC-specific implementation, call it here
+                Err(anyhow::anyhow!("Use execute_nc for NC platform"))
+            }
+        }
     }
 }
 ```
@@ -438,13 +586,13 @@ can_target_admins = false
 | Skill Name | File | Description |
 |---|---|---|
 | `poke_client` | `communication.rs` | Poke a user |
-| `send_message` | `communication.rs` | Send message (cross-platform) |
+| `send_message` | `communication.rs` | Send message (cross-platform, supports TS/NC routing) |
 | `kick_client` | `moderation.rs` | Kick a user |
 | `ban_client` | `moderation.rs` | Ban a user |
 | `move_client` | `moderation.rs` | Move a user to a specified channel |
 | `get_client_list` | `information.rs` | Get online user list |
 | `get_client_info` | `information.rs` | Get detailed user info |
-| `music_control` | `music.rs` | Music control (dual backend + cross-platform) |
+| `music_control` | `music.rs` | Music control (dual backend + cross-platform + Headless support) |
 
 ## Permission System
 

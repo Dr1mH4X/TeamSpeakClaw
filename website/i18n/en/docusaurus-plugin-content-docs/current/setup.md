@@ -23,11 +23,17 @@ TeamSpeakClaw is a standalone binary application and does not require a complex 
 
 The extracted archive contains a `config/` directory with the following configuration files:
 
-- `settings.toml` — Core settings (Connection, LLM, bot behavior)
+- `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service)
 - `acl.toml` — Permission control rules
 - `prompts.toml` — System prompts and error messages
 
 Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak ServerQuery account credentials, LLM API Key, and other information.
+
+**Quick Configuration Checklist**:
+- `[serverquery]` — Fill in TeamSpeak server address, port, and login credentials
+- `[llm]` — Fill in API Key, Base URL, and model name
+- `[headless]` — Enable and configure STT/TTS if you need voice service (optional)
+- `[napcat]` — Enable and configure WebSocket URL if you need QQ bot (optional)
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).
 

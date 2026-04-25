@@ -40,10 +40,13 @@ cargo run
 src/
 ├── main.rs                  # 入口：初始化组件，启动事件循环
 ├── cli.rs                   # 命令行参数解析
+├── log.rs                   # 日志初始化
 ├── router.rs                # 模块重导出（→ router/）
 ├── router/
 │   ├── sq_router.rs         # TeamSpeak 事件路由
-│   └── nc_router.rs         # NapCat/QQ 事件路由
+│   ├── nc_router.rs         # NapCat/QQ 事件路由
+│   ├── unified.rs           # 统一事件模型（跨平台）
+│   └── headless_bridge.rs   # Headless 语音桥接 LLM 路由
 ├── adapter/
 │   ├── mod.rs
 │   ├── serverquery/         # TeamSpeak ServerQuery 适配器
@@ -51,16 +54,25 @@ src/
 │   │   ├── connection.rs    # TCP/SSH 连接管理
 │   │   ├── command.rs       # 命令构建
 │   │   └── event.rs         # 事件解析
-│   └── napcat/              # NapCat OneBot 11 适配器
+│   ├── napcat/              # NapCat OneBot 11 适配器
+│   │   ├── mod.rs
+│   │   ├── ws.rs            # WebSocket 连接与重连
+│   │   ├── api.rs           # OneBot API action 定义
+│   │   ├── event.rs         # 事件解析
+│   │   └── types.rs         # 消息段与响应类型
+│   └── headless/            # Headless 语音服务
 │       ├── mod.rs
-│       ├── ws.rs            # WebSocket 连接与重连
-│       ├── api.rs           # OneBot API action 定义
-│       ├── event.rs         # 事件解析
-│       └── types.rs         # 消息段与响应类型
+│       ├── service.rs        # 语音服务主逻辑
+│       ├── actor.rs          # 语音角色管理
+│       ├── playback.rs       # 播放控制
+│       ├── speech.rs         # STT/TTS 处理
+│       ├── serverquery.rs    # Headless 使用的 ServerQuery 客户端
+│       └── types.rs         # 类型定义
 ├── config/
 │   ├── mod.rs               # AppConfig 聚合
 │   ├── serverquery.rs       # ServerQuery 配置
 │   ├── napcat.rs            # NapCat 配置
+│   ├── headless.rs          # Headless 语音服务配置
 │   ├── bot.rs               # 机器人行为配置
 │   ├── llm.rs               # LLM 配置
 │   ├── music_backend.rs     # 音乐后端配置
@@ -71,7 +83,8 @@ src/
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM 引擎封装
-│   └── provider.rs          # 提供者 trait 与 OpenAI 实现
+│   ├── provider.rs          # 提供者 trait 与 OpenAI 实现
+│   └── context.rs           # 上下文窗口管理
 ├── permission/
 │   ├── mod.rs
 │   └── gate.rs              # 权限门控逻辑
@@ -89,48 +102,63 @@ src/
 
 ```
 用户消息 → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
-                                                ↓
-                                           工具调用请求
-                                                ↓
-                                    PermissionGate (权限检查)
-                                                ↓
-                                    SkillRegistry → Skill.execute()
-                                                ↓
-                                    执行结果 → LlmEngine → TsAdapter → 回复用户
+                                                 ↓
+                                            工具调用请求
+                                                 ↓
+                                     PermissionGate (权限检查)
+                                                 ↓
+                                     SkillRegistry → Skill.execute()
+                                                 ↓
+                                     执行结果 → LlmEngine → TsAdapter → 回复用户
 ```
 
 **NapCat / QQ 路径**：
 
 ```
 用户消息 → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
-                                                      ↓
-                                                 工具调用请求
-                                                      ↓
-                                          PermissionGate (权限检查)
-                                                      ↓
-                                    SkillRegistry → Skill.execute_unified()
-                                          ↓              ↓
-                                    NC 原生执行    转发到 TS 执行
-                                          ↓              ↓
-                                    回复 NC 用户    回复 NC 用户
+                                                       ↓
+                                                  工具调用请求
+                                                       ↓
+                                           PermissionGate (权限检查)
+                                                       ↓
+                                     SkillRegistry → Skill.execute_unified()
+                                           ↓              ↓
+                                     NC 原生执行    转发到 TS 执行
+                                           ↓              ↓
+                                     回复 NC 用户    回复 NC 用户
+```
+
+**Headless 语音路径**：
+
+```
+语音输入 → STT (语音转文字) → HeadlessService → HeadlessLlmBridge
+                                                        ↓
+                                                   工具调用请求
+                                                        ↓
+                                            PermissionGate (权限检查)
+                                                        ↓
+                                          SkillRegistry → Skill.execute()
+                                                        ↓
+                                            执行结果 → LlmEngine → TTS → 语音输出
 ```
 
 ### 跨平台行为矩阵
 
-| Skill | TS 入口 | NC 入口（默认） | NC 入口 + `ts_route=true` |
-|---|---|---|---|
-| `poke_client` | ✅ TS 执行 | ❌ | ❌ |
-| `send_message` | ✅ `private/channel/server` | ✅ `private/group`（NapCat 原生） | ✅ 路由到 TS |
-| `kick_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
-| `ban_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
-| `move_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 |
-| `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
-| `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 |
-| `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS，等待 TS3AudioBot 实际回复后回传 | 不适用 |
+| Skill | TS 入口 | NC 入口（默认） | NC 入口 + `ts_route=true` | Headless 入口 |
+|---|---|---|---|---|
+| `poke_client` | ✅ TS 执行 | ❌ | ❌ | ❌ |
+| `send_message` | ✅ `private/channel/server` | ✅ `private/group`（NapCat 原生） | ✅ 路由到 TS | ✅ 通过 TS 执行 |
+| `kick_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 | ✅ TS 执行 |
+| `ban_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 | ✅ TS 执行 |
+| `move_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 | ✅ TS 执行 |
+| `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 | ✅ TS 执行 |
+| `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 | ✅ TS 执行 |
+| `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS，等待 TS3AudioBot 实际回复后回传 | 不适用 | ✅ TS 执行 |
 
 说明：
 - NC 侧统一执行遵循"先 `execute_unified`，失败再回退 `execute_nc`"。
 - TS 侧统一执行遵循"先 `execute_unified`，失败回退 `execute`"。
+- Headless 模式通过 `HeadlessLlmBridge` 桥接，复用 TS 的执行上下文。
 - NC 权限通过 ACL 虚拟组映射（`9000~9003`）实现，详见配置文档。
 
 ## 核心模块详解
@@ -162,7 +190,7 @@ pub struct TsAdapter {
 **事件类型**：`src/adapter/serverquery/event.rs`
 
 | 事件 | 说明 |
-|---|---|
+| --- | --- |
 | `TsEvent::TextMessage` | 收到文本消息 |
 | `TsEvent::ClientEnterView` | 用户进入可视范围 |
 | `TsEvent::ClientLeftView` | 用户离开可视范围 |
@@ -189,9 +217,23 @@ pub struct NapCatAdapter {
 **事件类型**：`src/adapter/napcat/event.rs`
 
 | 事件 | 说明 |
-|---|---|
+| --- | --- |
 | `NcEvent::PrivateMessage` | 收到 QQ 私聊消息 |
 | `NcEvent::GroupMessage` | 收到 QQ 群消息 |
+
+#### Headless 语音服务 (`adapter/headless/`)
+
+提供无界面语音交互能力，集成 STT（语音转文字）和 TTS（文字转语音）。
+
+**核心组件**：
+- `service.rs` — 语音服务主逻辑，管理语音连接和音频流
+- `actor.rs` — 语音角色管理，处理语音客户端的状态
+- `playback.rs` — 播放控制，管理音频播放队列
+- `speech.rs` — STT/TTS 处理，调用外部语音服务 API
+- `serverquery.rs` — Headless 专用的 ServerQuery 客户端
+- `types.rs` — 类型定义
+
+**配置**：通过 `settings.toml` 的 `[headless]`、`[headless.stt]`、`[headless.tts]` 区段配置。
 
 ### llm — 大语言模型集成
 
@@ -227,6 +269,34 @@ pub struct ToolCall {
 
 **集成方式**：`src/llm/engine.rs` 中 `LlmEngine::new()` 直接创建 `OpenAiProvider`，所有 OpenAI 兼容接口（DeepSeek、ChatGPT 等）均可通过 `base_url` 和 `model` 配置。
 
+#### Context 窗口管理 (`llm/context.rs`)
+
+管理多轮对话上下文，支持会话隔离和自动淘汰。
+
+**会话来源**：`SessionSource` 枚举
+
+| 来源 | 说明 |
+| --- | --- |
+| `TeamSpeak { clid }` | TeamSpeak 用户 |
+| `NapCatPrivate { user_id }` | NapCat 私聊 |
+| `NapCatGroup { group_id }` | NapCat 群聊 |
+| `Headless { caller_id }` | Headless 语音模式 |
+
+**核心结构**：`ContextWindow`
+
+```rust
+pub struct ContextWindow {
+    histories: Arc<DashMap<String, VecDeque<ContextTurn>>>,  // 会话历史
+    session_order: Arc<Mutex<VecDeque<String>>>,            // 会话顺序（用于淘汰）
+    max_turns: usize,     // 最大对话轮数
+    max_sessions: usize,  // 最大会话数
+}
+```
+
+**配置**：通过 `settings.toml` 的 `[llm]` 区段设置：
+- `max_context_turns` — 最大上下文对话轮数（0 表示禁用）
+- `max_context_sessions` — 最大会话数（超过时淘汰最旧会话）
+
 ### permission — 权限控制
 
 基于 TeamSpeak 服务器组和频道组的访问控制。
@@ -248,6 +318,29 @@ pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, ta
 **规则匹配逻辑**：遍历所有规则，收集所有匹配规则的 `allowed_skills` 取并集。空数组表示"匹配所有"。
 
 ### router — 事件路由
+
+#### 统一事件模型 (`router/unified.rs`)
+
+提供跨平台的事件抽象，统一不同来源的消息处理。
+
+**事件来源**：`InboundSource` 枚举
+
+| 来源 | 说明 |
+| --- | --- |
+| `TeamSpeakText` | TeamSpeak 文本消息 |
+| `NapCatPrivate` | NapCat 私聊消息 |
+| `NapCatGroup` | NapCat 群聊消息 |
+| `HeadlessText` | Headless 文本输入 |
+| `HeadlessVoiceStt` | Headless 语音转文字 |
+
+**回复策略**：`ReplyPolicy` 枚举
+
+| 策略 | 说明 |
+| --- | --- |
+| `TeamSpeak { target_mode, target }` | TS 回复（私聊/频道/服务器） |
+| `NapCatPrivate { user_id }` | QQ 私聊回复 |
+| `NapCatGroup { group_id, at_user_id }` | QQ 群聊回复 |
+| `Headless { target_mode, target_client_id }` | Headless 回复 |
 
 #### SqRouter（TeamSpeak）
 
@@ -271,11 +364,21 @@ pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, ta
 - 拥有 `ts_adapter` 和 `ts_clients`，可构造 `UnifiedExecutionContext::from_nc()` 实现跨平台工具调用
 - NC 用户的权限通过虚拟组 ID（`9000-9003`）映射
 
+#### HeadlessLlmBridge（`router/headless_bridge.rs`）
+
+`src/router/headless_bridge.rs` — 连接 Headless 语音服务与 LLM 引擎的桥梁。
+
+处理流程：
+1. 从 Headless 服务接收 STT 转换的文本
+2. 构造 `UnifiedInboundEvent::from_headless()`
+3. 执行 LLM 调用和工具执行
+4. 将回复文本通过 TTS 转换为语音输出
+
 ## 技能系统开发
 
 ### Skill trait
 
-所有技能必须实现 `Skill` trait：`src/skills/mod.rs:126-152`
+所有技能必须实现 `Skill` trait：`src/skills/mod.rs:152-177`
 
 ```rust
 #[async_trait]
@@ -287,23 +390,36 @@ pub trait Skill: Send + Sync {
     /// TeamSpeak 执行（必须实现）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
-    /// NapCat/QQ 执行（默认返回不支持，按需覆盖）
-    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value>;
+    /// NapCat/QQ 执行（默认返回"不支持"，按需覆盖）
+    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support the NapCat platform",
+            self.name()
+        ))
+    }
 
-    /// 统一执行（跨平台，默认返回不支持，按需覆盖）
-    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value>;
+    /// 统一执行（支持跨平台，默认返回"不支持"，按需覆盖）
+    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
+        let _ = args;
+        Err(anyhow::anyhow!(
+            "Skill '{}' does not support unified execution",
+            self.name()
+        ))
+    }
 }
 ```
 
 ### ExecutionContext
 
-TeamSpeak 技能执行时的上下文：`src/skills/mod.rs:31-40`
+TeamSpeak 技能执行时的上下文：`src/skills/mod.rs:31-41`
 
 ```rust
 pub struct ExecutionContext<'a> {
     pub adapter: Arc<TsAdapter>,
     pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
+    pub caller_name: String,
     pub caller_groups: Vec<u32>,
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
@@ -314,12 +430,13 @@ pub struct ExecutionContext<'a> {
 
 ### NcExecutionContext
 
-NapCat 技能执行时的上下文：`src/skills/mod.rs:46-53`
+NapCat 技能执行时的上下文：`src/skills/mod.rs:47-55`
 
 ```rust
 pub struct NcExecutionContext<'a> {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
+    pub caller_name: String,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
@@ -329,7 +446,7 @@ pub struct NcExecutionContext<'a> {
 
 ### UnifiedExecutionContext
 
-跨平台统一上下文，由 `from_ts()` 或 `from_nc()` 构建，通过 `with_cross_adapters()` 注入对端适配器：`src/skills/mod.rs:59-120`
+跨平台统一上下文，由 `from_ts()` 或 `from_nc()` 构建，通过 `with_cross_adapters()` 注入对端适配器：`src/skills/mod.rs:61-75`
 
 ```rust
 pub struct UnifiedExecutionContext<'a> {
@@ -339,12 +456,36 @@ pub struct UnifiedExecutionContext<'a> {
     pub nc_adapter: Option<Arc<NapCatAdapter>>,
     pub caller_id: u32,
     pub caller_id_nc: i64,
+    pub caller_name: String,
     pub caller_groups: Vec<u32>,
     pub caller_channel_group_id: u32,
     pub nc_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
     pub error_prompts: &'a ErrorPrompts,
+}
+```
+
+**辅助方法**：
+
+```rust
+impl<'a> UnifiedExecutionContext<'a> {
+    // 从 TS 上下文构建
+    pub fn from_ts(ctx: &ExecutionContext<'a>) -> Self { ... }
+
+    // 从 NC 上下文构建
+    pub fn from_nc(ctx: &NcExecutionContext<'a>) -> Self { ... }
+
+    // 注入跨平台适配器
+    pub fn with_cross_adapters(
+        mut self,
+        ts_adapter: Option<Arc<TsAdapter>>,
+        ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
+        nc_adapter: Option<Arc<NapCatAdapter>>,
+    ) -> Self { ... }
+
+    // 还原为 TS 执行上下文（用于跨平台技能执行）
+    pub fn to_ts_ctx(&self) -> Result<ExecutionContext<'a>> { ... }
 }
 ```
 
@@ -392,11 +533,28 @@ impl Skill for ExampleSkill {
         }))
     }
 
+    // NapCat 执行（按需覆盖）
+    async fn execute_nc(&self, args: Value, ctx: &NcExecutionContext) -> Result<Value> {
+        // 针对 NapCat 平台的特化实现
+        let name = args["name"].as_str().unwrap_or("Unknown");
+        Ok(json!({
+            "message": format!("Hello from NC, {}!", name)
+        }))
+    }
+
     // 跨平台支持：使用 ctx.to_ts_ctx()? 简化上下文还原
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         info!("ExampleSkill: unified execution, platform={:?}", ctx.platform);
-        let ts_ctx = ctx.to_ts_ctx()?;
-        self.execute(args, &ts_ctx).await
+        match ctx.platform {
+            Platform::TeamSpeak => {
+                let ts_ctx = ctx.to_ts_ctx()?;
+                self.execute(args, &ts_ctx).await
+            }
+            Platform::NapCat => {
+                // 如果有 NC 特化实现，可以在这里调用
+                Err(anyhow::anyhow!("Use execute_nc for NC platform"))
+            }
+        }
     }
 }
 ```
@@ -436,15 +594,15 @@ can_target_admins = false
 ### 现有技能列表
 
 | 技能名 | 文件 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | `poke_client` | `communication.rs` | 戳一戳用户 |
-| `send_message` | `communication.rs` | 发送消息（跨平台） |
+| `send_message` | `communication.rs` | 发送消息（跨平台，支持 TS/NC 路由） |
 | `kick_client` | `moderation.rs` | 踢出用户 |
 | `ban_client` | `moderation.rs` | 封禁用户 |
 | `move_client` | `moderation.rs` | 移动用户到指定频道 |
 | `get_client_list` | `information.rs` | 获取在线用户列表 |
 | `get_client_info` | `information.rs` | 获取用户详细信息 |
-| `music_control` | `music.rs` | 音乐控制（双后端 + 跨平台） |
+| `music_control` | `music.rs` | 音乐控制（双后端 + 跨平台 + Headless 支持） |
 
 ## 权限系统
 
