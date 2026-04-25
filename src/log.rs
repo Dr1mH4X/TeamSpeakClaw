@@ -1,9 +1,11 @@
 use chrono::Local;
+use slog::Drain;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_slog::TracingSlogDrain;
 use tracing_subscriber::{
     fmt::{self, time::LocalTime},
     layer::SubscriberExt,
@@ -43,6 +45,11 @@ pub fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
         .with(console_layer)
         .with(file_layer)
         .init();
+
+    // Bridge slog (used by tsclientlib) to tracing
+    let slog_logger = slog::Logger::root(TracingSlogDrain.fuse(), slog::o!());
+    let _slog_guard = slog_scope::set_global_logger(slog_logger);
+    std::mem::forget(_slog_guard);
 
     guard
 }
