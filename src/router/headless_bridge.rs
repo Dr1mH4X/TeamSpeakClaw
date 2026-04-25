@@ -59,7 +59,6 @@ impl HeadlessLlmBridge {
     const OBS_TOOL: bool = true;
     const OBS_TEXT_MAX_LEN: usize = 240;
     const TTS_SEGMENT_SOFT_LIMIT: usize = 120;
-    const TTS_CHUNK_SIZE: usize = 16 * 1024;
     const STREAM_TTS_MIN_CHARS: usize = 4;
     const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
     const STREAM_TTS_MAX_CHARS: usize = 28;
@@ -860,17 +859,20 @@ impl HeadlessLlmBridge {
         segment: &str,
     ) -> Result<()> {
         let audio = speech_provider.synthesize(segment).await?;
+        debug!(
+            segment,
+            audio_bytes = audio.len(),
+            "enqueue tts segment"
+        );
         let codec = detect_audio_format(&audio);
-        for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
-            tx.send(voicev1::TtsAudioChunk {
-                payload: payload.to_vec(),
-                codec: codec.to_string(),
-                end_of_stream: false,
-                trace_id: trace_id.to_string(),
-            })
-            .await
-            .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
-        }
+        tx.send(voicev1::TtsAudioChunk {
+            payload: audio,
+            codec: codec.to_string(),
+            end_of_stream: false,
+            trace_id: trace_id.to_string(),
+        })
+        .await
+        .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
         Ok(())
     }
 
@@ -914,16 +916,14 @@ impl HeadlessLlmBridge {
             for segment in segments {
                 let audio = speech_provider.synthesize(&segment).await?;
                 let codec = detect_audio_format(&audio);
-                for payload in audio.chunks(Self::TTS_CHUNK_SIZE) {
-                    tx.send(voicev1::TtsAudioChunk {
-                        payload: payload.to_vec(),
-                        codec: codec.to_string(),
-                        end_of_stream: false,
-                        trace_id: trace_id.clone(),
-                    })
-                    .await
-                    .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
-                }
+                tx.send(voicev1::TtsAudioChunk {
+                    payload: audio,
+                    codec: codec.to_string(),
+                    end_of_stream: false,
+                    trace_id: trace_id.clone(),
+                })
+                .await
+                .map_err(|e| anyhow!("send tts chunk failed: {e}"))?;
             }
             tx.send(voicev1::TtsAudioChunk {
                 payload: vec![],
