@@ -5,7 +5,7 @@ use crate::adapter::napcat::{
 };
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{provider::ToolCall, LlmEngine};
+use crate::llm::{context::SessionSource, provider::ToolCall, LlmEngine};
 use crate::permission::PermissionGate;
 use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -405,17 +405,21 @@ impl NcRouter {
         let error_msg = self.prompts.error.llm_error.clone();
         let max_turns = self.config.bot.max_tool_turns;
 
+        // 生成 SessionSource
+        let source = match group_id {
+            Some(gid) => SessionSource::NapCatGroup { group_id: gid },
+            None => SessionSource::NapCatPrivate { user_id },
+        };
+
         let system_prompt = &self.prompts.system.content;
         let user_ctx = match group_id {
             Some(gid) => format!("User: {} (QQ: {}, Group: {})", sender_name, user_id, gid),
             None => format!("User: {} (QQ: {}, Private Chat)", sender_name, user_id),
         };
 
-        let mut messages = vec![
-            json!({"role": "system", "content": system_prompt}),
-            json!({"role": "system", "content": user_ctx}),
-            json!({"role": "user", "content": user_msg}),
-        ];
+        let mut messages = self
+            .llm
+            .build_messages(&source, system_prompt, &user_ctx, user_msg);
 
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
@@ -428,6 +432,9 @@ impl NcRouter {
                     if response.tool_calls.is_empty() {
                         let content = response.content.unwrap_or_default();
                         info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
+                        // 保存对话到上下文
+                        self.llm
+                            .save_turn(&source, user_msg.to_string(), content.clone());
                         return content;
                     }
 
