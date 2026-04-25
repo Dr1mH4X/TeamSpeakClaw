@@ -589,7 +589,6 @@ can_target_admins = false
 4. **权限检查**：使用 `ctx.gate.can_target()` 检查操作权限
 5. **返回值**：返回 JSON 对象，包含 `status: "ok"` 及执行结果
 6. **跨平台**：实现 `execute_unified()`，使用 `ctx.to_ts_ctx()?` 一行还原 TS 上下文
-7. **详细指南**：参见 [技能开发向导](/docs/skills-guide)
 
 ### 现有技能列表
 
