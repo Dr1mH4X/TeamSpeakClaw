@@ -37,7 +37,13 @@ You can interact with the bot in the following ways:
     -   Private messages usually do not require a prefix (depending on the `respond_to_private` setting).
     -   Example: `Kick that person named User123`
 
-3.  **NapCat / QQ** (Optional): Enable NapCat to interact via QQ private messages or group chats.
+3.  **Headless Voice Mode** (Optional): After enabling Headless service, you can interact with the bot directly via voice.
+    -   Configure the `[headless]` section in `settings.toml`
+    -   Say the wake word (default `tsclaw`) followed by your command
+    -   The bot will reply via voice (requires TTS configuration)
+    -   Example: (Say) `tsclaw play Nocturne by Jay Chou`
+
+4.  **NapCat / QQ** (Optional): Enable NapCat to interact via QQ private messages or group chats.
 
 ## Available Skills
 

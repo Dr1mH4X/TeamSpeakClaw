@@ -37,7 +37,13 @@ INFO Bot ready. Listening for TS + NapCat events.
     -   私聊通常不需要前缀（取决于 `respond_to_private` 设置）。
     -   例如: `踢掉那个叫 User123 的人`
 
-3.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
+3.  **Headless 语音模式**（可选）：启用 Headless 服务后，可直接通过语音与机器人交互。
+    -   配置 `settings.toml` 中的 `[headless]` 区段
+    -   说出唤醒词（默认 `tsclaw`）后说出指令
+    -   机器人会通过语音回复（需配置 TTS）
+    -   例如: （说）`tsclaw 播放周杰伦的夜曲`
+
+4.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
 
 ## 可用技能 (Skills)
 
