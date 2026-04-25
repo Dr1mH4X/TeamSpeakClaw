@@ -514,7 +514,7 @@ impl HeadlessLlmBridge {
             };
 
             if Self::OBS_LLM {
-                let preview = response
+                let reply = response
                     .content
                     .as_deref()
                     .map(|s| self.truncate_for_log(s))
@@ -523,7 +523,7 @@ impl HeadlessLlmBridge {
                     event = "headless.llm.response",
                     turn = turn + 1,
                     tool_calls = response.tool_calls.len(),
-                    content_preview = %preview,
+                    reply = %reply,
                     "headless llm response"
                 );
             }
@@ -824,6 +824,7 @@ impl HeadlessLlmBridge {
                     total_ms = total_time,
                     first_token_ms = first_token_time_clone.load(Ordering::Relaxed),
                     reply_len = reply.chars().count(),
+                    reply = %self.truncate_for_log(&reply),
                     "stream tts: llm reply completed"
                 );
             }
