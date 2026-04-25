@@ -579,7 +579,7 @@ can_target_admins = false
 4. **Permission Check**: Use `ctx.gate.can_target()` to check operation permissions
 5. **Return Values**: Return JSON objects with `status: "ok"` and execution results
 6. **Cross-Platform**: Implement `execute_unified()`, use `ctx.to_ts_ctx()?` for one-line TS context restoration
-7. **Detailed Guide**: See [Skills Development Guide](/docs/skills-guide)
+
 
 ### Existing Skills
 
