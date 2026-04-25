@@ -6,9 +6,7 @@ pub struct BotConfig {
     pub nickname: String,
     pub trigger_prefixes: Vec<String>,
     pub respond_to_private: bool,
-    pub max_concurrent_requests: u32,
     pub default_reply_mode: String,
-    pub max_tool_turns: u32,
 }
 
 fn default_bot_nickname() -> String {
@@ -25,9 +23,7 @@ impl Default for BotConfig {
                 "@TSClaw".to_string(),
             ],
             respond_to_private: true,
-            max_concurrent_requests: 4,
             default_reply_mode: "private".to_string(),
-            max_tool_turns: 3,
         }
     }
 }

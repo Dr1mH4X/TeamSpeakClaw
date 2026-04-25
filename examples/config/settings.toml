@@ -6,9 +6,7 @@
 nickname = "TSClaw"                       # 机器人名称（ServerQuery 会自动追加随机后缀）
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
 respond_to_private = true       # 私聊消息始终触发机器人
-max_concurrent_requests = 4     # 最大并发 LLM 请求数
 default_reply_mode = "channel"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)
-max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
 
 # Headless 语音服务配置
 [headless]
@@ -57,6 +55,8 @@ stream_output = false  # 流式输出：false 或 true（TTS快速响应）
 omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
 max_context_turns = 0  # 最大上下文对话轮数（0 表示禁用上下文）
 max_context_sessions = 3  # 最大会话数（超过时淘汰最旧会话）
+max_concurrent_requests = 4     # 最大并发 LLM 请求数
+max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
 
 # 限流配置
 [rate_limit]

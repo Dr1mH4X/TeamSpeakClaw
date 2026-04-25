@@ -487,7 +487,7 @@ impl HeadlessLlmBridge {
         mut messages: Vec<serde_json::Value>,
         tools: Vec<serde_json::Value>,
     ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
-        let max_turns = self.config.bot.max_tool_turns;
+        let max_turns = self.config.llm.max_tool_turns;
 
         for turn in 0..max_turns {
             if Self::OBS_LLM {
@@ -860,11 +860,7 @@ impl HeadlessLlmBridge {
         segment: &str,
     ) -> Result<()> {
         let audio = speech_provider.synthesize(segment).await?;
-        debug!(
-            segment,
-            audio_bytes = audio.len(),
-            "enqueue tts segment"
-        );
+        debug!(segment, audio_bytes = audio.len(), "enqueue tts segment");
         let codec = detect_audio_format(&audio);
         tx.send(voicev1::TtsAudioChunk {
             payload: audio,
