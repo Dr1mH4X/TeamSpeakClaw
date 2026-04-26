@@ -23,7 +23,6 @@ use voicev1::voice_service_server::VoiceServiceServer;
 
 mod actor;
 mod playback;
-mod serverquery;
 mod service;
 pub mod speech;
 mod types;
@@ -41,11 +40,6 @@ pub struct HeadlessRuntimeConfig {
     pub channel_password: String,
     pub channel_path: String,
     pub channel_id: String,
-    pub sq_host: String,
-    pub sq_port: u16,
-    pub sq_user: String,
-    pub sq_password: String,
-    pub sq_sid: u32,
     pub bot_respond_to_private: bool,
     pub bot_default_reply_mode: String,
     pub bot_trigger_prefixes: Vec<String>,
@@ -150,14 +144,6 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
         });
     }
 
-    let sq_runtime_cfg = serverquery::ServerQueryRuntimeConfig {
-        host: config.sq_host.clone(),
-        port: config.sq_port,
-        user: config.sq_user.clone(),
-        password: config.sq_password.clone(),
-        sid: config.sq_sid,
-    };
-
     let svc = service::VoiceServiceImpl::new(
         Arc::new(Mutex::new(init_status)),
         ts3_audio_tx,
@@ -165,8 +151,6 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
         ts3_cmd_tx,
         events_tx,
         persist_tx,
-        Some(sq_runtime_cfg),
-        config.nickname.clone(),
         config.bot_respond_to_private,
         config.bot_default_reply_mode.clone(),
         config.bot_trigger_prefixes.clone(),

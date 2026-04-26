@@ -16,9 +16,6 @@ use tsproto_packets::packets::{
 };
 
 use super::playback::playback_loop;
-use super::serverquery::{
-    serverquery_set_client_description, ts3_escape_value, ServerQueryRuntimeConfig,
-};
 use super::speech::detect_audio_format;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::{emit_log, emit_playback, PersistedVoiceState, SharedStatus};
@@ -38,8 +35,6 @@ pub struct VoiceServiceImpl {
     ts3_cmd_tx: mpsc::Sender<OutCommand>,
     events_tx: broadcast::Sender<voicev1::Event>,
     persist_tx: mpsc::Sender<PersistedVoiceState>,
-    sq_config: Option<ServerQueryRuntimeConfig>,
-    nickname: String,
     bot_respond_to_private: bool,
     bot_default_reply_mode: String,
     bot_trigger_prefixes: Vec<String>,
@@ -53,8 +48,6 @@ impl VoiceServiceImpl {
         ts3_cmd_tx: mpsc::Sender<OutCommand>,
         events_tx: broadcast::Sender<voicev1::Event>,
         persist_tx: mpsc::Sender<PersistedVoiceState>,
-        sq_config: Option<ServerQueryRuntimeConfig>,
-        nickname: String,
         bot_respond_to_private: bool,
         bot_default_reply_mode: String,
         bot_trigger_prefixes: Vec<String>,
@@ -67,8 +60,6 @@ impl VoiceServiceImpl {
             ts3_cmd_tx,
             events_tx,
             persist_tx,
-            sq_config,
-            nickname,
             bot_respond_to_private,
             bot_default_reply_mode,
             bot_trigger_prefixes,
@@ -395,7 +386,7 @@ impl VoiceService for VoiceServiceImpl {
         let cleaned = desc.replace(['\r', '\n', '\t'], " ");
         let compact = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        let encoded = ts3_escape_value(&compact);
+        let encoded = crate::adapter::serverquery::command::ts_escape(&compact);
 
         if encoded.len() != desc.len() {
             debug!(
@@ -403,26 +394,6 @@ impl VoiceService for VoiceServiceImpl {
                 desc.len(),
                 encoded.len()
             );
-        }
-
-        if let Some(ref sq_cfg) = self.sq_config {
-            match serverquery_set_client_description(sq_cfg, &self.nickname, &encoded).await {
-                Ok(()) => {
-                    return Ok(Response::new(voicev1::CommandResponse {
-                        ok: true,
-                        message: "ok".to_string(),
-                    }));
-                }
-                Err(e) => {
-                    let msg = format!("serverquery set description failed: {e}");
-                    emit_log(&self.events_tx, 3, msg.clone());
-                    warn!("{msg}");
-                    return Ok(Response::new(voicev1::CommandResponse {
-                        ok: false,
-                        message: msg,
-                    }));
-                }
-            }
         }
 
         let mut cmd = OutCommand::new(
@@ -691,7 +662,7 @@ impl VoiceService for VoiceServiceImpl {
     async fn subscribe_events(
         &self,
         req: Request<voicev1::SubscribeRequest>,
-    ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
+    ) -> std::result::Result<Response<<VoiceServiceImpl as VoiceService>::SubscribeEventsStream>, Status> {
         let cfg = req.into_inner();
         let rx = self.events_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(move |r| {
