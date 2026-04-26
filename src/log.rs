@@ -18,6 +18,7 @@ pub fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
         .unwrap_or_else(|_| EnvFilter::new(console_level))
         .add_directive("russh::client=off".parse().unwrap())
         .add_directive("russh=off".parse().unwrap())
+        .add_directive("tsclientlib=debug".parse().unwrap())
         .add_directive("h2=off".parse().unwrap());
 
     let console_layer = fmt::layer()
