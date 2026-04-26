@@ -109,7 +109,7 @@ impl OpusSttPipeline {
         let packet = match (&event.frame).try_into() {
             Ok(packet) => packet,
             Err(e) => {
-                warn!(
+                debug!(
                     clid = event.from_client_id,
                     error = %e,
                     "drop invalid opus packet"
