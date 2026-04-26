@@ -19,6 +19,9 @@ pub fn init_tracing(console_level: &str, file_level: &str) -> WorkerGuard {
         .add_directive("russh::client=off".parse().unwrap())
         .add_directive("russh=off".parse().unwrap())
         .add_directive("tsclientlib=debug".parse().unwrap())
+        .add_directive("tsproto=debug".parse().unwrap())
+        .add_directive("tsproto-packets=debug".parse().unwrap())
+        .add_directive("ts-bookkeeping=debug".parse().unwrap())
         .add_directive("h2=off".parse().unwrap());
 
     let console_layer = fmt::layer()
