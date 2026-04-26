@@ -9,7 +9,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::config::AppConfig;
 use base64::Engine;
@@ -123,7 +123,7 @@ impl OpusSttPipeline {
         let samples_per_channel = match state.decoder.decode(Some(packet), decoded_mut, false) {
             Ok(samples) => samples,
             Err(e) => {
-                warn!(
+                debug!(
                     clid = event.from_client_id,
                     error = %e,
                     "drop undecodable opus frame"
@@ -509,6 +509,7 @@ pub fn preprocess_stt_text(
     let mut text = normalize_text(raw);
 
     if text.is_empty() {
+        debug!(raw = %raw, "STT text is empty after normalization");
         return None;
     }
 
@@ -537,16 +538,28 @@ pub fn preprocess_stt_text(
     }
 
     if cfg.wake_word_required && !wake_hit {
+        debug!(
+            text = %text,
+            wake_words = ?cfg.wake_words,
+            "STT wake word not found"
+        );
         return None;
     }
 
     text = strip_leading_punct(&text);
     if text.is_empty() {
+        debug!("STT text is empty after stripping leading punctuation");
         return None;
     }
     if !cfg.wake_word_required {
         let cjk_count = count_cjk_chars(&text);
         if cjk_count > 0 && cjk_count < STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD {
+            debug!(
+                text = %text,
+                cjk_count = cjk_count,
+                min_len = STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD,
+                "STT text too short without wake word"
+            );
             return None;
         }
     }
