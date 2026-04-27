@@ -52,6 +52,34 @@ async fn execute_app() -> Result<()> {
     let nc_adapter = connect_napcat_if_enabled(config.clone()).await?;
     let clients = Arc::new(DashMap::new());
 
+    let headless_runtime = start_headless_if_enabled(
+        config.clone(),
+        prompts.clone(),
+        gate.clone(),
+        llm.clone(),
+        registry.clone(),
+        adapter.clone(),
+        clients.clone(),
+    );
+
+    let headless_channel =
+        if config.headless.enabled && config.headless.tts.enabled && config.headless.tts.always_tts
+        {
+            let endpoint = format!("http://{}", crate::adapter::headless::INTERNAL_GRPC_ADDR);
+            match tonic::transport::Channel::from_shared(endpoint)?
+                .connect()
+                .await
+            {
+                Ok(ch) => Some(ch),
+                Err(e) => {
+                    warn!("Failed to connect to headless gRPC service: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let ts_router = EventRouter::new_with_clients(
         config.clone(),
         prompts.clone(),
@@ -61,15 +89,7 @@ async fn execute_app() -> Result<()> {
         registry.clone(),
         clients.clone(),
         nc_adapter.clone(),
-    );
-    let headless_runtime = start_headless_if_enabled(
-        config.clone(),
-        prompts.clone(),
-        gate.clone(),
-        llm.clone(),
-        registry.clone(),
-        adapter.clone(),
-        clients,
+        headless_channel.clone(),
     );
 
     let run_result = run_routers(
@@ -81,6 +101,7 @@ async fn execute_app() -> Result<()> {
         adapter.clone(),
         ts_router,
         nc_adapter,
+        headless_channel,
     )
     .await;
 
@@ -220,6 +241,7 @@ async fn run_routers(
     adapter: Arc<crate::adapter::TsAdapter>,
     ts_router: crate::router::EventRouter,
     nc_adapter: Option<Arc<crate::adapter::napcat::NapCatAdapter>>,
+    headless_channel: Option<tonic::transport::Channel>,
 ) -> Result<()> {
     if let Some(nc_adapter) = nc_adapter {
         let nc_router = crate::router::NcRouter::new_with_ts(
@@ -231,6 +253,7 @@ async fn run_routers(
             registry,
             Some(adapter),
             Some(ts_router.clients.clone()),
+            headless_channel,
         );
         let nc_future = tokio::spawn(async move { nc_router.run().await });
 

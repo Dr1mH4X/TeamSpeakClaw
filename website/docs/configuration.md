@@ -71,6 +71,18 @@ sidebar_position: 3
 私聊触发的消息始终以私聊方式回复。
 语音 STT 触发后的回复也遵循该模式。
 
+### Headless TTS 配置
+
+`[headless.tts]` 区段中的 `always_tts` 配置项控制是否始终使用语音合成：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `always_tts` | bool | `false` | 始终使用 TTS：当启用时，来自其他平台（如 NapCat/QQ）的消息也会通过 headless 播放语音回复 |
+
+**使用场景**：
+- 当您希望所有平台的回复都通过 TeamSpeak 语音播报时，设置 `always_tts = true`
+- 需要同时启用 `headless.enabled = true` 和 `headless.tts.enabled = true`
+
 ## 2. 权限配置 (acl.toml)
 
 文件路径: `config/acl.toml`

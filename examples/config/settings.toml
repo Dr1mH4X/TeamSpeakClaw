@@ -35,6 +35,7 @@ base_url = ""
 api_key = ""
 model = "gpt-4o-mini-tts"
 voice = "alloy"
+always_tts = false  # 始终使用 TTS：当启用时，来自其他平台（如 NapCat/QQ）的消息也会通过 headless 播放语音回复
 
 # ServerQuery 配置
 [serverquery]

@@ -338,18 +338,16 @@ impl TsAdapter {
             }
 
             match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(event)) => {
-                    match event {
-                        TsEvent::ClientEnterView(client) if client.clid != 0 => {
-                            debug!(
-                                "fetch_client_snapshot: got client clid={}, nickname={}",
-                                client.clid, client.client_nickname
-                            );
-                            clients.push(client);
-                        }
-                        _ => {}
+                Ok(Ok(event)) => match event {
+                    TsEvent::ClientEnterView(client) if client.clid != 0 => {
+                        debug!(
+                            "fetch_client_snapshot: got client clid={}, nickname={}",
+                            client.clid, client.client_nickname
+                        );
+                        clients.push(client);
                     }
-                }
+                    _ => {}
+                },
                 Ok(Err(_)) => {
                     // channel closed
                     break;
@@ -361,10 +359,7 @@ impl TsAdapter {
             }
         }
 
-        info!(
-            "fetch_client_snapshot: returning {} clients",
-            clients.len()
-        );
+        info!("fetch_client_snapshot: returning {} clients", clients.len());
 
         Ok(clients)
     }
@@ -455,7 +450,8 @@ impl TsAdapter {
 
                     // 查询活跃时，收集数据行
                     let query_active = self.query_active.load(Ordering::Relaxed);
-                    let include_event_lines = self.include_event_lines_active.load(Ordering::Relaxed);
+                    let include_event_lines =
+                        self.include_event_lines_active.load(Ordering::Relaxed);
                     if query_active && (!is_event || include_event_lines) {
                         result_lines.push(trimmed.to_string());
                     }

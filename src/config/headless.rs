@@ -36,6 +36,7 @@ pub struct HeadlessTtsConfig {
     pub api_key: String,
     pub model: String,
     pub voice: String,
+    pub always_tts: bool,
 }
 
 impl Default for HeadlessConfig {
@@ -78,6 +79,7 @@ impl Default for HeadlessTtsConfig {
             api_key: String::new(),
             model: "gpt-4o-mini-tts".to_string(),
             voice: "alloy".to_string(),
+            always_tts: false,
         }
     }
 }
