@@ -18,6 +18,7 @@ plan.md
 skills-lock.json
 .agents/
 .claude/
+opencode.json
 
 # 日志
 logs/*.*
