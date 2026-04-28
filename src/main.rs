@@ -63,8 +63,7 @@ async fn execute_app() -> Result<()> {
     );
 
     let headless_channel =
-        if config.headless.enabled && config.headless.tts.enabled && config.headless.tts.always_tts
-        {
+        if config.headless.enabled && config.headless.tts.enabled {
             let endpoint = format!("http://{}", crate::adapter::headless::INTERNAL_GRPC_ADDR);
             match tonic::transport::Channel::from_shared(endpoint)?
                 .connect()

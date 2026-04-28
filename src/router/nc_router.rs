@@ -17,11 +17,6 @@ use tokio::sync::Semaphore;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
-use crate::adapter::headless::speech::OpenAiSpeechProvider;
-use crate::adapter::headless::tsbot::voice::v1 as voicev1;
-use crate::adapter::headless::tsbot::voice::v1::voice_service_client::VoiceServiceClient;
-use tokio_stream::wrappers::ReceiverStream;
-
 pub struct NcRouter {
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
@@ -249,7 +244,13 @@ impl NcRouter {
 
         // 如果启用了 always_tts，则通过 headless 播放 TTS
         if self.config.headless.tts.enabled && self.config.headless.tts.always_tts {
-            self.speak_via_headless(&reply_text).await;
+            crate::adapter::headless::tts::speak_via_headless(
+                self.headless_channel.clone(),
+                self.config.clone(),
+                unified_event.trace_id.clone(),
+                &reply_text,
+            )
+            .await;
         }
     }
 
@@ -309,115 +310,14 @@ impl NcRouter {
 
         // 如果启用了 always_tts，则通过 headless 播放 TTS
         if self.config.headless.tts.enabled && self.config.headless.tts.always_tts {
-            self.speak_via_headless(&reply_text).await;
+            crate::adapter::headless::tts::speak_via_headless(
+                self.headless_channel.clone(),
+                self.config.clone(),
+                unified_event.trace_id.clone(),
+                &reply_text,
+            )
+            .await;
         }
-    }
-
-    /// 通过 headless gRPC 服务播放 TTS
-    async fn speak_via_headless(&self, text: &str) {
-        let Some(channel) = self.headless_channel.clone() else {
-            warn!("headless channel not available, cannot play TTS");
-            return;
-        };
-
-        let speech_provider = match OpenAiSpeechProvider::new(self.config.clone(), String::new()) {
-            Ok(sp) => sp,
-            Err(e) => {
-                error!("failed to create speech provider: {e}");
-                return;
-            }
-        };
-
-        let mut client = VoiceServiceClient::new(channel);
-
-        // 先停止当前播放
-        let _ = client.stop(tonic::Request::new(voicev1::Empty {})).await;
-
-        let segments = self.split_tts_segments(text);
-        let (tx, rx) = tokio::sync::mpsc::channel::<voicev1::TtsAudioChunk>(8);
-
-        let send_fut = async {
-            for segment in segments {
-                let audio = match speech_provider.synthesize(&segment).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!("tts synthesize failed: {e}");
-                        continue;
-                    }
-                };
-                let codec = crate::adapter::headless::speech::detect_audio_format(&audio);
-                if let Err(e) = tx
-                    .send(voicev1::TtsAudioChunk {
-                        payload: audio,
-                        codec: codec.to_string(),
-                        end_of_stream: false,
-                        trace_id: "nc-tts".to_string(),
-                    })
-                    .await
-                {
-                    error!("send tts chunk failed: {e}");
-                    break;
-                }
-            }
-            let _ = tx
-                .send(voicev1::TtsAudioChunk {
-                    payload: vec![],
-                    codec: "mp3".to_string(),
-                    end_of_stream: true,
-                    trace_id: "nc-tts".to_string(),
-                })
-                .await;
-            Ok::<(), anyhow::Error>(())
-        };
-
-        let stream_fut = async {
-            let rsp = client
-                .stream_tts_audio(tonic::Request::new(ReceiverStream::new(rx)))
-                .await;
-            match rsp {
-                Ok(r) => {
-                    let body = r.into_inner();
-                    if !body.ok {
-                        error!("stream_tts_audio rejected: {}", body.message);
-                    }
-                }
-                Err(e) => {
-                    error!("stream_tts_audio failed: {e}");
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-
-        let _ = tokio::join!(send_fut, stream_fut);
-    }
-
-    fn split_tts_segments(&self, text: &str) -> Vec<String> {
-        const TTS_SEGMENT_SOFT_LIMIT: usize = 120;
-        let mut out = Vec::new();
-        let mut buf = String::new();
-        let mut buf_char_count = 0usize;
-        for ch in text.chars() {
-            buf.push(ch);
-            buf_char_count += 1;
-            let punct_boundary = matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；');
-            let len_boundary = buf_char_count >= TTS_SEGMENT_SOFT_LIMIT;
-            if punct_boundary || len_boundary {
-                let s = buf.trim();
-                if !s.is_empty() {
-                    out.push(s.to_string());
-                }
-                buf.clear();
-                buf_char_count = 0;
-            }
-        }
-        let tail = buf.trim();
-        if !tail.is_empty() {
-            out.push(tail.to_string());
-        }
-        if out.is_empty() {
-            out.push(text.trim().to_string());
-        }
-        out
     }
 
     /// 是否匹配触发词

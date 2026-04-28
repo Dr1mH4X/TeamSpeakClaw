@@ -22,6 +22,7 @@ use tsbot::voice::v1 as voicev1;
 use voicev1::voice_service_server::VoiceServiceServer;
 
 mod actor;
+pub mod tts;
 mod playback;
 mod service;
 pub mod speech;
