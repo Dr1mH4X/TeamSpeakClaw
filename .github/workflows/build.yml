@@ -220,11 +220,11 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/teamspeakclaw
           tags: |
-            type=raw,value=latest,enable=${{ needs.meta.outputs.is-stable-release }}
-            type=semver,pattern={{version}},enable=${{ needs.meta.outputs.is-release }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.is-release }}
-            type=sha,prefix=sha-,enable=${{ !needs.meta.outputs.is-release }}
-            type=raw,value=dev,enable=${{ !needs.meta.outputs.is-release && github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.is-stable-release == 'true' }}
+            type=semver,pattern={{version}},enable=${{ needs.meta.outputs.is-release == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.is-release == 'true' }}
+            type=sha,prefix=sha-,enable=${{ needs.meta.outputs.is-release != 'true' }}
+            type=raw,value=pr-${{ github.event.number }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Build and push Docker image
         if: steps.meta.outputs.tags != ''
