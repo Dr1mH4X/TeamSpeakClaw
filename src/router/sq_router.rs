@@ -126,6 +126,7 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
+                    info!("Client entered view: clid={}, nickname={}", e.clid, e.client_nickname);
                     self.cache_client(
                         e.clid,
                         e.cldbid,
@@ -135,6 +136,7 @@ impl EventRouter {
                     );
                 }
                 TsEvent::ClientLeftView(e) => {
+                    info!("Client left view: clid={}", e.clid);
                     self.clients.remove(&e.clid);
                 }
                 _ => {}
