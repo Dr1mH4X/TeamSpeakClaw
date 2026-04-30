@@ -3,12 +3,20 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use tsproto_packets::packets::{OutCommand, OutPacket};
+
+use crate::config::{AppConfig, PromptsConfig};
+use crate::llm::LlmEngine;
+use crate::permission::PermissionGate;
+use crate::router::ClientInfo;
+use crate::skills::SkillRegistry;
 
 pub mod tsbot {
     pub mod voice {
@@ -187,6 +195,113 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
 
     info!("Voice service shutdown complete");
     Ok(())
+}
+
+pub struct Runtime {
+    shutdown: CancellationToken,
+    service_handle: Option<JoinHandle<()>>,
+    bridge_handle: Option<JoinHandle<()>>,
+}
+
+impl Runtime {
+    fn disabled() -> Self {
+        Self {
+            shutdown: CancellationToken::new(),
+            service_handle: None,
+            bridge_handle: None,
+        }
+    }
+
+    pub fn start_if_enabled(
+        config: Arc<AppConfig>,
+        prompts: Arc<PromptsConfig>,
+        gate: Arc<PermissionGate>,
+        llm: Arc<LlmEngine>,
+        registry: Arc<SkillRegistry>,
+        ts_adapter: Arc<crate::adapter::TsAdapter>,
+        ts_clients: Arc<DashMap<u32, ClientInfo>>,
+    ) -> Self {
+        if !config.headless.enabled {
+            return Self::disabled();
+        }
+
+        let shutdown = CancellationToken::new();
+        let hl_runtime = HeadlessRuntimeConfig {
+            ts3_host: config.headless.ts3_host.clone(),
+            ts3_port: config.headless.ts3_port,
+            nickname: config.bot.nickname.clone(),
+            server_password: config.headless.server_password.clone(),
+            channel_password: config.headless.channel_password.clone(),
+            channel_path: config.headless.channel_path.clone(),
+            channel_id: config.headless.channel_id.clone(),
+            bot_respond_to_private: config.bot.respond_to_private,
+            bot_default_reply_mode: config.bot.default_reply_mode.clone(),
+            bot_trigger_prefixes: config.bot.trigger_prefixes.clone(),
+        };
+
+        let shutdown_for_service = shutdown.clone();
+        let service_handle = Some(tokio::spawn(async move {
+            if let Err(e) = run(hl_runtime, shutdown_for_service).await {
+                error!("headless service failed: {}", e);
+            }
+        }));
+
+        info!("Headless voice service enabled");
+
+        let bridge_config = config.clone();
+        let bridge_prompts = prompts.clone();
+        let bridge_gate = gate.clone();
+        let bridge_llm = llm.clone();
+        let bridge_registry = registry.clone();
+        let bridge_ts_adapter = ts_adapter.clone();
+        let bridge_ts_clients = ts_clients.clone();
+        let shutdown_for_bridge = shutdown.clone();
+        let bridge_handle = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_for_bridge.cancelled() => {
+                        break;
+                    }
+                    run_result = crate::router::HeadlessLlmBridge::new(
+                        bridge_config.clone(),
+                        bridge_prompts.clone(),
+                        bridge_gate.clone(),
+                        bridge_llm.clone(),
+                        bridge_registry.clone(),
+                        bridge_ts_adapter.clone(),
+                        bridge_ts_clients.clone(),
+                    ).run() => {
+                        if let Err(e) = run_result {
+                            error!("headless LLM bridge failed: {}", e);
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+        }));
+
+        Self {
+            shutdown,
+            service_handle,
+            bridge_handle,
+        }
+    }
+
+    pub async fn shutdown(self) {
+        self.shutdown.cancel();
+
+        if let Some(handle) = self.bridge_handle {
+            info!("Shutting down headless LLM bridge...");
+            let _ = handle.await;
+        }
+
+        if let Some(handle) = self.service_handle {
+            info!("Shutting down headless voice service...");
+            let _ = handle.await;
+        }
+    }
 }
 
 fn resolve_repo_relative(path: &str) -> PathBuf {
