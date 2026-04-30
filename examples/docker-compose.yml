@@ -15,6 +15,22 @@ services:
       - TZ=Asia/Shanghai
     networks:
       - openteamspeak
+    depends_on:
+      - stt-api
+
+  stt-api:
+    image: ghcr.io/dr1mh4x/moonshinev2-stt:latest
+    container_name: sherpa-stt-api
+    restart: unless-stopped
+    volumes:
+      # STT 模型目录（只读）
+      - ./models:/models:ro
+    environment:
+        MODEL_PATH: /models
+        MODEL_NAME: moonshinev2
+        NUM_THREADS: "4"
+    networks:
+      - openteamspeak
 
 networks:
   openteamspeak:
