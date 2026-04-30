@@ -136,7 +136,6 @@ impl EventRouter {
                     );
                 }
                 TsEvent::ClientLeftView(e) => {
-                    info!("Client left view: clid={}", e.clid);
                     self.clients.remove(&e.clid);
                 }
                 _ => {}
