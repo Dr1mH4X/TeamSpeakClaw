@@ -21,10 +21,10 @@ channel_id = ""
 [headless.stt]
 enabled = false
 provider = "openai-compatibility"
-base_url = ""
-api_key = ""
-model = "tiny"
-language = "zh"
+base_url = "http://stt-api:8000/v1"  # 本地 STT 服务（Docker Compose 部署）
+api_key = ""  # 本地服务无需 API Key，在线服务需填写
+model = "tiny"  # 或 "base"，对应下载的模型类型
+language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语) 等
 wake_words = ["tsclaw"]
 wake_word_required = false
 
