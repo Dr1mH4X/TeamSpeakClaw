@@ -53,42 +53,35 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-comp
 2. Prepare configuration files and models (optional):
 
 - Copy configuration files from `examples/config/` directory to `config/` and modify them
-- If you need local STT service, download moonshine v2 models to the `models/` directory:
+- If you need local STT service, download whisper.cpp GGML models to the `models/` directory:
 
 ```bash
 mkdir -p models
 cd models
 
-# Chinese models (choose one)
-# base model: higher accuracy, slower speed
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-zh-int8.tar.bz2
-tar xvf sherpa-onnx-moonshine-base-zh-int8.tar.bz2
-
-# tiny model: slightly lower accuracy, faster speed
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-zh-int8.tar.bz2
-tar xvf sherpa-onnx-moonshine-tiny-zh-int8.tar.bz2
-
-# Other languages are also supported: en (English), ja (Japanese), ko (Korean), es (Spanish), uk (Ukrainian), vi (Vietnamese), ar (Arabic)
-# Model naming format: sherpa-onnx-moonshine-{base|tiny}-{language-code}-int8.tar.bz2
+# Download whisper model (recommended: ggml-large-v3-turbo)
+# Model list: https://huggingface.co/ggml-org/whisper.cpp/tree/main
+wget https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
 
-More models available at: https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+More models available at: https://huggingface.co/ggml-org/whisper.cpp
 
 3. Choose STT Solution:
 
 **Option 1: Local STT (Default, Recommended)**
 
-Use the `stt-api` service already configured in docker-compose.yml to provide local speech recognition:
+Use the `stt-api` service (whisper.cpp) already configured in docker-compose.yml to provide local speech recognition:
 - No external API Key required
 - Runs offline with lower latency
-- Requires downloading model files to the `./models` directory
+- Supports GPU acceleration (requires `/dev/dri` device mapping)
+- Requires downloading GGML model files to the `./models` directory
 
 **Option 2: Online STT Service**
 
 If you don't want to use local STT, you can:
 - Remove or comment out the `stt-api` service in docker-compose.yml
 - Remove `depends_on: stt-api` from the `teamspeakclaw` service
-- Configure online STT API (such as Groq, Azure, etc.) in `config/settings.toml` under `[headless]`
+- Configure OpenAI-compatible online STT API in `config/settings.toml` under `[headless.stt]`
 
 4. Start the service:
 

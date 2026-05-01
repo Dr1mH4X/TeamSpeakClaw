@@ -53,42 +53,35 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-comp
 2. 准备配置文件和模型（可选）：
 
 - 从 `examples/config/` 目录复制配置文件到 `config/` 目录并修改
-- 如需本地 STT 服务，下载 moonshine v2 模型到 `models/` 目录：
+- 如需本地 STT 服务，下载 whisper.cpp GGML 模型到 `models/` 目录：
 
 ```bash
 mkdir -p models
 cd models
 
-# 中文模型（二选一）
-# base 模型：精度更高，速度较慢
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-zh-int8.tar.bz2
-tar xvf sherpa-onnx-moonshine-base-zh-int8.tar.bz2
-
-# tiny 模型：精度稍低，速度更快
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-zh-int8.tar.bz2
-tar xvf sherpa-onnx-moonshine-tiny-zh-int8.tar.bz2
-
-# 其他语言模型也支持：en（英语）、ja（日语）、ko（韩语）、es（西班牙语）、uk（乌克兰语）、vi（越南语）、ar（阿拉伯语）
-# 模型命名格式：sherpa-onnx-moonshine-{base|tiny}-{语言代码}-int8.tar.bz2
+# 下载 whisper 模型（推荐 ggml-large-v3-turbo）
+# 模型列表：https://huggingface.co/ggml-org/whisper.cpp/tree/main
+wget https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
 
-更多模型请访问：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+更多模型请访问：https://huggingface.co/ggml-org/whisper.cpp
 
 3. 选择 STT 方案：
 
 **方案一：本地 STT（默认，推荐）**
 
-使用 docker-compose.yml 中已配置的 `stt-api` 服务，提供本地语音识别：
+使用 docker-compose.yml 中已配置的 `stt-api` 服务（whisper.cpp），提供本地语音识别：
 - 无需外部 API Key
 - 离线运行，延迟更低
-- 需下载模型文件到 `./models` 目录
+- 支持 GPU 加速（需配置 `/dev/dri` 设备映射）
+- 需下载 GGML 模型文件到 `./models` 目录
 
 **方案二：在线 STT 服务**
 
 如果不使用本地 STT，可以：
 - 删除或注释 docker-compose.yml 中的 `stt-api` 服务
 - 移除 `teamspeakclaw` 服务中的 `depends_on: stt-api`
-- 在 `config/settings.toml` 的 `[headless]` 中配置在线 STT API（如 Groq、Azure 等）
+- 在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
 
 4. 启动服务：
 
