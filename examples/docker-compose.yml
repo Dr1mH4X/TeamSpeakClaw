@@ -19,16 +19,23 @@ services:
       - stt-api
 
   stt-api:
-    image: ghcr.io/dr1mh4x/moonshinev2-stt:latest
-    container_name: sherpa-stt-api
+    image: ghcr.io/ggml-org/whisper.cpp:main-vulkan
+    container_name: whisper-stt-api
     restart: unless-stopped
     volumes:
-      # STT 模型目录（只读）
+      # whisper 模型目录（只读）
       - ./models:/models:ro
     environment:
-        MODEL_PATH: /models
-        MODEL_NAME: moonshinev2
-        NUM_THREADS: "4"
+      - TZ=Asia/Shanghai
+    devices:
+      # Intel/AMD GPU 加速（可选，无 GPU 可删除此行）
+      - /dev/dri
+    entrypoint: ""
+    command: >
+      whisper-server
+      --host 0.0.0.0
+      --port 9000
+      -m /models/ggml-large-v3-turbo.bin
     networks:
       - openteamspeak
 
