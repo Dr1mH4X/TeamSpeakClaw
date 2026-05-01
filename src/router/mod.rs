@@ -11,7 +11,6 @@ pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::signal::unix::SignalKind;
 use tracing::{error, info, warn};
 
 use crate::adapter::napcat::NapCatAdapter;
@@ -31,8 +30,7 @@ pub async fn run_routers(
     ts_router: EventRouter,
     nc_adapter: Option<Arc<NapCatAdapter>>,
 ) -> Result<()> {
-    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())
-        .expect("Failed to register SIGTERM handler");
+    let sigterm = wait_for_sigterm();
 
     if let Some(nc_adapter) = nc_adapter {
         let nc_router = NcRouter::new_with_ts(
@@ -56,7 +54,7 @@ pub async fn run_routers(
                 info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
-            _ = sigterm.recv() => {
+            _ = sigterm => {
                 info!("Received SIGTERM, shutting down...");
                 Ok(())
             }
@@ -71,7 +69,7 @@ pub async fn run_routers(
                 info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
-            _ = sigterm.recv() => {
+            _ = sigterm => {
                 info!("Received SIGTERM, shutting down...");
                 Ok(())
             }
@@ -107,4 +105,21 @@ fn map_nc_router_result(res: Result<Result<()>, tokio::task::JoinError>) -> Resu
             Err(anyhow::anyhow!("NC router panicked"))
         }
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_sigterm() {
+    use tokio::signal::unix::SignalKind;
+
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())
+        .expect("Failed to register SIGTERM handler");
+    sigterm.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_for_sigterm() {
+    // Windows doesn't have SIGTERM; this future never resolves.
+    // Docker on Windows uses different termination mechanisms
+    // and ctrl_c() is sufficient.
+    std::future::pending::<()>().await;
 }
