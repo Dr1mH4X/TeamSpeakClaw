@@ -11,6 +11,7 @@ pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::signal::unix::SignalKind;
 use tracing::{error, info, warn};
 
 use crate::adapter::napcat::NapCatAdapter;
@@ -30,6 +31,9 @@ pub async fn run_routers(
     ts_router: EventRouter,
     nc_adapter: Option<Arc<NapCatAdapter>>,
 ) -> Result<()> {
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())
+        .expect("Failed to register SIGTERM handler");
+
     if let Some(nc_adapter) = nc_adapter {
         let nc_router = NcRouter::new_with_ts(
             config,
@@ -52,6 +56,10 @@ pub async fn run_routers(
                 info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+                Ok(())
+            }
         }
     } else {
         info!("NapCat adapter disabled, running in TeamSpeak-only mode");
@@ -61,6 +69,10 @@ pub async fn run_routers(
             res = ts_router.run() => map_ts_router_result(res),
             _ = tokio::signal::ctrl_c() => {
                 info!("Received Ctrl+C, shutting down...");
+                Ok(())
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
                 Ok(())
             }
         }
