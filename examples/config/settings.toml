@@ -21,9 +21,10 @@ channel_id = ""
 [headless.stt]
 enabled = false
 provider = "openai-compatibility"
-base_url = "http://stt-api:8000/v1"  # 本地 STT 服务（Docker Compose 部署）
+base_url = "http://stt-api:9000/inference"  # 本地 whisper.cpp 服务（Docker Compose 部署）
+# base_url = ""  # OpenAI 兼容的在线 STT 服务地址
 api_key = ""  # 本地服务无需 API Key，在线服务需填写
-model = "tiny"  # 或 "base"，对应下载的模型类型
+model = "ggml-large-v3-turbo"  # whisper 模型名称（本地）/ 在线服务的模型名称
 language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语) 等
 wake_words = ["tsclaw"]
 wake_word_required = false
