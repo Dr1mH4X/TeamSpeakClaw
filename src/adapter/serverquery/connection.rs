@@ -160,6 +160,7 @@ pub struct TsAdapter {
     query_lock: Mutex<()>,
     reconnect_tx: mpsc::Sender<()>,
     config: Arc<AppConfig>,
+    generation: AtomicU32,
 }
 
 impl TsAdapter {
@@ -192,6 +193,7 @@ impl TsAdapter {
             query_lock: Mutex::new(()),
             reconnect_tx,
             config: config.clone(),
+            generation: AtomicU32::new(0),
         });
 
         Self::spawn_loops(adapter.clone(), reader);
@@ -208,14 +210,16 @@ impl TsAdapter {
     }
 
     fn spawn_loops(adapter: Arc<TsAdapter>, reader: tokio::io::ReadHalf<TsStream>) {
+        let gen = adapter.generation.fetch_add(1, Ordering::Relaxed) + 1;
+
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
-            adapter_clone.reader_loop(BufReader::new(reader)).await;
+            adapter_clone.reader_loop(gen, BufReader::new(reader)).await;
         });
 
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
-            adapter_clone.keepalive_loop().await;
+            adapter_clone.keepalive_loop(gen).await;
         });
     }
 
@@ -283,10 +287,12 @@ impl TsAdapter {
             info!("ServerQuery reconnecting...");
 
             let mut delay = Duration::from_secs(1);
+            let mut success = false;
             for attempt in 0..MAX_RETRIES {
                 match Self::do_reconnect(&adapter).await {
                     Ok(()) => {
                         info!("ServerQuery reconnected");
+                        success = true;
                         break;
                     }
                     Err(e) => {
@@ -300,6 +306,12 @@ impl TsAdapter {
                         delay = (delay * 2).min(Duration::from_secs(60));
                     }
                 }
+            }
+            if !success {
+                error!(
+                    "ServerQuery reconnect exhausted all {} attempts, giving up",
+                    MAX_RETRIES
+                );
             }
         }
     }
@@ -454,7 +466,7 @@ impl TsAdapter {
         self.event_tx.subscribe()
     }
 
-    async fn reader_loop(&self, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
+    async fn reader_loop(&self, _gen: u32, mut reader: BufReader<tokio::io::ReadHalf<TsStream>>) {
         let mut line = String::new();
         let mut result_lines: Vec<String> = Vec::new();
         let mut waiting_for_data = false; // 收到 error 行后，等待可能延迟的数据行
@@ -573,12 +585,17 @@ impl TsAdapter {
         let _ = self.reconnect_tx.try_send(());
     }
 
-    async fn keepalive_loop(&self) {
+    async fn keepalive_loop(&self, gen: u32) {
         const KEEPALIVE_INTERVAL_SECS: u64 = 180;
         loop {
             sleep(Duration::from_secs(KEEPALIVE_INTERVAL_SECS)).await;
+            if self.generation.load(Ordering::Relaxed) != gen {
+                debug!("Keepalive loop exiting (generation mismatch)");
+                break;
+            }
             if let Err(e) = self.send_raw("whoami").await {
                 error!("Keepalive failed: {e}");
+                let _ = self.reconnect_tx.try_send(());
                 break;
             }
         }
