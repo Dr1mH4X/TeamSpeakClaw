@@ -180,10 +180,7 @@ async fn stream_tts_audio_loop(
             });
         }
 
-        let stdin_result = child
-            .child
-            .as_mut()
-            .and_then(|c| c.stdin.take());
+        let stdin_result = child.child.as_mut().and_then(|c| c.stdin.take());
         let mut stdin = match stdin_result {
             Some(s) => s,
             None => {
@@ -662,7 +659,10 @@ impl VoiceService for VoiceServiceImpl {
     async fn subscribe_events(
         &self,
         req: Request<voicev1::SubscribeRequest>,
-    ) -> std::result::Result<Response<<VoiceServiceImpl as VoiceService>::SubscribeEventsStream>, Status> {
+    ) -> std::result::Result<
+        Response<<VoiceServiceImpl as VoiceService>::SubscribeEventsStream>,
+        Status,
+    > {
         let cfg = req.into_inner();
         let rx = self.events_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(move |r| {

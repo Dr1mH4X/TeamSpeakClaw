@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
-    sync::{broadcast, oneshot, Mutex},
+    sync::{broadcast, mpsc, oneshot, Mutex},
     time::sleep,
 };
 use tracing::{debug, error, info, warn};
@@ -158,6 +158,8 @@ pub struct TsAdapter {
     query_active: AtomicBool,
     include_event_lines_active: AtomicBool,
     query_lock: Mutex<()>,
+    reconnect_tx: mpsc::Sender<()>,
+    config: Arc<AppConfig>,
 }
 
 impl TsAdapter {
@@ -178,6 +180,7 @@ impl TsAdapter {
         let stream = Self::connect_with_retry(cfg, method).await?;
         let (reader, writer) = tokio::io::split(stream);
         let (tx, _) = broadcast::channel::<TsEvent>(256);
+        let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(1);
 
         let adapter = Arc::new(Self {
             writer: Mutex::new(writer),
@@ -187,24 +190,33 @@ impl TsAdapter {
             query_active: AtomicBool::new(false),
             include_event_lines_active: AtomicBool::new(false),
             query_lock: Mutex::new(()),
+            reconnect_tx,
+            config: config.clone(),
         });
 
-        let adapter_clone = adapter.clone();
-        tokio::spawn(async move {
-            adapter_clone.reader_loop(BufReader::new(reader)).await;
-        });
+        Self::spawn_loops(adapter.clone(), reader);
 
         if let Err(e) = adapter.init(cfg).await {
             error!("Failed to initialize TeamSpeak session: {e}");
             return Err(e);
         }
 
+        let weak = Arc::downgrade(&adapter);
+        tokio::spawn(Self::reconnect_loop(weak, reconnect_rx));
+
+        Ok(adapter)
+    }
+
+    fn spawn_loops(adapter: Arc<TsAdapter>, reader: tokio::io::ReadHalf<TsStream>) {
+        let adapter_clone = adapter.clone();
+        tokio::spawn(async move {
+            adapter_clone.reader_loop(BufReader::new(reader)).await;
+        });
+
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             adapter_clone.keepalive_loop().await;
         });
-
-        Ok(adapter)
     }
 
     async fn connect_with_retry(cfg: &SqConfig, method: TsMethod) -> Result<TsStream> {
@@ -262,6 +274,49 @@ impl TsAdapter {
 
         let stream = channel.into_stream();
         Ok(TsStream::Ssh(stream))
+    }
+
+    async fn reconnect_loop(weak: std::sync::Weak<TsAdapter>, mut rx: mpsc::Receiver<()>) {
+        const MAX_RETRIES: u32 = 10;
+        while rx.recv().await.is_some() {
+            let Some(adapter) = weak.upgrade() else { break };
+            info!("ServerQuery reconnecting...");
+
+            let mut delay = Duration::from_secs(1);
+            for attempt in 0..MAX_RETRIES {
+                match Self::do_reconnect(&adapter).await {
+                    Ok(()) => {
+                        info!("ServerQuery reconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[{}/{}] ServerQuery reconnect failed: {}",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            e
+                        );
+                        sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn do_reconnect(adapter: &Arc<TsAdapter>) -> Result<()> {
+        let cfg = &adapter.config.serverquery;
+        let method = TsMethod::try_from(cfg.method.as_str())
+            .context("Invalid connection method in config")?;
+
+        let stream = Self::connect_with_retry(cfg, method).await?;
+        let (reader, writer) = tokio::io::split(stream);
+
+        *adapter.writer.lock().await = writer;
+        Self::spawn_loops(adapter.clone(), reader);
+
+        adapter.init(cfg).await?;
+        Ok(())
     }
 
     async fn init(&self, cfg: &SqConfig) -> Result<()> {
@@ -338,18 +393,16 @@ impl TsAdapter {
             }
 
             match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(event)) => {
-                    match event {
-                        TsEvent::ClientEnterView(client) if client.clid != 0 => {
-                            debug!(
-                                "fetch_client_snapshot: got client clid={}, nickname={}",
-                                client.clid, client.client_nickname
-                            );
-                            clients.push(client);
-                        }
-                        _ => {}
+                Ok(Ok(event)) => match event {
+                    TsEvent::ClientEnterView(client) if client.clid != 0 => {
+                        debug!(
+                            "fetch_client_snapshot: got client clid={}, nickname={}",
+                            client.clid, client.client_nickname
+                        );
+                        clients.push(client);
                     }
-                }
+                    _ => {}
+                },
                 Ok(Err(_)) => {
                     // channel closed
                     break;
@@ -361,10 +414,7 @@ impl TsAdapter {
             }
         }
 
-        info!(
-            "fetch_client_snapshot: returning {} clients",
-            clients.len()
-        );
+        info!("fetch_client_snapshot: returning {} clients", clients.len());
 
         Ok(clients)
     }
@@ -455,7 +505,8 @@ impl TsAdapter {
 
                     // 查询活跃时，收集数据行
                     let query_active = self.query_active.load(Ordering::Relaxed);
-                    let include_event_lines = self.include_event_lines_active.load(Ordering::Relaxed);
+                    let include_event_lines =
+                        self.include_event_lines_active.load(Ordering::Relaxed);
                     if query_active && (!is_event || include_event_lines) {
                         result_lines.push(trimmed.to_string());
                     }
@@ -518,6 +569,8 @@ impl TsAdapter {
                 }
             }
         }
+        error!("ServerQuery reader loop exited");
+        let _ = self.reconnect_tx.try_send(());
     }
 
     async fn keepalive_loop(&self) {
@@ -526,6 +579,7 @@ impl TsAdapter {
             sleep(Duration::from_secs(KEEPALIVE_INTERVAL_SECS)).await;
             if let Err(e) = self.send_raw("whoami").await {
                 error!("Keepalive failed: {e}");
+                break;
             }
         }
     }
