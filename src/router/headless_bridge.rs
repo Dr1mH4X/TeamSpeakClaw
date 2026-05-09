@@ -28,6 +28,7 @@ use crate::llm::provider::ToolCall;
 use crate::llm::{LlmEngine, LlmStreamEvent, SessionSource};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
+use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -587,9 +588,9 @@ impl HeadlessLlmBridge {
                 let tool_result = if let Ok(mut parsed) =
                     serde_json::from_str::<serde_json::Value>(&tool_result)
                 {
-                    if let Some(url) = parsed.get("__play_url").and_then(|v| v.as_str()) {
+                    if let Some(url) = parsed.get(PLAY_URL_KEY).and_then(|v| v.as_str()) {
                         let title = parsed
-                            .get("__play_title")
+                            .get(PLAY_TITLE_KEY)
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
@@ -610,11 +611,17 @@ impl HeadlessLlmBridge {
                         }
                         // Strip __play_url / __play_title from result
                         if let Some(obj) = parsed.as_object_mut() {
-                            obj.remove("__play_url");
-                            obj.remove("__play_title");
+                            obj.remove(PLAY_URL_KEY);
+                            obj.remove(PLAY_TITLE_KEY);
                         }
                     }
-                    serde_json::to_string(&parsed).unwrap_or(tool_result)
+                    match serde_json::to_string(&parsed) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("failed to re-serialize tool result after stripping play fields: {e}");
+                            serde_json::json!({"result": "ok"}).to_string()
+                        }
+                    }
                 } else {
                     tool_result
                 };
