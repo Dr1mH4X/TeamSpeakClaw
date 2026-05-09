@@ -1,4 +1,3 @@
-pub mod command;
 pub mod ncm_api;
 pub mod ts3audiobot;
 pub mod tsbot_http;
@@ -26,11 +25,15 @@ async fn dispatch_backend(
     match cfg.backend.as_str() {
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
         "ncm_api" => ncm_api::execute(action, args, cfg).await,
-        _ => {
+        "ts3audiobot" => {
             let ctx = ts_ctx
                 .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
             ts3audiobot::execute(action, args, ctx).await
         }
+        other => Err(anyhow::anyhow!(
+            "Unknown music backend '{}'. Valid options: ts3audiobot, tsbot_backend, ncm_api",
+            other
+        )),
     }
 }
 
