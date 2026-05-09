@@ -3,10 +3,16 @@ use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
