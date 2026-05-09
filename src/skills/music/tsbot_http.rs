@@ -1,5 +1,11 @@
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
+
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 pub(crate) struct HttpBackend {
     base_url: String,
@@ -10,7 +16,7 @@ impl HttpBackend {
     pub(crate) fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: shared_client().clone(),
         }
     }
 
