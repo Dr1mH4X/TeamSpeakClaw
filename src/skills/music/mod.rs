@@ -1,6 +1,5 @@
 pub mod command;
 pub mod ncm_api;
-pub mod response;
 pub mod ts3audiobot;
 pub mod tsbot_http;
 

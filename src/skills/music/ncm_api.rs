@@ -27,10 +27,11 @@ async fn search(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
 
     let url = format!("{}/cloudsearch", cfg.ncm_api_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
+    let limit_str = limit.to_string();
     let mut req = client
         .get(&url)
         .query(&[("keywords", keywords), ("type", "1")])
-        .query(&[("limit", limit.to_string().as_str())]);
+        .query(&[("limit", limit_str.as_str())]);
 
     if !cfg.ncm_cookie.is_empty() {
         req = req.header("Cookie", &cfg.ncm_cookie);
@@ -102,7 +103,16 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
         detail_req = detail_req.header("Cookie", &cfg.ncm_cookie);
     }
     let detail_resp = detail_req.send().await?;
-    let detail_body: Value = detail_resp.json().await?;
+    let detail_status = detail_resp.status();
+    let detail_text = detail_resp.text().await?;
+    if !detail_status.is_success() {
+        return Err(anyhow::anyhow!(
+            "NCM song detail failed ({}): {}",
+            detail_status,
+            detail_text
+        ));
+    }
+    let detail_body: Value = serde_json::from_str(&detail_text)?;
 
     let song_name = detail_body["songs"]
         .as_array()
@@ -131,7 +141,16 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
         url_req = url_req.header("Cookie", &cfg.ncm_cookie);
     }
     let url_resp = url_req.send().await?;
-    let url_body: Value = url_resp.json().await?;
+    let url_status = url_resp.status();
+    let url_text = url_resp.text().await?;
+    if !url_status.is_success() {
+        return Err(anyhow::anyhow!(
+            "NCM song URL failed ({}): {}",
+            url_status,
+            url_text
+        ));
+    }
+    let url_body: Value = serde_json::from_str(&url_text)?;
 
     let audio_url = url_body["data"]
         .as_array()
