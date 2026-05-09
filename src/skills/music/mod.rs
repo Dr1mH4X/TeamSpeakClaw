@@ -3,11 +3,36 @@ pub mod ncm_api;
 pub mod ts3audiobot;
 pub mod tsbot_http;
 
+use crate::config::MusicBackendConfig;
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
+
+/// Internal control field: audio URL for the bridge to play.
+/// Must be stripped before returning tool results to the LLM.
+pub(crate) const PLAY_URL_KEY: &str = "__play_url";
+/// Internal control field: song title for the playback UI.
+/// Must be stripped before returning tool results to the LLM.
+pub(crate) const PLAY_TITLE_KEY: &str = "__play_title";
+
+async fn dispatch_backend(
+    action: &str,
+    args: &Value,
+    cfg: &MusicBackendConfig,
+    ts_ctx: Option<&ExecutionContext<'_>>,
+) -> Result<Value> {
+    match cfg.backend.as_str() {
+        "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
+        "ncm_api" => ncm_api::execute(action, args, cfg).await,
+        _ => {
+            let ctx = ts_ctx
+                .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
+            ts3audiobot::execute(action, args, ctx).await
+        }
+    }
+}
 
 pub struct MusicControl;
 
@@ -105,13 +130,7 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        let backend_cfg = &ctx.config.music_backend;
-
-        match backend_cfg.backend.as_str() {
-            "tsbot_backend" => tsbot_http::execute(action, &args, &backend_cfg.base_url).await,
-            "ncm_api" => ncm_api::execute(action, &args, backend_cfg).await,
-            _ => ts3audiobot::execute(action, &args, ctx).await,
-        }
+        dispatch_backend(action, &args, &ctx.config.music_backend, Some(ctx)).await
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
@@ -120,39 +139,21 @@ impl Skill for MusicControl {
             ctx.platform
         );
 
-        let backend_cfg = &ctx.config.music_backend;
+        let action = args["action"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
+
+        let cfg = &ctx.config.music_backend;
 
         match ctx.platform {
             crate::skills::Platform::TeamSpeak => {
-                let action = args["action"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
-
                 let ts_ctx = ctx.to_ts_ctx()?;
-
-                match backend_cfg.backend.as_str() {
-                    "tsbot_backend" => {
-                        tsbot_http::execute(action, &args, &backend_cfg.base_url).await
-                    }
-                    "ncm_api" => ncm_api::execute(action, &args, backend_cfg).await,
-                    _ => ts3audiobot::execute(action, &args, &ts_ctx).await,
-                }
+                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
             }
             crate::skills::Platform::NapCat => {
-                let action = args["action"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
-
                 let ts_ctx = ctx.to_ts_ctx()?;
                 info!("MusicControl: NC request forwarded to TS");
-
-                match backend_cfg.backend.as_str() {
-                    "tsbot_backend" => {
-                        tsbot_http::execute(action, &args, &backend_cfg.base_url).await
-                    }
-                    "ncm_api" => ncm_api::execute(action, &args, backend_cfg).await,
-                    _ => ts3audiobot::execute(action, &args, &ts_ctx).await,
-                }
+                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
             }
         }
     }

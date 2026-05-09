@@ -15,6 +15,30 @@ pub(crate) async fn execute(
     args: &Value,
     ctx: &ExecutionContext<'_>,
 ) -> Result<Value> {
+    // Validate required parameters before building commands
+    let needs_value = matches!(
+        action,
+        "play"
+            | "ts_play"
+            | "ts_add"
+            | "ts_gedan"
+            | "ts_gedanid"
+            | "ts_playid"
+            | "ts_addid"
+            | "ts_mode"
+    );
+    if needs_value && args["value"].as_str().unwrap_or("").is_empty() {
+        return Err(anyhow::anyhow!(
+            "Action '{}' requires a 'value' parameter",
+            action
+        ));
+    }
+    if action == "search" && args["keywords"].as_str().unwrap_or("").is_empty() {
+        return Err(anyhow::anyhow!(
+            "Action 'search' requires 'keywords' parameter"
+        ));
+    }
+
     let value = args["value"].as_str().unwrap_or("");
 
     let bot_cmd = match action {

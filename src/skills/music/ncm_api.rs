@@ -1,6 +1,13 @@
 use crate::config::MusicBackendConfig;
+use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use anyhow::Result;
 use serde_json::Value;
+use std::sync::OnceLock;
+
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
     match action {
@@ -26,9 +33,8 @@ async fn search(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
     let limit = args["limit"].as_u64().unwrap_or(10);
 
     let url = format!("{}/cloudsearch", cfg.ncm_api_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
     let limit_str = limit.to_string();
-    let mut req = client
+    let mut req = shared_client()
         .get(&url)
         .query(&[("keywords", keywords), ("type", "1")])
         .query(&[("limit", limit_str.as_str())]);
@@ -93,12 +99,11 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing song_id"))?;
 
-    let client = reqwest::Client::new();
     let base = cfg.ncm_api_url.trim_end_matches('/');
 
     // 1. Get song details (title, artist)
     let detail_url = format!("{}/song/detail", base);
-    let mut detail_req = client.get(&detail_url).query(&[("ids", song_id)]);
+    let mut detail_req = shared_client().get(&detail_url).query(&[("ids", song_id)]);
     if !cfg.ncm_cookie.is_empty() {
         detail_req = detail_req.header("Cookie", &cfg.ncm_cookie);
     }
@@ -134,7 +139,7 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
 
     // 2. Get song URL
     let url_endpoint = format!("{}/song/url/v1", base);
-    let mut url_req = client
+    let mut url_req = shared_client()
         .get(&url_endpoint)
         .query(&[("id", song_id), ("level", "exhigh")]);
     if !cfg.ncm_cookie.is_empty() {
@@ -170,8 +175,8 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
                 "song_id": song_id,
                 "title": title,
             });
-            result["__play_url"] = serde_json::Value::String(url.to_string());
-            result["__play_title"] = serde_json::Value::String(title);
+            result[PLAY_URL_KEY] = serde_json::Value::String(url.to_string());
+            result[PLAY_TITLE_KEY] = serde_json::Value::String(title);
             Ok(result)
         }
         None => {
