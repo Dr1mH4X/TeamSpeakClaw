@@ -50,11 +50,12 @@ pub(crate) async fn execute(
         }
     };
 
+    let target_name = &ctx.config.music_backend.musicbot_name;
     let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
     let audiobot = clients
         .iter()
-        .find(|c| c.nickname == "TS3AudioBot")
-        .ok_or_else(|| anyhow::anyhow!("TS3AudioBot not found online"))?;
+        .find(|c| c.nickname == *target_name)
+        .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
 
     let _guard = TS3AUDIOBOT_LOCK.lock().await;
 
@@ -68,7 +69,7 @@ pub(crate) async fn execute(
         loop {
             match ts_rx.recv().await {
                 Ok(TsEvent::TextMessage(msg))
-                    if msg.invoker_name == "TS3AudioBot"
+                    if msg.invoker_name == *target_name
                         && msg.target_mode == TextMessageTarget::Private =>
                 {
                     return msg.message;
