@@ -285,6 +285,12 @@ impl HeadlessLlmBridge {
             return Ok(());
         }
 
+        let musicbot_name = &self.config.music_backend.musicbot_name;
+        if !musicbot_name.is_empty() && musicbot_name.eq_ignore_ascii_case(&audio.from_client_name)
+        {
+            return Ok(());
+        }
+
         // Omni model: skip STT, send audio directly to LLM
         if self.config.llm.omni_model {
             return self.handle_omni_audio_event(client, audio).await;

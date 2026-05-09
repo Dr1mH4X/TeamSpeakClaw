@@ -73,6 +73,7 @@ file_level = "info"
 [music_backend]
 backend = "ts3audiobot"  # "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）
 base_url = "http://127.0.0.1:8009"   # backend = "tsbot_backend" 时生效
+musicbot_name = "ts3audiobot"  # 音乐机器人名称，backend = "ts3audiobot" 时配置
 
 # NapCat 配置（可选，用于 QQ 机器人功能）
 # 前置要求：安装并运行 NapCat（https://napneko.github.io/）
