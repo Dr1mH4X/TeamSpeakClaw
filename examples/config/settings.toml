@@ -74,8 +74,20 @@ file_level = "info"
 backend = "ts3audiobot"  # "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）或 "ncm_api"（内置播放）
 base_url = "http://127.0.0.1:8009"   # backend = "tsbot_backend" 时生效
 musicbot_name = "ts3audiobot"  # 音乐机器人名称，其音频不会被送入 STT
-ncm_api_url = "http://127.0.0.1:3000"  # backend = "ncm_api" 时生效，NeteaseCloudMusicApi 地址
+
+# NCM API 专属配置（backend = "ncm_api" 时生效）
+[music_ncm_api]
+ncm_api_url = "http://127.0.0.1:3000"  # NeteaseCloudMusicApi 地址
 ncm_cookie = ""  # 可选，填 MUSIC_U=xxx 以播放 VIP 歌曲
+
+# UNM 配置（可选，解锁灰色歌曲）
+unm_enabled = true
+unm_sources = "ytdlp,bilibili,kugou"    # 音源，逗号分隔
+unm_enable_flac = false                  # 启用无损音质
+unm_search_mode = "fast-first"           # fast-first（速度优先）或 order-first（顺序优先）
+unm_proxy_uri = ""                       # 代理地址（如 https://proxy.example.com）
+unm_joox_cookie = ""                     # JOOX cookie（需要时填写）
+unm_qq_cookie = ""                       # QQ cookie（需要时填写）
 
 # NapCat 配置（可选，用于 QQ 机器人功能）
 # 前置要求：安装并运行 NapCat（https://napneko.github.io/）
