@@ -36,6 +36,11 @@ tracing-slog = "0.4"
 
 thiserror = "1"
 anyhow = "1"
+
+# UNM (UnblockNeteaseMusic) 音源解锁
+unm_engine = "0.4"
+unm_api_utils = "0.4"
+unm_types = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1"
 

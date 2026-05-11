@@ -1,8 +1,9 @@
 pub mod ncm_api;
 pub mod ts3audiobot;
 pub mod tsbot_http;
+pub mod unm;
 
-use crate::config::MusicBackendConfig;
+use crate::config::{MusicBackendConfig, MusicNcmApiConfig};
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,11 +21,12 @@ async fn dispatch_backend(
     action: &str,
     args: &Value,
     cfg: &MusicBackendConfig,
+    ncm_cfg: &MusicNcmApiConfig,
     ts_ctx: Option<&ExecutionContext<'_>>,
 ) -> Result<Value> {
     match cfg.backend.as_str() {
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
-        "ncm_api" => ncm_api::execute(action, args, cfg).await,
+        "ncm_api" => ncm_api::execute(action, args, ncm_cfg).await,
         "ts3audiobot" => {
             let ctx = ts_ctx
                 .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
@@ -133,7 +135,7 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        dispatch_backend(action, &args, &ctx.config.music_backend, Some(ctx)).await
+        dispatch_backend(action, &args, &ctx.config.music_backend, &ctx.config.music_ncm_api, Some(ctx)).await
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
@@ -147,16 +149,17 @@ impl Skill for MusicControl {
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
         let cfg = &ctx.config.music_backend;
+        let ncm_cfg = &ctx.config.music_ncm_api;
 
         match ctx.platform {
             crate::skills::Platform::TeamSpeak => {
                 let ts_ctx = ctx.to_ts_ctx()?;
-                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
+                dispatch_backend(action, &args, cfg, ncm_cfg, Some(&ts_ctx)).await
             }
             crate::skills::Platform::NapCat => {
                 let ts_ctx = ctx.to_ts_ctx()?;
                 info!("MusicControl: NC request forwarded to TS");
-                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
+                dispatch_backend(action, &args, cfg, ncm_cfg, Some(&ts_ctx)).await
             }
         }
     }

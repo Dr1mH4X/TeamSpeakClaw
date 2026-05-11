@@ -1,9 +1,10 @@
-use crate::config::MusicBackendConfig;
+use crate::config::MusicNcmApiConfig;
 use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tracing::{info, warn};
 
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -15,7 +16,7 @@ fn shared_client() -> &'static reqwest::Client {
     })
 }
 
-pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
+pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
     match action {
         "search" => search(args, cfg).await,
         "play" => play(args, cfg).await,
@@ -32,7 +33,7 @@ pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicBackendConfig
     }
 }
 
-async fn search(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
+async fn search(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
     let keywords = args["keywords"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing keywords"))?;
@@ -100,7 +101,7 @@ async fn search(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
     }
 }
 
-async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
+async fn play(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
     let song_id = args["song_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing song_id"))?;
@@ -191,11 +192,48 @@ async fn play(args: &Value, cfg: &MusicBackendConfig) -> Result<Value> {
                 .and_then(|a| a.first())
                 .and_then(|d| d["code"].as_i64())
                 .unwrap_or(0);
-            Err(anyhow::anyhow!(
-                "Song {} unavailable (code={}). May require VIP or be region-locked.",
-                song_id,
-                code
-            ))
+
+            if cfg.unm_enabled {
+                warn!(
+                    "Song {} unavailable from NCM (code={}), trying UNM fallback",
+                    song_id, code
+                );
+                match super::unm::search_and_retrieve(song_id, &song_name, &artist_name, cfg).await
+                {
+                    Ok(unm_url) => {
+                        info!("UNM fallback succeeded for song {}", song_id);
+                        let title = if artist_name.is_empty() {
+                            song_name
+                        } else {
+                            format!("{} - {}", song_name, artist_name)
+                        };
+                        let mut result = serde_json::json!({
+                            "status": "playing",
+                            "song_id": song_id,
+                            "title": title,
+                            "source": "unm",
+                        });
+                        result[PLAY_URL_KEY] = serde_json::Value::String(unm_url);
+                        result[PLAY_TITLE_KEY] = serde_json::Value::String(title);
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        warn!("UNM fallback failed for song {}: {}", song_id, e);
+                        Err(anyhow::anyhow!(
+                            "Song {} unavailable (code={}). UNM fallback also failed: {}",
+                            song_id,
+                            code,
+                            e
+                        ))
+                    }
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "Song {} unavailable (code={}). May require VIP or be region-locked.",
+                    song_id,
+                    code
+                ))
+            }
         }
     }
 }

@@ -48,26 +48,8 @@ services:
       - "3000:3000"
     environment:
       - TZ=Asia/Shanghai
-      # 如果部署了 unm，取消下面的注释让 NCM API 通过 UNM 代理（解锁灰色歌曲）
-      # - HTTP_PROXY=http://unm:8080
     networks:
       - openteamspeak
-    # depends_on:
-    #   - unm
-
-  # ── UnblockNeteaseMusic（可选，解锁灰色歌曲）──
-  # 部署后取消 ncm-api 中 HTTP_PROXY 的注释即可启用
-  # unm:
-  #   image: pan93412/unblock-netease-music-enhanced
-  #   container_name: unm
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8080:8080"
-  #   command: ["-o", "kuwo", "migu", "ytdlp"]
-  #   environment:
-  #     - TZ=Asia/Shanghai
-  #   networks:
-  #     - openteamspeak
 
 networks:
   openteamspeak:
