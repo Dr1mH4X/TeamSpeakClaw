@@ -90,9 +90,9 @@ impl HeadlessLlmBridge {
         }
     }
 
-    /// Check if TTS is effectively enabled (disabled when omni_model is true)
+    /// Check if TTS is effectively enabled
     fn is_tts_effectively_enabled(&self) -> bool {
-        !self.config.llm.omni_model && self.config.headless.tts.enabled
+        self.config.headless.tts.enabled
     }
 
     pub async fn run(self) -> Result<()> {
@@ -738,7 +738,7 @@ impl HeadlessLlmBridge {
         (messages, tools)
     }
 
-    /// Handle user input for omni models (skip TTS, use audio input)
+    /// Handle user input for omni models (skip STT, send audio directly to LLM)
     async fn handle_omni_user_input(
         &self,
         client: &mut VoiceServiceClient<Channel>,
@@ -764,6 +764,11 @@ impl HeadlessLlmBridge {
 
         if let Some(content) = content {
             self.send_reply(client, &ctx, &content).await?;
+            if self.is_tts_effectively_enabled() {
+                if let Err(e) = self.speak_reply(client, &content).await {
+                    warn!("omni tts playback failed, fallback text only: {e}");
+                }
+            }
             return Ok(());
         }
 
