@@ -1,18 +1,21 @@
 use crate::config::MusicNcmApiConfig;
 use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use anyhow::Result;
+use ncm_api_rs::{create_client, Query};
 use serde_json::Value;
 use std::sync::OnceLock;
-use std::time::Duration;
 use tracing::{info, warn};
 
-fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default()
+static NCM_CLIENT: OnceLock<ncm_api_rs::ApiClient> = OnceLock::new();
+
+fn get_client(cookie: &str) -> &'static ncm_api_rs::ApiClient {
+    NCM_CLIENT.get_or_init(|| {
+        let cookie_opt = if cookie.is_empty() {
+            None
+        } else {
+            Some(cookie.to_string())
+        };
+        create_client(cookie_opt)
     })
 }
 
@@ -39,31 +42,19 @@ async fn search(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("Missing keywords"))?;
     let limit = args["limit"].as_u64().unwrap_or(10);
 
-    let url = format!("{}/cloudsearch", cfg.ncm_api_url.trim_end_matches('/'));
-    let limit_str = limit.to_string();
-    let mut req = shared_client()
-        .get(&url)
-        .query(&[("keywords", keywords), ("type", "1")])
-        .query(&[("limit", limit_str.as_str())]);
+    let client = get_client(&cfg.ncm_cookie);
 
-    if !cfg.ncm_cookie.is_empty() {
-        req = req.header("Cookie", &cfg.ncm_cookie);
-    }
+    let query = Query::new()
+        .param("keywords", keywords)
+        .param("type", "1")
+        .param("limit", &limit.to_string());
 
-    let resp = req.send().await?;
-    let status = resp.status();
-    let text = resp.text().await?;
+    let resp = client
+        .cloudsearch(&query)
+        .await
+        .map_err(|e| anyhow::anyhow!("NCM API search failed: {}", e))?;
 
-    if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "NCM API search failed ({}): {}",
-            status,
-            text
-        ));
-    }
-
-    let body: Value = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse NCM API response: {e}"))?;
+    let body = &resp.body;
 
     let songs = body["result"]["songs"].as_array();
     match songs {
@@ -106,25 +97,16 @@ async fn play(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing song_id"))?;
 
-    let base = cfg.ncm_api_url.trim_end_matches('/');
+    let client = get_client(&cfg.ncm_cookie);
 
     // 1. Get song details (title, artist)
-    let detail_url = format!("{}/song/detail", base);
-    let mut detail_req = shared_client().get(&detail_url).query(&[("ids", song_id)]);
-    if !cfg.ncm_cookie.is_empty() {
-        detail_req = detail_req.header("Cookie", &cfg.ncm_cookie);
-    }
-    let detail_resp = detail_req.send().await?;
-    let detail_status = detail_resp.status();
-    let detail_text = detail_resp.text().await?;
-    if !detail_status.is_success() {
-        return Err(anyhow::anyhow!(
-            "NCM song detail failed ({}): {}",
-            detail_status,
-            detail_text
-        ));
-    }
-    let detail_body: Value = serde_json::from_str(&detail_text)?;
+    let detail_query = Query::new().param("ids", song_id);
+    let detail_resp = client
+        .song_detail(&detail_query)
+        .await
+        .map_err(|e| anyhow::anyhow!("NCM song detail failed: {}", e))?;
+
+    let detail_body = &detail_resp.body;
 
     let song_name = detail_body["songs"]
         .as_array()
@@ -145,24 +127,15 @@ async fn play(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         .unwrap_or_default();
 
     // 2. Get song URL
-    let url_endpoint = format!("{}/song/url/v1", base);
-    let mut url_req = shared_client()
-        .get(&url_endpoint)
-        .query(&[("id", song_id), ("level", "exhigh")]);
-    if !cfg.ncm_cookie.is_empty() {
-        url_req = url_req.header("Cookie", &cfg.ncm_cookie);
-    }
-    let url_resp = url_req.send().await?;
-    let url_status = url_resp.status();
-    let url_text = url_resp.text().await?;
-    if !url_status.is_success() {
-        return Err(anyhow::anyhow!(
-            "NCM song URL failed ({}): {}",
-            url_status,
-            url_text
-        ));
-    }
-    let url_body: Value = serde_json::from_str(&url_text)?;
+    let url_query = Query::new()
+        .param("id", song_id)
+        .param("level", "exhigh");
+    let url_resp = client
+        .song_url_v1(&url_query)
+        .await
+        .map_err(|e| anyhow::anyhow!("NCM song URL failed: {}", e))?;
+
+    let url_body = &url_resp.body;
 
     let audio_url = url_body["data"]
         .as_array()

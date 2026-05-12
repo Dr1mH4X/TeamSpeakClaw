@@ -39,18 +39,6 @@ services:
     networks:
       - openteamspeak
 
-  # ── 音乐播放后端（可选，backend = "ncm_api" 时需要）──
-  ncm-api:
-    image: binaryify/netease_cloud_music_api
-    container_name: ncm-api
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - TZ=Asia/Shanghai
-    networks:
-      - openteamspeak
-
 networks:
   openteamspeak:
     driver: bridge
