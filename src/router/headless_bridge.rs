@@ -35,12 +35,15 @@ use voicev1::voice_service_client::VoiceServiceClient;
 /// Validates a URL is safe to pass to the audio backend (ffmpeg via gRPC).
 /// Accepts only http/https, rejects loopback, link-local, and RFC1918 private addresses.
 fn validate_play_url(raw: &str) -> anyhow::Result<()> {
-    let parsed = url::Url::parse(raw)
-        .map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
+    let parsed = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
 
     match parsed.scheme() {
         "http" | "https" => {}
-        scheme => return Err(anyhow::anyhow!("play URL scheme '{scheme}' is not allowed; only http/https are accepted")),
+        scheme => {
+            return Err(anyhow::anyhow!(
+                "play URL scheme '{scheme}' is not allowed; only http/https are accepted"
+            ))
+        }
     }
 
     let host = parsed
@@ -55,10 +58,14 @@ fn validate_play_url(raw: &str) -> anyhow::Result<()> {
     // Check IP-address hosts for private/loopback ranges
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         if ip.is_loopback() {
-            return Err(anyhow::anyhow!("play URL must not point to a loopback address"));
+            return Err(anyhow::anyhow!(
+                "play URL must not point to a loopback address"
+            ));
         }
         if is_private_ip(ip) {
-            return Err(anyhow::anyhow!("play URL must not point to a private network address"));
+            return Err(anyhow::anyhow!(
+                "play URL must not point to a private network address"
+            ));
         }
     }
 
@@ -96,6 +103,12 @@ struct CallerContext {
     channel_group_id: u32,
     reply_target_mode: i32,
     reply_target_client_id: u32,
+}
+
+struct PendingPlay {
+    source_url: String,
+    title: String,
+    requested_by: String,
 }
 
 pub struct HeadlessLlmBridge {
@@ -443,11 +456,6 @@ impl HeadlessLlmBridge {
         user_msg: String,
         source: &str,
     ) -> Result<()> {
-        // Stop TTS if effectively enabled (considers omni_model)
-        if self.is_tts_effectively_enabled() {
-            let _ = client.stop(tonic::Request::new(voicev1::Empty {})).await;
-        }
-
         if Self::OBS_CHAT {
             info!(
                 event = "headless.chat.user_message",
@@ -462,13 +470,15 @@ impl HeadlessLlmBridge {
 
         let stream_tts_enabled = self.is_tts_effectively_enabled() && self.config.llm.stream_output;
 
-        let reply = match if stream_tts_enabled {
+        // streaming TTS handles pending_play internally; non-streaming returns it
+        let (reply, pending_play) = match if stream_tts_enabled {
             self.run_llm_chain_streaming_tts(client, &ctx, user_msg)
                 .await
+                .map(|r| (r, None))
         } else {
             self.run_llm_chain(client, &ctx, user_msg).await
         } {
-            Ok(reply) => reply,
+            Ok(v) => v,
             Err(e) => {
                 if e.downcast_ref::<HeadlessToolLoopTimeoutError>().is_some() {
                     let _ = self.send_reply(client, &ctx, "操作超时，请稍后再试").await;
@@ -485,7 +495,26 @@ impl HeadlessLlmBridge {
                 }
             }
         }
+        // TTS done (or skipped), now play music
+        Self::execute_pending_play(client, pending_play).await;
         Ok(())
+    }
+
+    async fn execute_pending_play(
+        client: &mut VoiceServiceClient<Channel>,
+        pending: Option<PendingPlay>,
+    ) {
+        if let Some(pp) = pending {
+            let play_req = voicev1::PlayRequest {
+                source_url: pp.source_url,
+                title: pp.title,
+                requested_by: pp.requested_by,
+                notice: String::new(),
+            };
+            if let Err(e) = client.play(tonic::Request::new(play_req)).await {
+                warn!("deferred play failed: {e}");
+            }
+        }
     }
 
     async fn run_llm_chain_streaming_tts(
@@ -510,7 +539,7 @@ impl HeadlessLlmBridge {
             }
         }
 
-        let reply = self.run_llm_chain(client, ctx, user_msg).await?;
+        let (reply, pending_play) = self.run_llm_chain(client, ctx, user_msg).await?;
         if !reply.trim().is_empty() && self.is_tts_effectively_enabled() {
             info!(
                 event = "headless.tts.fallback",
@@ -521,6 +550,8 @@ impl HeadlessLlmBridge {
                 warn!(%e, "fallback tts playback failed, will send text only");
             }
         }
+        // TTS done (or skipped), now play music
+        Self::execute_pending_play(client, pending_play).await;
         Ok(reply)
     }
 
@@ -529,22 +560,22 @@ impl HeadlessLlmBridge {
         client: &mut VoiceServiceClient<Channel>,
         ctx: &CallerContext,
         user_msg: String,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<PendingPlay>)> {
         let (messages, tools, source) = self.build_llm_request(ctx, user_msg.clone());
-        let (messages, content) = self
+        let (messages, content, pending_play) = self
             .execute_llm_with_tools(client, ctx, messages, tools)
             .await?;
 
         if let Some(content) = content {
             self.llm.save_turn(&source, user_msg, content.clone());
-            return Ok(content);
+            return Ok((content, pending_play));
         }
 
         // Try stream reply if no content from chat
         let stream_reply = self.collect_stream_reply(messages.clone()).await?;
         if !stream_reply.trim().is_empty() {
             self.llm.save_turn(&source, user_msg, stream_reply.clone());
-            return Ok(stream_reply);
+            return Ok((stream_reply, pending_play));
         }
         Err(anyhow!("empty llm response"))
     }
@@ -553,12 +584,13 @@ impl HeadlessLlmBridge {
     /// Returns (messages, content) where content is Some if LLM returned content without tool calls
     async fn execute_llm_with_tools(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        _client: &mut VoiceServiceClient<Channel>,
         ctx: &CallerContext,
         mut messages: Vec<serde_json::Value>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    ) -> Result<(Vec<serde_json::Value>, Option<String>, Option<PendingPlay>)> {
         let max_turns = self.config.llm.max_tool_turns;
+        let mut pending_play: Option<PendingPlay> = None;
 
         for turn in 0..max_turns {
             if Self::OBS_LLM {
@@ -601,7 +633,7 @@ impl HeadlessLlmBridge {
 
             if response.tool_calls.is_empty() {
                 let content = response.content.filter(|c| !c.trim().is_empty());
-                return Ok((messages, content));
+                return Ok((messages, content, pending_play));
             }
 
             // Build assistant tool calls JSON
@@ -660,15 +692,11 @@ impl HeadlessLlmBridge {
                                 warn!("rejected play URL from tool result: {e}");
                             }
                             Ok(()) => {
-                                let play_req = voicev1::PlayRequest {
+                                pending_play = Some(PendingPlay {
                                     source_url: url.to_string(),
                                     title: title.clone(),
                                     requested_by: ctx.caller_name.clone(),
-                                    notice: String::new(),
-                                };
-                                if let Err(e) = client.play(tonic::Request::new(play_req)).await {
-                                    warn!("gRPC Play failed: {e}");
-                                }
+                                });
                             }
                         }
                         // Strip __play_url / __play_title from result regardless of validation outcome
@@ -824,7 +852,7 @@ impl HeadlessLlmBridge {
         }
 
         let (messages, tools) = self.build_omni_llm_request(&ctx, audio_data, None);
-        let (_, content) = self
+        let (_, content, pending_play) = self
             .execute_llm_with_tools(client, &ctx, messages, tools)
             .await?;
 
@@ -835,6 +863,7 @@ impl HeadlessLlmBridge {
                     warn!("omni tts playback failed, fallback text only: {e}");
                 }
             }
+            Self::execute_pending_play(client, pending_play).await;
             return Ok(());
         }
 
