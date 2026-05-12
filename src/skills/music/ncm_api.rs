@@ -379,7 +379,12 @@ fn set_mode(args: &Value) -> Result<Value> {
             "none" => 0,
             "one" => 1,
             "all" => 1, // all 映射到顺序循环
-            _ => return Err(anyhow::anyhow!("Invalid repeat_mode: '{}'. Use none/one/all", mode_str)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid repeat_mode: '{}'. Use none/one/all",
+                    mode_str
+                ))
+            }
         }
     } else {
         return Err(anyhow::anyhow!("Missing 'mode' or 'repeat_mode' parameter"));
@@ -462,9 +467,7 @@ async fn fetch_song(song_id: &str, cfg: &MusicNcmApiConfig) -> Result<(String, S
         .unwrap_or_default();
 
     // 2. 获取播放 URL
-    let url_query = Query::new()
-        .param("id", song_id)
-        .param("level", "exhigh");
+    let url_query = Query::new().param("id", song_id).param("level", "exhigh");
     let url_resp = client
         .song_url_v1(&url_query)
         .await
