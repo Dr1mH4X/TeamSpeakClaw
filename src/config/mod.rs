@@ -4,6 +4,7 @@ pub mod headless;
 pub mod llm;
 pub mod logging;
 pub mod music_backend;
+pub mod music_ncm_api;
 pub mod napcat;
 pub mod prompts;
 pub mod rate_limit;
@@ -15,6 +16,7 @@ pub use headless::HeadlessConfig;
 pub use llm::LlmConfig;
 pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
+pub use music_ncm_api::MusicNcmApiConfig;
 pub use napcat::NapCatConfig;
 pub use prompts::{ErrorPrompts, PromptsConfig};
 pub use rate_limit::RateLimitConfig;
@@ -39,6 +41,8 @@ pub struct AppConfig {
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
     pub music_backend: MusicBackendConfig,
+    #[serde(default)]
+    pub music_ncm_api: MusicNcmApiConfig,
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
@@ -52,6 +56,7 @@ impl Default for AppConfig {
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
             music_backend: MusicBackendConfig::default(),
+            music_ncm_api: MusicNcmApiConfig::default(),
             napcat: NapCatConfig::default(),
             headless: HeadlessConfig::default(),
             logging: LogConfig::default(),

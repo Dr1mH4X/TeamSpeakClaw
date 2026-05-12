@@ -186,7 +186,7 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn with_defaults() -> Self {
+    pub fn with_defaults(music_backend: &str) -> Self {
         use communication::{PokeClient, SendMessage};
         use information::{GetClientInfo, GetClientList};
         use moderation::{BanClient, KickClient, MoveClient};
@@ -201,7 +201,7 @@ impl SkillRegistry {
         registry.register(Box::new(MoveClient));
         registry.register(Box::new(GetClientList));
         registry.register(Box::new(GetClientInfo));
-        registry.register(Box::new(MusicControl));
+        registry.register(Box::new(MusicControl::new(music_backend)));
         info!("已注册技能: {:?}", registry.list_skills());
         registry
     }
