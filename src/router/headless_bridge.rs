@@ -28,8 +28,65 @@ use crate::llm::provider::ToolCall;
 use crate::llm::{LlmEngine, LlmStreamEvent, SessionSource};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
+use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
+
+/// Validates a URL is safe to pass to the audio backend (ffmpeg via gRPC).
+/// Accepts only http/https, rejects loopback, link-local, and RFC1918 private addresses.
+fn validate_play_url(raw: &str) -> anyhow::Result<()> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(anyhow::anyhow!("play URL scheme '{scheme}' is not allowed; only http/https are accepted")),
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("play URL has no host"))?;
+
+    // Reject plain "localhost"
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(anyhow::anyhow!("play URL must not point to localhost"));
+    }
+
+    // Check IP-address hosts for private/loopback ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() {
+            return Err(anyhow::anyhow!("play URL must not point to a loopback address"));
+        }
+        if is_private_ip(ip) {
+            return Err(anyhow::anyhow!("play URL must not point to a private network address"));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8
+            octets[0] == 10
+            // 172.16.0.0/12
+            || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+            // 192.168.0.0/16
+            || (octets[0] == 192 && octets[1] == 168)
+            // 169.254.0.0/16  (link-local)
+            || (octets[0] == 169 && octets[1] == 254)
+        }
+        std::net::IpAddr::V6(v6) => {
+            // ::1 is already covered by is_loopback(); fc00::/7 = ULA
+            let seg = v6.segments();
+            (seg[0] & 0xfe00) == 0xfc00
+            // fe80::/10 link-local
+            || (seg[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
 
 struct CallerContext {
     caller_id: u32,
@@ -89,9 +146,9 @@ impl HeadlessLlmBridge {
         }
     }
 
-    /// Check if TTS is effectively enabled (disabled when omni_model is true)
+    /// Check if TTS is effectively enabled
     fn is_tts_effectively_enabled(&self) -> bool {
-        !self.config.llm.omni_model && self.config.headless.tts.enabled
+        self.config.headless.tts.enabled
     }
 
     pub async fn run(self) -> Result<()> {
@@ -409,7 +466,7 @@ impl HeadlessLlmBridge {
             self.run_llm_chain_streaming_tts(client, &ctx, user_msg)
                 .await
         } else {
-            self.run_llm_chain(&ctx, user_msg).await
+            self.run_llm_chain(client, &ctx, user_msg).await
         } {
             Ok(reply) => reply,
             Err(e) => {
@@ -453,7 +510,7 @@ impl HeadlessLlmBridge {
             }
         }
 
-        let reply = self.run_llm_chain(ctx, user_msg).await?;
+        let reply = self.run_llm_chain(client, ctx, user_msg).await?;
         if !reply.trim().is_empty() && self.is_tts_effectively_enabled() {
             info!(
                 event = "headless.tts.fallback",
@@ -467,9 +524,16 @@ impl HeadlessLlmBridge {
         Ok(reply)
     }
 
-    async fn run_llm_chain(&self, ctx: &CallerContext, user_msg: String) -> Result<String> {
+    async fn run_llm_chain(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        ctx: &CallerContext,
+        user_msg: String,
+    ) -> Result<String> {
         let (messages, tools, source) = self.build_llm_request(ctx, user_msg.clone());
-        let (messages, content) = self.execute_llm_with_tools(ctx, messages, tools).await?;
+        let (messages, content) = self
+            .execute_llm_with_tools(client, ctx, messages, tools)
+            .await?;
 
         if let Some(content) = content {
             self.llm.save_turn(&source, user_msg, content.clone());
@@ -489,6 +553,7 @@ impl HeadlessLlmBridge {
     /// Returns (messages, content) where content is Some if LLM returned content without tool calls
     async fn execute_llm_with_tools(
         &self,
+        client: &mut VoiceServiceClient<Channel>,
         ctx: &CallerContext,
         mut messages: Vec<serde_json::Value>,
         tools: Vec<serde_json::Value>,
@@ -574,6 +639,58 @@ impl HeadlessLlmBridge {
                 }
 
                 let tool_result = self.execute_skill(call, ctx).await;
+
+                // Intercept __play_url from embedded music backends
+                let tool_result = if let Ok(mut parsed) =
+                    serde_json::from_str::<serde_json::Value>(&tool_result)
+                {
+                    if let Some(url) = parsed.get(PLAY_URL_KEY).and_then(|v| v.as_str()) {
+                        let title = parsed
+                            .get(PLAY_TITLE_KEY)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        debug!(
+                            event = "headless.play_url",
+                            title = %title,
+                            "embedded backend requested playback"
+                        );
+                        match validate_play_url(url) {
+                            Err(e) => {
+                                warn!("rejected play URL from tool result: {e}");
+                            }
+                            Ok(()) => {
+                                let play_req = voicev1::PlayRequest {
+                                    source_url: url.to_string(),
+                                    title: title.clone(),
+                                    requested_by: ctx.caller_name.clone(),
+                                    notice: String::new(),
+                                };
+                                if let Err(e) = client.play(tonic::Request::new(play_req)).await {
+                                    warn!("gRPC Play failed: {e}");
+                                }
+                            }
+                        }
+                        // Strip __play_url / __play_title from result regardless of validation outcome
+                        if let Some(obj) = parsed.as_object_mut() {
+                            obj.remove(PLAY_URL_KEY);
+                            obj.remove(PLAY_TITLE_KEY);
+                        }
+                    }
+                    match serde_json::to_string(&parsed) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("failed to re-serialize tool result after stripping play fields: {e}");
+                            serde_json::json!({
+                                "error": "serialization_failed",
+                                "raw": tool_result,
+                            })
+                            .to_string()
+                        }
+                    }
+                } else {
+                    tool_result
+                };
 
                 if Self::OBS_TOOL {
                     info!(
@@ -687,7 +804,7 @@ impl HeadlessLlmBridge {
         (messages, tools)
     }
 
-    /// Handle user input for omni models (skip TTS, use audio input)
+    /// Handle user input for omni models (skip STT, send audio directly to LLM)
     async fn handle_omni_user_input(
         &self,
         client: &mut VoiceServiceClient<Channel>,
@@ -707,10 +824,17 @@ impl HeadlessLlmBridge {
         }
 
         let (messages, tools) = self.build_omni_llm_request(&ctx, audio_data, None);
-        let (_, content) = self.execute_llm_with_tools(&ctx, messages, tools).await?;
+        let (_, content) = self
+            .execute_llm_with_tools(client, &ctx, messages, tools)
+            .await?;
 
         if let Some(content) = content {
             self.send_reply(client, &ctx, &content).await?;
+            if self.is_tts_effectively_enabled() {
+                if let Err(e) = self.speak_reply(client, &content).await {
+                    warn!("omni tts playback failed, fallback text only: {e}");
+                }
+            }
             return Ok(());
         }
 
