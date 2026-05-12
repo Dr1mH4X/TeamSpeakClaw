@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct MusicNcmApiConfig {
-    pub ncm_api_url: String,
     pub ncm_cookie: String,
     pub unm_enabled: bool,
     pub unm_sources: String,
@@ -17,7 +16,6 @@ pub struct MusicNcmApiConfig {
 impl Default for MusicNcmApiConfig {
     fn default() -> Self {
         Self {
-            ncm_api_url: "http://127.0.0.1:3000".to_string(),
             ncm_cookie: String::new(),
             unm_enabled: true,
             unm_sources: "ytdlp,bilibili,kugou".to_string(),
