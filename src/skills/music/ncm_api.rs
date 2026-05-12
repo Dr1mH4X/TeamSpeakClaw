@@ -74,17 +74,13 @@ fn player_state() -> &'static Mutex<NcmPlayerState> {
 
 // ── NCM API 客户端 ────────────────────────────────────────────
 
-static NCM_CLIENT: OnceLock<ncm_api_rs::ApiClient> = OnceLock::new();
-
-fn get_client(cookie: &str) -> &'static ncm_api_rs::ApiClient {
-    NCM_CLIENT.get_or_init(|| {
-        let cookie_opt = if cookie.is_empty() {
-            None
-        } else {
-            Some(cookie.to_string())
-        };
-        create_client(cookie_opt)
-    })
+fn make_client(cookie: &str) -> ncm_api_rs::ApiClient {
+    let cookie_opt = if cookie.is_empty() {
+        None
+    } else {
+        Some(cookie.to_string())
+    };
+    create_client(cookie_opt)
 }
 
 // ── 入口 ──────────────────────────────────────────────────────
@@ -122,7 +118,7 @@ async fn search(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("Missing keywords"))?;
     let limit = args["limit"].as_u64().unwrap_or(10);
 
-    let client = get_client(&cfg.ncm_cookie);
+    let client = make_client(&cfg.ncm_cookie);
 
     let query = Query::new()
         .param("keywords", keywords)
@@ -436,7 +432,7 @@ fn set_mode_from_shuffle(args: &Value) -> Result<Value> {
 
 /// 获取歌曲详情和播放 URL
 async fn fetch_song(song_id: &str, cfg: &MusicNcmApiConfig) -> Result<(String, String, String)> {
-    let client = get_client(&cfg.ncm_cookie);
+    let client = make_client(&cfg.ncm_cookie);
 
     // 1. 获取歌曲详情（标题、歌手）
     let detail_query = Query::new().param("ids", song_id);
