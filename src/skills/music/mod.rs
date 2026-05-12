@@ -61,7 +61,7 @@ impl Skill for MusicControl {
         match self.backend.as_str() {
             "ncm_api" => "Control the music player. Search, play, and manage a song queue from NetEase Music (网易云). \
                           Supports playback control (play/pause/next/previous), queue management, repeat/shuffle modes, \
-                          volume and audio effects.",
+                          volume and audio effects. When there are multiple search results, directly play the first best match.",
             "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
                              Use ts_* actions to play songs, manage playlists, and switch modes.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
