@@ -9,7 +9,7 @@ fn shared_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_default()
     })
 }
 
