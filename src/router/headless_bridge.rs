@@ -618,7 +618,11 @@ impl HeadlessLlmBridge {
                         Ok(s) => s,
                         Err(e) => {
                             warn!("failed to re-serialize tool result after stripping play fields: {e}");
-                            serde_json::json!({"result": "ok"}).to_string()
+                            serde_json::json!({
+                                "error": "serialization_failed",
+                                "raw": tool_result,
+                            })
+                            .to_string()
                         }
                     }
                 } else {
