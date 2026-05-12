@@ -475,50 +475,46 @@ async fn fetch_song(song_id: &str, cfg: &MusicNcmApiConfig) -> Result<(String, S
 
     let url_body = &url_resp.body;
 
-    let audio_url = url_body["data"]
-        .as_array()
-        .and_then(|a| a.first())
+    let entry = url_body["data"].as_array().and_then(|a| a.first());
+
+    let audio_url = entry
         .and_then(|d| d["url"].as_str())
         .filter(|u| !u.is_empty());
+    let code = entry.and_then(|d| d["code"].as_i64()).unwrap_or(0);
+    let is_trial = entry.and_then(|d| d["freeTrialInfo"].as_object()).is_some();
 
-    match audio_url {
-        Some(url) => Ok((song_name, artist_name, url.to_string())),
-        None => {
-            let code = url_body["data"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|d| d["code"].as_i64())
-                .unwrap_or(0);
+    let is_valid_full_song = audio_url.is_some() && code == 200 && !is_trial;
 
-            if cfg.unm_enabled {
-                warn!(
-                    "Song {} unavailable from NCM (code={}), trying UNM fallback",
-                    song_id, code
-                );
-                match super::unm::search_and_retrieve(song_id, &song_name, &artist_name, cfg).await
-                {
-                    Ok(unm_url) => {
-                        info!("UNM fallback succeeded for song {}", song_id);
-                        Ok((song_name, artist_name, unm_url))
-                    }
-                    Err(e) => {
-                        warn!("UNM fallback failed for song {}: {}", song_id, e);
-                        Err(anyhow::anyhow!(
-                            "Song {} unavailable (code={}). UNM fallback also failed: {}",
-                            song_id,
-                            code,
-                            e
-                        ))
-                    }
-                }
-            } else {
+    if is_valid_full_song {
+        Ok((song_name, artist_name, audio_url.unwrap().to_string()))
+    } else if cfg.unm_enabled {
+        warn!(
+            "Song {} not fully available from NCM (code={}, trial={}), trying UNM fallback",
+            song_id, code, is_trial
+        );
+        match super::unm::search_and_retrieve(song_id, &song_name, &artist_name, cfg).await {
+            Ok(unm_url) => {
+                info!("UNM fallback succeeded for song {}", song_id);
+                Ok((song_name, artist_name, unm_url))
+            }
+            Err(e) => {
+                warn!("UNM fallback failed for song {}: {}", song_id, e);
                 Err(anyhow::anyhow!(
-                    "Song {} unavailable (code={}). May require VIP or be region-locked.",
+                    "Song {} not fully available (code={}, trial={}). UNM fallback also failed: {}",
                     song_id,
-                    code
+                    code,
+                    is_trial,
+                    e
                 ))
             }
         }
+    } else {
+        Err(anyhow::anyhow!(
+            "Song {} not fully available (code={}, trial={}). May require VIP or be region-locked.",
+            song_id,
+            code,
+            is_trial
+        ))
     }
 }
 

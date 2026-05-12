@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::borrow::Cow;
 use std::sync::OnceLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use unm_api_utils::executor::build_full_executor;
 use unm_engine::executor::Executor;
 use unm_types::config::ConfigManagerBuilder;
@@ -77,21 +77,33 @@ pub(crate) async fn search_and_retrieve(
         song_name, artist_name, sources
     );
 
-    let search_result = executor
-        .search(&sources, &song, &context)
-        .await
-        .map_err(|e| anyhow::anyhow!("UNM search failed: {}", e))?;
+    for source in &sources {
+        info!("Trying UNM source: {source}");
+        match executor.search(&[source.clone()], &song, &context).await {
+            Ok(search_result) => match executor.retrieve(&search_result, &context).await {
+                Ok(retrieved) => {
+                    info!(
+                        "UNM found: {} from {}",
+                        song.display_name(),
+                        retrieved.source
+                    );
+                    return Ok(retrieved.url);
+                }
+                Err(e) => {
+                    warn!("{source} retrieve failed: {e}, trying next...");
+                    continue;
+                }
+            },
+            Err(e) => {
+                warn!("{source} search failed: {e}, trying next...");
+                continue;
+            }
+        }
+    }
 
-    let retrieved = executor
-        .retrieve(&search_result, &context)
-        .await
-        .map_err(|e| anyhow::anyhow!("UNM retrieve failed: {}", e))?;
-
-    info!(
-        "UNM found: {} from {}",
-        song.display_name(),
-        retrieved.source
-    );
-
-    Ok(retrieved.url)
+    Err(anyhow::anyhow!(
+        "All UNM sources exhausted for {} - {}",
+        song_name,
+        artist_name
+    ))
 }
