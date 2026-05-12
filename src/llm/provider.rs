@@ -24,6 +24,7 @@ pub trait LlmProvider: Send + Sync {
 pub struct LlmResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,9 +123,16 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
+        let reasoning_content = message
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         Ok(LlmResponse {
             content,
             tool_calls,
+            reasoning_content,
         })
     }
 

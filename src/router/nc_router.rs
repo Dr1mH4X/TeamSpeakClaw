@@ -454,11 +454,15 @@ impl NcRouter {
                         })
                         .collect();
 
-                    messages.push(json!({
+                    let mut assistant_msg = json!({
                         "role": "assistant",
                         "content": response.content,
                         "tool_calls": assistant_tool_calls
-                    }));
+                    });
+                    if let Some(ref rc) = response.reasoning_content {
+                        assistant_msg["reasoning_content"] = json!(rc);
+                    }
+                    messages.push(assistant_msg);
 
                     // 执行所有工具调用
                     for call in &response.tool_calls {
