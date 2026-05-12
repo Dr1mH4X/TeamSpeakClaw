@@ -594,9 +594,8 @@ impl HeadlessLlmBridge {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        info!(
+                        debug!(
                             event = "headless.play_url",
-                            url = %url,
                             title = %title,
                             "embedded backend requested playback"
                         );
