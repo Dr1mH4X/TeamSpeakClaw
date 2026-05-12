@@ -131,6 +131,8 @@ pub async fn playback_loop(
         .arg("15000000")
         .arg("-i")
         .arg(&source_url)
+        .arg("-af")
+        .arg("loudnorm=I=-16:TP=-1.5:LRA=11:linear=true")
         .arg("-f")
         .arg("s16le")
         .arg("-ar")
