@@ -18,7 +18,7 @@ impl Default for MusicNcmApiConfig {
         Self {
             ncm_cookie: String::new(),
             unm_enabled: true,
-            unm_sources: "ytdlp,bilibili,kugou".to_string(),
+            unm_sources: "ytdl,bilibili,kugou".to_string(),
             unm_enable_flac: false,
             unm_search_mode: "fast-first".to_string(),
             unm_proxy_uri: String::new(),

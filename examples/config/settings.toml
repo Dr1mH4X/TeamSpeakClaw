@@ -81,7 +81,7 @@ ncm_cookie = ""  # 可选，填 MUSIC_U=xxx 以播放 VIP 歌曲
 
 # UNM 配置（可选，解锁灰色歌曲）
 unm_enabled = true
-unm_sources = "ytdlp,bilibili,kugou"    # 音源，逗号分隔
+unm_sources = "ytdl,bilibili,kugou"    # 音源，逗号分隔（ytdl=yt-dlp, bilibili, kugou, kuwo, qq, joox, pyncm）
 unm_enable_flac = false                  # 启用无损音质
 unm_search_mode = "fast-first"           # fast-first（速度优先）或 order-first（顺序优先）
 unm_proxy_uri = ""                       # 代理地址（如 https://proxy.example.com）
