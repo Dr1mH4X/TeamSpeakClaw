@@ -41,6 +41,7 @@ pub struct AppConfig {
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
     pub music_backend: MusicBackendConfig,
+    #[serde(default)]
     pub music_ncm_api: MusicNcmApiConfig,
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
