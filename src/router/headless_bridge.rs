@@ -652,11 +652,15 @@ impl HeadlessLlmBridge {
                 })
                 .collect();
 
-            messages.push(json!({
+            let mut assistant_msg = json!({
                 "role":"assistant",
                 "content": response.content,
                 "tool_calls": assistant_tool_calls
-            }));
+            });
+            if let Some(ref rc) = response.reasoning_content {
+                assistant_msg["reasoning_content"] = json!(rc);
+            }
+            messages.push(assistant_msg);
 
             for call in &response.tool_calls {
                 if Self::OBS_TOOL {
