@@ -32,6 +32,62 @@ use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
 
+/// Validates a URL is safe to pass to the audio backend (ffmpeg via gRPC).
+/// Accepts only http/https, rejects loopback, link-local, and RFC1918 private addresses.
+fn validate_play_url(raw: &str) -> anyhow::Result<()> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(anyhow::anyhow!("play URL scheme '{scheme}' is not allowed; only http/https are accepted")),
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("play URL has no host"))?;
+
+    // Reject plain "localhost"
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(anyhow::anyhow!("play URL must not point to localhost"));
+    }
+
+    // Check IP-address hosts for private/loopback ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() {
+            return Err(anyhow::anyhow!("play URL must not point to a loopback address"));
+        }
+        if is_private_ip(ip) {
+            return Err(anyhow::anyhow!("play URL must not point to a private network address"));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8
+            octets[0] == 10
+            // 172.16.0.0/12
+            || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+            // 192.168.0.0/16
+            || (octets[0] == 192 && octets[1] == 168)
+            // 169.254.0.0/16  (link-local)
+            || (octets[0] == 169 && octets[1] == 254)
+        }
+        std::net::IpAddr::V6(v6) => {
+            // ::1 is already covered by is_loopback(); fc00::/7 = ULA
+            let seg = v6.segments();
+            (seg[0] & 0xfe00) == 0xfc00
+            // fe80::/10 link-local
+            || (seg[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 struct CallerContext {
     caller_id: u32,
     caller_name: String,
@@ -599,16 +655,23 @@ impl HeadlessLlmBridge {
                             title = %title,
                             "embedded backend requested playback"
                         );
-                        let play_req = voicev1::PlayRequest {
-                            source_url: url.to_string(),
-                            title: title.clone(),
-                            requested_by: ctx.caller_name.clone(),
-                            notice: String::new(),
-                        };
-                        if let Err(e) = client.play(tonic::Request::new(play_req)).await {
-                            warn!("gRPC Play failed: {e}");
+                        match validate_play_url(url) {
+                            Err(e) => {
+                                warn!("rejected play URL from tool result: {e}");
+                            }
+                            Ok(()) => {
+                                let play_req = voicev1::PlayRequest {
+                                    source_url: url.to_string(),
+                                    title: title.clone(),
+                                    requested_by: ctx.caller_name.clone(),
+                                    notice: String::new(),
+                                };
+                                if let Err(e) = client.play(tonic::Request::new(play_req)).await {
+                                    warn!("gRPC Play failed: {e}");
+                                }
+                            }
                         }
-                        // Strip __play_url / __play_title from result
+                        // Strip __play_url / __play_title from result regardless of validation outcome
                         if let Some(obj) = parsed.as_object_mut() {
                             obj.remove(PLAY_URL_KEY);
                             obj.remove(PLAY_TITLE_KEY);
