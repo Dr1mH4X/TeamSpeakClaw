@@ -39,7 +39,17 @@ async fn dispatch_backend(
     }
 }
 
-pub struct MusicControl;
+pub struct MusicControl {
+    backend: String,
+}
+
+impl MusicControl {
+    pub fn new(backend: &str) -> Self {
+        Self {
+            backend: backend.to_string(),
+        }
+    }
+}
 
 #[async_trait]
 impl Skill for MusicControl {
@@ -48,89 +58,25 @@ impl Skill for MusicControl {
     }
 
     fn description(&self) -> &'static str {
-        "Control the music player. Supports playback control (play/pause/next/previous/seek), \
-         searching and queuing songs from NetEase Music (网易云) or QQ Music (QQ音乐), \
-         adjusting volume and audio effects (FX), and setting repeat/shuffle modes. \
-         The backend is configured automatically; just call the appropriate action."
+        match self.backend.as_str() {
+            "ncm_api" => "Control the music player. Search, play, and manage a song queue from NetEase Music (网易云). \
+                          Supports playback control (play/pause/next/previous), queue management, repeat/shuffle modes, \
+                          volume and audio effects.",
+            "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
+                             Use ts_* actions to play songs, manage playlists, and switch modes.",
+            "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
+                                manage the queue, and control playback.",
+            _ => "Control the music player.",
+        }
     }
 
     fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "description": "The action to perform. For ncm_api backend: use 'search' + 'play' (requires song_id). \
-                                   For ts3audiobot backend: use ts_* actions (require value). \
-                                   For tsbot_backend: use standard playback actions.",
-                    "enum": [
-                        "play", "pause", "next", "previous", "skip", "seek",
-                        "search",
-                        "queue_netease",
-                        "queue_qqmusic",
-                        "repeat", "shuffle",
-                        "volume", "fx",
-                        "ts_play", "ts_add", "ts_gedan", "ts_gedanid",
-                        "ts_playid", "ts_addid", "ts_mode", "ts_login"
-                    ]
-                },
-                "keywords": {
-                    "type": "string",
-                    "description": "Search keywords for 'search' action."
-                },
-                "song_id": {
-                    "type": "string",
-                    "description": "NetEase song ID. Required for 'play' action when backend=ncm_api, and for 'queue_netease'."
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Song title (required for queue_netease / queue_qqmusic)."
-                },
-                "artist": {
-                    "type": "string",
-                    "description": "Artist name."
-                },
-                "play_now": {
-                    "type": "boolean",
-                    "description": "If true, play immediately instead of appending to queue."
-                },
-                "song_mid": {
-                    "type": "string",
-                    "description": "QQ Music song mid for 'queue_qqmusic'."
-                },
-                "quality": {
-                    "type": "string",
-                    "description": "Audio quality for QQ Music: '128', '320', 'flac'. Default '320'."
-                },
-                "seek_time": {
-                    "type": "number",
-                    "description": "Seek position in seconds for 'seek' action."
-                },
-                "repeat_mode": {
-                    "type": "string",
-                    "description": "Repeat mode: 'none', 'one', 'all'.",
-                    "enum": ["none", "one", "all"]
-                },
-                "shuffle_enabled": {
-                    "type": "boolean",
-                    "description": "Enable or disable shuffle for 'shuffle' action."
-                },
-                "volume_percent": {
-                    "type": "integer",
-                    "description": "Volume 0-100 for 'volume' action."
-                },
-                "fx_pan": { "type": "number", "description": "Stereo pan (-1.0 ~ 1.0)." },
-                "fx_bass_db": { "type": "number", "description": "Bass boost in dB." },
-                "fx_reverb_mix": { "type": "number", "description": "Reverb mix 0.0 ~ 1.0." },
-                "limit": { "type": "integer", "description": "Search result limit for 'search' action." },
-                "value": {
-                    "type": "string",
-                    "description": "Generic value for ts_* actions (song name, playlist name, ID, mode number, etc.). \
-                                   Also required for 'play' action when backend=ts3audiobot."
-                }
-            },
-            "required": ["action"]
-        })
+        match self.backend.as_str() {
+            "ncm_api" => ncm_api_schema(),
+            "ts3audiobot" => ts3audiobot_schema(),
+            "tsbot_backend" => tsbot_schema(),
+            _ => generic_schema(),
+        }
     }
 
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
@@ -166,4 +112,165 @@ impl Skill for MusicControl {
             }
         }
     }
+}
+
+// ── Schema generators ──────────────────────────────────────────
+
+fn ncm_api_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "The action to perform. Use 'search' to find songs, then 'play' with the song_id. \
+                               Use 'queue_netease' to add songs to the queue.",
+                "enum": [
+                    "search", "play", "queue_netease",
+                    "next", "previous",
+                    "repeat", "shuffle",
+                    "pause", "stop", "seek",
+                    "volume", "fx"
+                ]
+            },
+            "keywords": {
+                "type": "string",
+                "description": "Search keywords for 'search' action."
+            },
+            "song_id": {
+                "type": "string",
+                "description": "NetEase song ID. Required for 'play' and 'queue_netease'."
+            },
+            "title": {
+                "type": "string",
+                "description": "Song title (required for queue_netease)."
+            },
+            "artist": {
+                "type": "string",
+                "description": "Artist name."
+            },
+            "play_now": {
+                "type": "boolean",
+                "description": "If true, play immediately instead of appending to queue."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Search result limit for 'search' action."
+            },
+            "mode": {
+                "type": "integer",
+                "description": "Play mode: 0=sequential, 1=sequential loop, 2=random, 3=random loop.",
+                "enum": [0, 1, 2, 3]
+            },
+            "repeat_mode": {
+                "type": "string",
+                "description": "Repeat mode: 'none'(=0), 'one'(=1), 'all'(=1). Prefer 'mode' for full control.",
+                "enum": ["none", "one", "all"]
+            },
+            "shuffle_enabled": {
+                "type": "boolean",
+                "description": "Enable or disable shuffle for 'shuffle' action."
+            },
+            "seek_time": {
+                "type": "number",
+                "description": "Seek position in seconds for 'seek' action."
+            },
+            "volume_percent": {
+                "type": "integer",
+                "description": "Volume 0-100 for 'volume' action."
+            },
+            "fx_pan": { "type": "number", "description": "Stereo pan (-1.0 ~ 1.0)." },
+            "fx_bass_db": { "type": "number", "description": "Bass boost in dB." },
+            "fx_reverb_mix": { "type": "number", "description": "Reverb mix 0.0 ~ 1.0." }
+        },
+        "required": ["action"]
+    })
+}
+
+fn ts3audiobot_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "The action to perform. All ts_* actions send commands to TS3AudioBot via chat.",
+                "enum": [
+                    "ts_play", "ts_add", "ts_gedan", "ts_gedanid",
+                    "ts_playid", "ts_addid", "ts_mode", "ts_login"
+                ]
+            },
+            "value": {
+                "type": "string",
+                "description": "Action argument: song name, playlist name/ID, mode number (0=sequential, 1=sequential loop, 2=random, 3=random loop), etc."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn tsbot_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "The action to perform.",
+                "enum": [
+                    "play", "pause", "next", "previous", "skip", "seek",
+                    "search",
+                    "queue_netease", "queue_qqmusic"
+                ]
+            },
+            "keywords": {
+                "type": "string",
+                "description": "Search keywords for 'search' action."
+            },
+            "song_id": {
+                "type": "string",
+                "description": "NetEase song ID for 'queue_netease'."
+            },
+            "title": {
+                "type": "string",
+                "description": "Song title (required for queue_netease / queue_qqmusic)."
+            },
+            "artist": {
+                "type": "string",
+                "description": "Artist name."
+            },
+            "play_now": {
+                "type": "boolean",
+                "description": "If true, play immediately instead of appending to queue."
+            },
+            "song_mid": {
+                "type": "string",
+                "description": "QQ Music song mid for 'queue_qqmusic'."
+            },
+            "quality": {
+                "type": "string",
+                "description": "Audio quality for QQ Music: '128', '320', 'flac'. Default '320'."
+            },
+            "seek_time": {
+                "type": "number",
+                "description": "Seek position in seconds for 'seek' action."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Search result limit for 'search' action."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn generic_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "The action to perform.",
+                "enum": ["play", "pause", "next", "previous", "search"]
+            }
+        },
+        "required": ["action"]
+    })
 }
