@@ -15,8 +15,8 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 stream_output = false  # 流式输出：false 或 true（TTS快速响应）
 omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
-max_context_turns = 0  # 最大上下文对话轮数（0 表示禁用上下文）
-max_context_sessions = 3  # 最大会话数（超过时淘汰最旧会话）
+max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）
+max_context_sessions = 3  # 最大不同用户会话数（超过时淘汰最旧会话）
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
 max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
 
