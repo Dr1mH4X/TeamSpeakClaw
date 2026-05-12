@@ -60,7 +60,9 @@ impl Skill for MusicControl {
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "The action to perform.",
+                    "description": "The action to perform. For ncm_api backend: use 'search' + 'play' (requires song_id). \
+                                   For ts3audiobot backend: use ts_* actions (require value). \
+                                   For tsbot_backend: use standard playback actions.",
                     "enum": [
                         "play", "pause", "next", "previous", "skip", "seek",
                         "search",
@@ -78,7 +80,7 @@ impl Skill for MusicControl {
                 },
                 "song_id": {
                     "type": "string",
-                    "description": "NetEase song ID for 'queue_netease' or 'play' action."
+                    "description": "NetEase song ID. Required for 'play' action when backend=ncm_api, and for 'queue_netease'."
                 },
                 "title": {
                     "type": "string",
@@ -123,7 +125,8 @@ impl Skill for MusicControl {
                 "limit": { "type": "integer", "description": "Search result limit for 'search' action." },
                 "value": {
                     "type": "string",
-                    "description": "Generic value for ts_* actions (song name, playlist name, ID, mode number, etc.)."
+                    "description": "Generic value for ts_* actions (song name, playlist name, ID, mode number, etc.). \
+                                   Also required for 'play' action when backend=ts3audiobot."
                 }
             },
             "required": ["action"]
