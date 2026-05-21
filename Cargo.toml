@@ -53,7 +53,7 @@ futures-util = "0.3"
 bytes = "1"
 rand = "0.9"
 dialoguer = "0.11"
-russh = "0.58.1"
+russh = "0.60.1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
