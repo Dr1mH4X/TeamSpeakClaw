@@ -1,14 +1,16 @@
+use async_trait::async_trait;
+
 use crate::adapter::command::cmd_send_text;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{context::SessionSource, provider::ToolCall, LlmEngine};
+use crate::llm::context::SessionSource;
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
@@ -20,6 +22,22 @@ pub struct ClientInfo {
     pub nickname: String,
     pub server_groups: Vec<u32>,
     pub channel_group_id: u32,
+}
+
+struct SqExecutor<'a> {
+    router: &'a EventRouter,
+    event: &'a TextMessageEvent,
+    groups: &'a [u32],
+    channel_group_id: u32,
+}
+
+#[async_trait]
+impl ToolExecutor for SqExecutor<'_> {
+    async fn execute(&self, call: &ToolCall) -> String {
+        self.router
+            .execute_skill(call, self.event, self.groups, self.channel_group_id)
+            .await
+    }
 }
 
 pub struct EventRouter {
@@ -252,12 +270,10 @@ impl EventRouter {
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
-        // 按客户端ID忽略自身
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
 
-        // 忽略 TS3AudioBot 自动回复（由 music skill 专用，不应走 LLM 流程）
         if event.invoker_name == "TS3AudioBot" {
             return;
         }
@@ -307,7 +323,6 @@ impl EventRouter {
             (vec![], 0)
         };
 
-        // 1. 准备上下文
         let source = SessionSource::TeamSpeak {
             clid: event.invoker_id,
         };
@@ -321,75 +336,47 @@ impl EventRouter {
             .llm
             .build_messages(&source, system_prompt, &user_ctx, msg_content);
 
-        // 2. 获取工具
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
+
+        let executor = SqExecutor {
+            router: self,
+            event: &event,
+            groups: &groups,
+            channel_group_id,
+        };
+
         let max_turns = self.config.llm.max_tool_turns;
 
-        // 3. 多轮 LLM 调用循环
-        for turn in 0..max_turns {
-            debug!("[SQ] LLM turn {}/{}", turn + 1, max_turns);
-
-            match self.llm.chat(messages.clone(), tools.clone()).await {
-                Ok(response) => {
-                    // 没有工具调用，发送最终内容
-                    if response.tool_calls.is_empty() {
-                        if let Some(content) = response.content {
-                            info!("[SQ] LLM final reply (turn {}): {}", turn + 1, content);
-                            // 保存对话到上下文
-                            self.llm
-                                .save_turn(&source, msg_content.to_string(), content.clone());
-                            let _ = self
-                                .adapter
-                                .send_raw(&cmd_send_text(reply_mode, reply_target, &content))
-                                .await;
-                        }
-                        return;
-                    }
-
-                    // 准备历史记录中的工具调用
-                    let assistant_tool_calls: Vec<_> = response
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments.to_string()
-                                }
-                            })
-                        })
-                        .collect();
-
-                    let mut assistant_msg = json!({
-                        "role": "assistant",
-                        "content": response.content,
-                        "tool_calls": assistant_tool_calls
-                    });
-                    if let Some(ref rc) = response.reasoning_content {
-                        assistant_msg["reasoning_content"] = json!(rc);
-                    }
-                    messages.push(assistant_msg);
-
-                    // 执行所有工具调用
-                    for call in &response.tool_calls {
-                        let tool_result = self
-                            .execute_skill(call, &event, &groups, channel_group_id)
-                            .await;
-                        messages.push(json!({
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "name": call.name,
-                            "content": tool_result
-                        }));
-                    }
-
-                    // 继续下一轮
+        match self
+            .llm
+            .run_tool_loop(&mut messages, &tools, &executor, max_turns, None)
+            .await
+        {
+            Ok(result) => {
+                if !result.content.is_empty() {
+                    info!("[SQ] LLM final reply: {}", &result.content);
+                    self.llm
+                        .save_turn(&source, msg_content.to_string(), result.content.clone());
+                    let _ = self
+                        .adapter
+                        .send_raw(&cmd_send_text(reply_mode, reply_target, &result.content))
+                        .await;
                 }
-                Err(e) => {
-                    error!("LLM error (turn {}): {}", turn + 1, e);
+            }
+            Err(e) => {
+                if e.to_string().contains("max tool turns exceeded") {
+                    warn!("[SQ] Reached max tool turns ({})", max_turns);
+                    let _ = self
+                        .adapter
+                        .send_raw(&cmd_send_text(
+                            reply_mode,
+                            reply_target,
+                            "操作超时，请稍后再试",
+                        ))
+                        .await;
+                } else {
+                    error!("LLM error: {}", e);
                     let _ = self
                         .adapter
                         .send_raw(&cmd_send_text(
@@ -398,20 +385,8 @@ impl EventRouter {
                             &self.prompts.error.llm_error,
                         ))
                         .await;
-                    return;
                 }
             }
         }
-
-        // 达到最大轮数
-        warn!("[SQ] Reached max tool turns ({})", max_turns);
-        let _ = self
-            .adapter
-            .send_raw(&cmd_send_text(
-                reply_mode,
-                reply_target,
-                "操作超时，请稍后再试",
-            ))
-            .await;
     }
 }
