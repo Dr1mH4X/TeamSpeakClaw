@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::adapter::napcat::{
     event::{GroupMessageEvent, NcEvent, PrivateMessageEvent},
     types::{segments_to_text, Segment},
@@ -5,16 +7,32 @@ use crate::adapter::napcat::{
 };
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{context::SessionSource, provider::ToolCall, LlmEngine};
+use crate::llm::context::SessionSource;
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
+
+struct NcExecutor<'a> {
+    router: &'a NcRouter,
+    user_id: i64,
+    group_id: Option<i64>,
+    sender_name: &'a str,
+}
+
+#[async_trait]
+impl ToolExecutor for NcExecutor<'_> {
+    async fn execute(&self, call: &ToolCall) -> String {
+        self.router
+            .execute_skill(call, self.user_id, self.group_id, self.sender_name)
+            .await
+    }
+}
 
 pub struct NcRouter {
     config: Arc<AppConfig>,
@@ -30,11 +48,6 @@ pub struct NcRouter {
 
 impl NcRouter {
     fn resolve_nc_allowed_skills(&self, user_id: i64, group_id: Option<i64>) -> Vec<String> {
-        // NC -> ACL 映射使用虚拟 server_group_ids：
-        // 9000: 任意 NC 用户
-        // 9001: 群消息上下文
-        // 9002: trusted_users 中用户
-        // 9003: trusted_groups 中群成员
         let mut pseudo_groups = vec![9000u32];
         if group_id.is_some() {
             pseudo_groups.push(9001);
@@ -109,11 +122,9 @@ impl NcRouter {
                         continue;
                     }
                     let nc = &self.config.napcat;
-                    // 群组白名单过滤
                     if !nc.listen_groups.is_empty() && !nc.listen_groups.contains(&msg.group_id) {
                         continue;
                     }
-                    // 信任检查
                     if !self.is_trusted(msg.user_id, Some(msg.group_id)) {
                         info!(
                             "NC: Ignored untrusted user {} in group {}",
@@ -290,11 +301,9 @@ impl NcRouter {
         }
     }
 
-    /// 是否匹配触发词
     fn is_triggered(&self, text: &str) -> bool {
         let nc = &self.config.napcat;
         let self_id = self.adapter.get_self_id().to_string();
-        // @bot 触发
         if text.contains(&format!("[CQ:at,qq={self_id}]")) {
             return true;
         }
@@ -303,7 +312,6 @@ impl NcRouter {
             .any(|p| text.starts_with(p.as_str()))
     }
 
-    /// 去除触发词前缀
     fn strip_prefix<'a>(&self, text: &'a str) -> &'a str {
         let nc = &self.config.napcat;
         for p in &nc.trigger_prefixes {
@@ -323,7 +331,6 @@ impl NcRouter {
         sender_name: &str,
     ) -> String {
         if let Some(skill) = self.registry.get(&call.name) {
-            // 构建统一执行上下文（包含 TS 和 NC 两个平台）
             let nc_ctx = NcExecutionContext {
                 adapter: self.adapter.clone(),
                 caller_id: user_id,
@@ -342,9 +349,8 @@ impl NcRouter {
                 unified_ctx.ts_clients = Some(ts_clients.as_ref());
             }
 
-            // 1. 优先尝试统一执行（跨平台支持）
             let args = call.arguments.clone();
-            match skill.execute_unified(args, &unified_ctx).await {
+            match skill.execute_unified(args.clone(), &unified_ctx).await {
                 Ok(val) => {
                     info!(
                         skill = %call.name,
@@ -355,7 +361,6 @@ impl NcRouter {
                     val.to_string()
                 }
                 Err(_unified_err) => {
-                    // 2. 回退到 NC 平台特定执行
                     let nc_ctx = NcExecutionContext {
                         adapter: self.adapter.clone(),
                         caller_id: user_id,
@@ -405,7 +410,6 @@ impl NcRouter {
         let error_msg = self.prompts.error.llm_error.clone();
         let max_turns = self.config.llm.max_tool_turns;
 
-        // 生成 SessionSource
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
             None => SessionSource::NapCatPrivate { user_id },
@@ -423,71 +427,34 @@ impl NcRouter {
 
         let tools = self.registry.to_tool_schemas(allowed_skills);
 
-        for turn in 0..max_turns {
-            debug!("[NC] LLM turn {}/{}", turn + 1, max_turns);
+        let executor = NcExecutor {
+            router: self,
+            user_id,
+            group_id,
+            sender_name,
+        };
 
-            match self.llm.chat(messages.clone(), tools.clone()).await {
-                Ok(response) => {
-                    // 没有工具调用，返回最终内容
-                    if response.tool_calls.is_empty() {
-                        let content = response.content.unwrap_or_default();
-                        info!("[NC] LLM final reply (turn {}): {}", turn + 1, content);
-                        // 保存对话到上下文
-                        self.llm
-                            .save_turn(&source, user_msg.to_string(), content.clone());
-                        return content;
-                    }
-
-                    // 准备工具调用历史
-                    let assistant_tool_calls: Vec<_> = response
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments.to_string()
-                                }
-                            })
-                        })
-                        .collect();
-
-                    let mut assistant_msg = json!({
-                        "role": "assistant",
-                        "content": response.content,
-                        "tool_calls": assistant_tool_calls
-                    });
-                    if let Some(ref rc) = response.reasoning_content {
-                        assistant_msg["reasoning_content"] = json!(rc);
-                    }
-                    messages.push(assistant_msg);
-
-                    // 执行所有工具调用
-                    for call in &response.tool_calls {
-                        let tool_result = self
-                            .execute_skill(call, user_id, group_id, sender_name)
-                            .await;
-                        messages.push(json!({
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "name": call.name,
-                            "content": tool_result
-                        }));
-                    }
-
-                    // 继续下一轮
-                }
-                Err(e) => {
-                    error!("NC LLM error (turn {}): {}", turn + 1, e);
-                    return error_msg;
+        match self
+            .llm
+            .run_tool_loop(&mut messages, &tools, &executor, max_turns, None)
+            .await
+        {
+            Ok(result) => {
+                let content = result.content;
+                info!("[NC] LLM final reply: {}", content);
+                self.llm
+                    .save_turn(&source, user_msg.to_string(), content.clone());
+                content
+            }
+            Err(e) => {
+                if e.to_string().contains("max tool turns exceeded") {
+                    warn!("[NC] Reached max tool turns ({})", max_turns);
+                    "操作超时，请稍后再试".to_string()
+                } else {
+                    error!("NC LLM error: {}", e);
+                    error_msg
                 }
             }
         }
-
-        // 达到最大轮数，尝试获取最后一个可用的回复
-        warn!("[NC] Reached max tool turns ({})", max_turns);
-        "操作超时，请稍后再试".to_string()
     }
 }
