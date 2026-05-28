@@ -5,7 +5,7 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -91,8 +91,8 @@ impl LlmProvider for OpenAiProvider {
         let (tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(128);
         tokio::spawn(async move {
             let mut pending: Vec<u8> = Vec::new();
-            let mut tool_call_builders: HashMap<usize, (Option<String>, Option<String>, String)> =
-                HashMap::new();
+            let mut tool_call_builders: BTreeMap<usize, (Option<String>, Option<String>, String)> =
+                BTreeMap::new();
 
             while let Some(item) = byte_stream.next().await {
                 let bytes = match item {
@@ -203,14 +203,16 @@ impl LlmProvider for OpenAiProvider {
 }
 
 fn finalize_tool_calls(
-    builders: &mut HashMap<usize, (Option<String>, Option<String>, String)>,
+    builders: &mut BTreeMap<usize, (Option<String>, Option<String>, String)>,
 ) -> Vec<ToolCall> {
-    builders
-        .drain()
-        .map(|(_, (id, name, args))| ToolCall {
-            id: id.unwrap_or_default(),
-            name: name.unwrap_or_default(),
-            arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
-        })
+    std::mem::take(builders)
+        .into_iter()
+        .map(
+            |(_, (id, name, args)): (_, (Option<String>, Option<String>, String))| ToolCall {
+                id: id.unwrap_or_default(),
+                name: name.unwrap_or_default(),
+                arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
+            },
+        )
         .collect()
 }
