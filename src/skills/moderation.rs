@@ -10,7 +10,7 @@ use tracing::info;
 fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     // 自操作防护
     if clid == ctx.caller_id {
-        return Err(anyhow::anyhow!(ctx.error_prompts.self_target.clone()));
+        return Err(anyhow::anyhow!("不能对自己执行此操作"));
     }
 
     // 获取目标的组信息
@@ -26,7 +26,7 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
         ctx.caller_channel_group_id,
         &target_groups,
     ) {
-        return Err(anyhow::anyhow!(ctx.error_prompts.target_permission.clone()));
+        return Err(anyhow::anyhow!("无权对该用户执行此操作"));
     }
 
     Ok(target_groups)
@@ -165,26 +165,18 @@ impl Skill for MoveClient {
     }
 
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"].as_u64().ok_or_else(|| {
-            anyhow::anyhow!(ctx
-                .error_prompts
-                .missing_parameter
-                .replace("{param}", "clid"))
-        })? as u32;
-        let channel_id = args["channel_id"].as_u64().ok_or_else(|| {
-            anyhow::anyhow!(ctx
-                .error_prompts
-                .missing_parameter
-                .replace("{param}", "channel_id"))
-        })? as u32;
+        let clid = args["clid"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
+        let channel_id = args["channel_id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: channel_id"))?
+            as u32;
 
         validate_target(ctx, clid)?;
 
         if !ctx.clients.contains_key(&clid) {
-            return Err(anyhow::anyhow!(ctx
-                .error_prompts
-                .client_offline
-                .replace("{clid}", &clid.to_string())));
+            return Err(anyhow::anyhow!("客户端 {} 不在线或不存在", clid));
         }
 
         validate_channel_exists(ctx, channel_id).await?;

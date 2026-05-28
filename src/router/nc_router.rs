@@ -338,7 +338,6 @@ impl NcRouter {
                 caller_group_id: group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
-                error_prompts: &self.prompts.error,
             };
             let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx).with_cross_adapters(
                 self.ts_adapter.clone(),
@@ -368,7 +367,6 @@ impl NcRouter {
                         caller_group_id: group_id,
                         gate: self.gate.clone(),
                         config: self.config.clone(),
-                        error_prompts: &self.prompts.error,
                     };
                     match skill.execute_nc(call.arguments.clone(), &nc_ctx).await {
                         Ok(val) => {
@@ -381,11 +379,7 @@ impl NcRouter {
                             val.to_string()
                         }
                         Err(e) => {
-                            let msg = self
-                                .prompts
-                                .error
-                                .skill_error
-                                .replace("{detail}", &e.to_string());
+                            let msg = format!("技能执行失败: {}", e);
                             error!(skill = %call.name, error = %e, "NC Skill failed");
                             msg
                         }
@@ -394,7 +388,7 @@ impl NcRouter {
             }
         } else {
             warn!(skill = %call.name, "NC Skill not found");
-            self.prompts.error.skill_not_found.clone()
+            "未找到指定的技能".to_string()
         }
     }
 
@@ -407,7 +401,7 @@ impl NcRouter {
         group_id: Option<i64>,
         allowed_skills: &[String],
     ) -> String {
-        let error_msg = self.prompts.error.llm_error.clone();
+        let error_msg = "AI 后端当前不可用。请稍后再试。".to_string();
         let max_turns = self.config.llm.max_tool_turns;
 
         let source = match group_id {
@@ -448,7 +442,7 @@ impl NcRouter {
             }
             Err(ToolLoopError::MaxTurnsExceeded) => {
                 warn!("[NC] Reached max tool turns ({})", max_turns);
-                "操作超时，请稍后再试".to_string()
+                "达到最大工具调用次数，请在设置中调整 max_tool_turns".to_string()
             }
             Err(e) => {
                 error!("NC LLM error: {}", e);
