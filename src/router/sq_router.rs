@@ -5,7 +5,7 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, ToolLoopError};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -203,7 +203,6 @@ impl EventRouter {
                 caller_channel_group_id: channel_group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
-                error_prompts: &self.prompts.error,
             };
             let unified_ctx = UnifiedExecutionContext::from_ts(&ctx).with_cross_adapters(
                 Some(self.adapter.clone()),
@@ -244,11 +243,7 @@ impl EventRouter {
                     val.to_string()
                 }
                 Err(e) => {
-                    let err_msg = self
-                        .prompts
-                        .error
-                        .skill_error
-                        .replace("{detail}", &e.to_string());
+                    let err_msg = format!("技能执行失败: {}", e);
                     error!(
                         skill = %call.name,
                         caller = %event.invoker_name,
@@ -265,7 +260,7 @@ impl EventRouter {
                 skill = %call.name,
                 "Skill not found"
             );
-            self.prompts.error.skill_not_found.clone()
+            "未找到指定的技能".to_string()
         }
     }
 
@@ -364,28 +359,27 @@ impl EventRouter {
                         .await;
                 }
             }
+            Err(ToolLoopError::MaxTurnsExceeded) => {
+                warn!("[SQ] Reached max tool turns ({})", max_turns);
+                let _ = self
+                    .adapter
+                    .send_raw(&cmd_send_text(
+                        reply_mode,
+                        reply_target,
+                        "达到最大工具调用次数，请在设置中调整 max_tool_turns",
+                    ))
+                    .await;
+            }
             Err(e) => {
-                if e.to_string().contains("max tool turns exceeded") {
-                    warn!("[SQ] Reached max tool turns ({})", max_turns);
-                    let _ = self
-                        .adapter
-                        .send_raw(&cmd_send_text(
-                            reply_mode,
-                            reply_target,
-                            "操作超时，请稍后再试",
-                        ))
-                        .await;
-                } else {
-                    error!("LLM error: {}", e);
-                    let _ = self
-                        .adapter
-                        .send_raw(&cmd_send_text(
-                            reply_mode,
-                            reply_target,
-                            &self.prompts.error.llm_error,
-                        ))
-                        .await;
-                }
+                error!("LLM error: {}", e);
+                let _ = self
+                    .adapter
+                    .send_raw(&cmd_send_text(
+                        reply_mode,
+                        reply_target,
+                        "AI 后端当前不可用。请稍后再试。",
+                    ))
+                    .await;
             }
         }
     }

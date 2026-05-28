@@ -343,7 +343,6 @@ impl HeadlessLlmBridge {
                 caller_channel_group_id: ctx.channel_group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
-                error_prompts: &self.prompts.error,
             };
             let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx).with_cross_adapters(
                 Some(self.ts_adapter.clone()),
@@ -359,14 +358,10 @@ impl HeadlessLlmBridge {
 
             match result {
                 Ok(v) => v.to_string(),
-                Err(e) => self
-                    .prompts
-                    .error
-                    .skill_error
-                    .replace("{detail}", &e.to_string()),
+                Err(e) => format!("技能执行失败: {}", e),
             }
         } else {
-            self.prompts.error.skill_not_found.clone()
+            "未找到指定的技能".to_string()
         }
     }
 
@@ -539,8 +534,12 @@ impl HeadlessLlmBridge {
                         on_end("stop");
                     }
                 }
-                self.send_reply(client, &ctx, "操作超时，请稍后再试")
-                    .await?;
+                self.send_reply(
+                    client,
+                    &ctx,
+                    "达到最大工具调用次数，请在设置中调整 max_tool_turns",
+                )
+                .await?;
                 return Err(ToolLoopError::MaxTurnsExceeded.into());
             }
             Err(e) => {
@@ -550,6 +549,8 @@ impl HeadlessLlmBridge {
                         on_end("stop");
                     }
                 }
+                self.send_reply(client, &ctx, "AI 后端当前不可用。请稍后再试。")
+                    .await?;
                 return Err(e.into());
             }
         };
