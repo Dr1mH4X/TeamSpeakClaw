@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use thiserror::Error;
 use tracing::{debug, info};
 
 #[derive(Default)]
@@ -16,16 +17,23 @@ pub trait ToolExecutor: Send + Sync {
     async fn execute(&self, call: &ToolCall) -> String;
 }
 
-#[allow(dead_code)]
+#[derive(Error, Debug)]
+pub enum ToolLoopError {
+    #[error("max tool turns exceeded")]
+    MaxTurnsExceeded,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 pub struct ToolLoopResult {
     pub content: String,
-    pub reasoning: String,
+    pub reasoning: Option<String>,
     pub finish_reason: String,
 }
 
 struct AccumulatedResult {
     text: String,
-    reasoning: String,
+    reasoning: Option<String>,
     tool_calls: Vec<ToolCall>,
     finish_reason: String,
 }
@@ -40,7 +48,7 @@ async fn accumulate_stream(
         .chat_completion_stream(messages.to_vec(), tools.to_vec())
         .await?;
     let mut text = String::new();
-    let reasoning = String::new();
+    let reasoning = None;
     let mut tool_calls = Vec::new();
     let mut finish_reason = String::new();
 
@@ -85,7 +93,7 @@ pub async fn run_tool_loop(
     executor: &dyn ToolExecutor,
     max_turns: usize,
     callbacks: Option<&StreamCallbacks>,
-) -> Result<ToolLoopResult> {
+) -> Result<ToolLoopResult, ToolLoopError> {
     for turn in 0..max_turns {
         debug!(
             "Tool loop turn {}/{} (messages: {})",
@@ -97,11 +105,18 @@ pub async fn run_tool_loop(
         let acc = accumulate_stream(messages, tools, provider, callbacks).await?;
 
         if acc.tool_calls.is_empty() {
-            return Ok(ToolLoopResult {
+            let result = ToolLoopResult {
                 content: acc.text,
                 reasoning: acc.reasoning,
                 finish_reason: acc.finish_reason,
-            });
+            };
+            debug!(
+                event = "tool_loop.completed",
+                finish_reason = %result.finish_reason,
+                reasoning = ?result.reasoning,
+                "tool loop finished with no tool calls"
+            );
+            return Ok(result);
         }
 
         let assistant_tool_calls: Vec<Value> = acc
@@ -152,5 +167,5 @@ pub async fn run_tool_loop(
         }
     }
 
-    Err(anyhow::anyhow!("max tool turns exceeded"))
+    Err(ToolLoopError::MaxTurnsExceeded)
 }
