@@ -20,7 +20,9 @@ use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
+use crate::llm::{
+    LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor, ToolLoopError,
+};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
@@ -504,7 +506,7 @@ impl HeadlessLlmBridge {
             );
         }
 
-        let (messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone());
+        let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone());
         let pending_play = Arc::new(Mutex::new(None));
         let executor = HeadlessExecutor {
             bridge: self,
@@ -513,7 +515,7 @@ impl HeadlessLlmBridge {
         };
 
         let callbacks = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks(client).await?)
+            Some(self.build_tts_callbacks().await?)
         } else {
             None
         };
@@ -521,7 +523,7 @@ impl HeadlessLlmBridge {
         let result = match self
             .llm
             .run_tool_loop(
-                &mut messages.clone(),
+                &mut messages,
                 &tools,
                 &executor,
                 self.config.llm.max_tool_turns,
@@ -530,13 +532,25 @@ impl HeadlessLlmBridge {
             .await
         {
             Ok(r) => r,
-            Err(e) => {
+            Err(ToolLoopError::MaxTurnsExceeded) => {
+                // 清理 TTS 管道
                 if let Some(ref cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
-                        on_end("tool_calls");
+                        on_end("stop");
                     }
                 }
-                return Err(e);
+                self.send_reply(client, &ctx, "操作超时，请稍后再试")
+                    .await?;
+                return Err(ToolLoopError::MaxTurnsExceeded.into());
+            }
+            Err(e) => {
+                // 清理 TTS 管道
+                if let Some(ref cb) = callbacks {
+                    if let Some(ref on_end) = cb.on_turn_end {
+                        on_end("stop");
+                    }
+                }
+                return Err(e.into());
             }
         };
 
@@ -575,7 +589,7 @@ impl HeadlessLlmBridge {
         };
 
         let callbacks = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks(client).await?)
+            Some(self.build_tts_callbacks().await?)
         } else {
             None
         };
@@ -593,7 +607,7 @@ impl HeadlessLlmBridge {
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(e);
+                return Err(e.into());
             }
         };
 
@@ -604,10 +618,7 @@ impl HeadlessLlmBridge {
         Ok(())
     }
 
-    async fn build_tts_callbacks(
-        &self,
-        _client: &mut VoiceServiceClient<Channel>,
-    ) -> Result<StreamCallbacks> {
+    async fn build_tts_callbacks(&self) -> Result<StreamCallbacks> {
         let speech_provider = self
             .speech_provider
             .clone()
@@ -704,8 +715,6 @@ impl HeadlessLlmBridge {
 
         let on_turn_end_shared = shared_tx.clone();
         let on_turn_end_chunker = chunker.clone();
-        let on_turn_end_audio_tx = audio_tx.clone();
-        let on_turn_end_trace = trace_id.clone();
         let on_turn_end = move |finish_reason: &str| {
             if finish_reason == "stop" {
                 let Ok(mut chunker_guard) = on_turn_end_chunker.lock() else {
@@ -721,13 +730,6 @@ impl HeadlessLlmBridge {
                 if let Ok(mut tx_guard) = shared_tx.lock() {
                     *tx_guard = None;
                 }
-                let trace = on_turn_end_trace.clone();
-                let _ = on_turn_end_audio_tx.try_send(voicev1::TtsAudioChunk {
-                    payload: vec![],
-                    codec: "mp3".to_string(),
-                    end_of_stream: true,
-                    trace_id: trace,
-                });
             }
         };
 
