@@ -8,7 +8,7 @@ use crate::adapter::napcat::{
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, ToolLoopError};
 use crate::permission::PermissionGate;
 use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -446,14 +446,13 @@ impl NcRouter {
                     .save_turn(&source, user_msg.to_string(), content.clone());
                 content
             }
+            Err(ToolLoopError::MaxTurnsExceeded) => {
+                warn!("[NC] Reached max tool turns ({})", max_turns);
+                "操作超时，请稍后再试".to_string()
+            }
             Err(e) => {
-                if e.to_string().contains("max tool turns exceeded") {
-                    warn!("[NC] Reached max tool turns ({})", max_turns);
-                    "操作超时，请稍后再试".to_string()
-                } else {
-                    error!("NC LLM error: {}", e);
-                    error_msg
-                }
+                error!("NC LLM error: {}", e);
+                error_msg
             }
         }
     }
