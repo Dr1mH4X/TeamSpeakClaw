@@ -109,19 +109,13 @@ impl Skill for GetClientInfo {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"].as_u64().ok_or_else(|| {
-            anyhow::anyhow!(ctx
-                .error_prompts
-                .missing_parameter
-                .replace("{param}", "clid"))
-        })? as u32;
+        let clid = args["clid"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
 
         // 确认目标客户端在线
         if !ctx.clients.contains_key(&clid) {
-            let msg = ctx
-                .error_prompts
-                .client_offline
-                .replace("{clid}", &clid.to_string());
+            let msg = format!("客户端 {} 不在线或不存在", clid);
             return Ok(json!({"status": "error", "message": msg}));
         }
 
@@ -145,18 +139,16 @@ impl Skill for GetClientInfo {
             }
             Platform::NapCat => {
                 // NC 请求查询 TS 指定用户信息
-                let clid = args["clid"].as_u64().ok_or_else(|| {
-                    anyhow::anyhow!(ctx
-                        .error_prompts
-                        .missing_parameter
-                        .replace("{param}", "clid"))
-                })? as u32;
+                let clid = args["clid"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?
+                    as u32;
 
                 if let Some(ref ts_clients) = ctx.ts_clients {
                     let Some(client) = ts_clients.get(&clid) else {
                         return Ok(json!({
                             "status": "error",
-                            "message": format!("用户(clid={})不在线", clid)
+                            "message": format!("客户端 {} 不在线或不存在", clid)
                         }));
                     };
                     let reply = format!(

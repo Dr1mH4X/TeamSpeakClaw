@@ -29,19 +29,6 @@ content = """
 - 简洁性：非必要不长篇大论，保持对话流的清爽。
 """
 
-[error]
-permission_denied = "你没有权限使用此命令。"
-llm_error = "AI 后端当前不可用。请稍后再试。"
-ts_error = "TeamSpeak 命令执行失败: {detail}"
-skill_error = "技能执行失败: {detail}"
-skill_not_found = "未找到指定的技能"
-self_target = "不能对自己执行此操作"
-target_permission = "无权对该用户执行此操作"
-empty_message = "消息内容不能为空"
-missing_parameter = "缺少必要参数: {param}"
-invalid_mode = "无效的模式，必须是 {allowed}"
-client_offline = "客户端 {clid} 不在线或不存在"
-
 # TTS 风格提示配置 (用于 MiMo TTS API)
 # 控制语音的语调、语速、情感表达等
 [tts]
