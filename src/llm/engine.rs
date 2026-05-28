@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
 use crate::llm::context::{ContextWindow, SessionSource};
 use crate::llm::provider::{LlmProvider, OpenAiProvider};
-use crate::llm::tool_loop::{run_tool_loop, StreamCallbacks, ToolExecutor, ToolLoopResult};
+use crate::llm::tool_loop::{
+    run_tool_loop, StreamCallbacks, ToolExecutor, ToolLoopError, ToolLoopResult,
+};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -26,7 +28,7 @@ impl LlmEngine {
         executor: &dyn ToolExecutor,
         max_turns: u32,
         callbacks: Option<&StreamCallbacks>,
-    ) -> Result<ToolLoopResult> {
+    ) -> Result<ToolLoopResult, ToolLoopError> {
         run_tool_loop(
             messages,
             tools,
