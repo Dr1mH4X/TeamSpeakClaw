@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use dashmap::DashMap;
@@ -623,7 +623,7 @@ impl HeadlessLlmBridge {
         let speech_provider = self
             .speech_provider
             .clone()
-            .ok_or_else(|| anyhow!("TTS enabled but speech provider not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("TTS enabled but speech provider not initialized"))?;
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint)?.connect().await?;
 
