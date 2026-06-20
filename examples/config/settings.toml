@@ -65,6 +65,7 @@ burst_size = 3
 # 日志配置
 [logging]
 file_level = "info"
+max_log_days = 7  # 日志保留天数，超出自动删除
 
 # 联动项目配置
 # 音乐后端配置
