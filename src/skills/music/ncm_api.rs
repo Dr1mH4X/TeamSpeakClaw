@@ -5,6 +5,7 @@ use ncm_api_rs::{create_client, Query};
 use rand::Rng;
 use serde_json::Value;
 use std::sync::{Mutex, OnceLock};
+use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 // ── 全局状态 ──────────────────────────────────────────────────
@@ -14,6 +15,8 @@ struct SongInfo {
     id: String,
     name: String,
     artist: String,
+    is_url: bool,
+    resolved_url: Option<String>,
 }
 
 /// 播放模式（对齐 ts3audiobot）
@@ -89,6 +92,8 @@ pub(crate) async fn execute(action: &str, args: &Value, cfg: &MusicNcmApiConfig)
     match action {
         "search" => search(args, cfg).await,
         "play" => play(args, cfg).await,
+        "play_url" => play_url(args, cfg).await,
+        "queue_url" => queue_url(args, cfg).await,
         "queue_netease" => queue_netease(args, cfg).await,
         "next" => next(cfg).await,
         "previous" => previous(cfg).await,
@@ -188,6 +193,93 @@ async fn play(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
     Ok(result)
 }
 
+// ── play_url ──────────────────────────────────────────────────
+
+async fn play_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
+    let url = args["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing url"))?;
+
+    let (audio_url, title, channel) = resolve_url(url, cfg).await?;
+    let display_title = format_title(&title, &channel);
+
+    // Add to queue for navigation
+    {
+        let mut state = player_state().lock().unwrap();
+        state.queue.push(SongInfo {
+            id: url.to_string(),
+            name: title.clone(),
+            artist: channel.clone(),
+            is_url: true,
+            resolved_url: Some(audio_url.clone()),
+        });
+        state.current_index = state.queue.len() - 1;
+    }
+
+    let mut result = serde_json::json!({
+        "status": "playing",
+        "source": url,
+        "title": display_title,
+    });
+    result[PLAY_URL_KEY] = serde_json::Value::String(audio_url);
+    result[PLAY_TITLE_KEY] = serde_json::Value::String(display_title);
+    Ok(result)
+}
+
+// ── queue_url ─────────────────────────────────────────────────
+
+async fn queue_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
+    let url = args["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing url"))?;
+    let play_now = args["play_now"].as_bool().unwrap_or(false);
+
+    if play_now {
+        // 先解析 URL，成功后再修改队列状态
+        let (audio_url, title, channel) = resolve_url(url, cfg).await?;
+        let display_title = format_title(&title, &channel);
+        {
+            let mut state = player_state().lock().unwrap();
+            state.queue.push(SongInfo {
+                id: url.to_string(),
+                name: title,
+                artist: channel,
+                is_url: true,
+                resolved_url: Some(audio_url.clone()),
+            });
+            state.current_index = state.queue.len() - 1;
+        }
+        let mut result = serde_json::json!({
+            "status": "playing",
+            "source": url,
+            "title": display_title,
+        });
+        result[PLAY_URL_KEY] = serde_json::Value::String(audio_url);
+        result[PLAY_TITLE_KEY] = serde_json::Value::String(display_title);
+        return Ok(result);
+    }
+
+    // play_now=false: 直接入队，不解析
+    let song_info = SongInfo {
+        id: url.to_string(),
+        name: String::new(),
+        artist: String::new(),
+        is_url: true,
+        resolved_url: None,
+    };
+    let insert_index = {
+        let mut state = player_state().lock().unwrap();
+        let idx = state.queue.len();
+        state.queue.push(song_info);
+        idx
+    };
+
+    Ok(serde_json::json!({
+        "status": "queued",
+        "queue_position": insert_index,
+    }))
+}
+
 // ── queue_netease ─────────────────────────────────────────────
 
 async fn queue_netease(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
@@ -204,6 +296,8 @@ async fn queue_netease(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         id: song_id.to_string(),
         name: title.to_string(),
         artist: artist.to_string(),
+        is_url: false,
+        resolved_url: None,
     };
 
     // 添加到队列并获取插入位置
@@ -291,15 +385,33 @@ async fn next(cfg: &MusicNcmApiConfig) -> Result<Value> {
         state.queue[state.current_index].clone()
     };
 
-    let (_, _, url) = fetch_song(&song.id, cfg).await?;
-    let title = format_title(&song.name, &song.artist);
+    let (audio_url, display_title, song_id) = if song.is_url {
+        if let Some(cached) = &song.resolved_url {
+            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+        } else {
+            let (url, title, channel) = resolve_url(&song.id, cfg).await?;
+            let display = format_title(&title, &channel);
+            {
+                let mut state = player_state().lock().unwrap();
+                let idx = state.current_index;
+                state.queue[idx].name = title;
+                state.queue[idx].artist = channel;
+                state.queue[idx].resolved_url = Some(url.clone());
+            }
+            (url, display, song.id.clone())
+        }
+    } else {
+        let (_, _, url) = fetch_song(&song.id, cfg).await?;
+        (url, format_title(&song.name, &song.artist), song.id.clone())
+    };
+
     let mut result = serde_json::json!({
         "status": "playing",
-        "song_id": song.id,
-        "title": title,
+        "song_id": song_id,
+        "title": display_title,
     });
-    result[PLAY_URL_KEY] = serde_json::Value::String(url);
-    result[PLAY_TITLE_KEY] = serde_json::Value::String(title);
+    result[PLAY_URL_KEY] = serde_json::Value::String(audio_url);
+    result[PLAY_TITLE_KEY] = serde_json::Value::String(display_title);
     Ok(result)
 }
 
@@ -351,15 +463,33 @@ async fn previous(cfg: &MusicNcmApiConfig) -> Result<Value> {
         state.queue[state.current_index].clone()
     };
 
-    let (_, _, url) = fetch_song(&song.id, cfg).await?;
-    let title = format_title(&song.name, &song.artist);
+    let (audio_url, display_title, song_id) = if song.is_url {
+        if let Some(cached) = &song.resolved_url {
+            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+        } else {
+            let (url, title, channel) = resolve_url(&song.id, cfg).await?;
+            let display = format_title(&title, &channel);
+            {
+                let mut state = player_state().lock().unwrap();
+                let idx = state.current_index;
+                state.queue[idx].name = title;
+                state.queue[idx].artist = channel;
+                state.queue[idx].resolved_url = Some(url.clone());
+            }
+            (url, display, song.id.clone())
+        }
+    } else {
+        let (_, _, url) = fetch_song(&song.id, cfg).await?;
+        (url, format_title(&song.name, &song.artist), song.id.clone())
+    };
+
     let mut result = serde_json::json!({
         "status": "playing",
-        "song_id": song.id,
-        "title": title,
+        "song_id": song_id,
+        "title": display_title,
     });
-    result[PLAY_URL_KEY] = serde_json::Value::String(url);
-    result[PLAY_TITLE_KEY] = serde_json::Value::String(title);
+    result[PLAY_URL_KEY] = serde_json::Value::String(audio_url);
+    result[PLAY_TITLE_KEY] = serde_json::Value::String(display_title);
     Ok(result)
 }
 
@@ -525,4 +655,56 @@ fn format_title(name: &str, artist: &str) -> String {
     } else {
         format!("{} - {}", name, artist)
     }
+}
+
+/// 通过 yt-dlp 解析视频链接，返回 (音频直链, 标题, 频道名)
+async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, String, String)> {
+    let yt = &cfg.yt_dlp_path;
+    let resolve_timeout = Duration::from_secs(20);
+
+    // 获取音频直链
+    let url_output = timeout(
+        resolve_timeout,
+        tokio::process::Command::new(yt)
+            .args(["--get-url", "--format", "bestaudio", url])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("yt-dlp 解析超时 (20s)"))?
+    .map_err(|e| anyhow::anyhow!("yt-dlp 执行失败: {}。请确保 yt-dlp 已安装", e))?;
+
+    if !url_output.status.success() {
+        let stderr = String::from_utf8_lossy(&url_output.stderr);
+        return Err(anyhow::anyhow!("yt-dlp 解析失败: {}", stderr.trim()));
+    }
+
+    let audio_url = String::from_utf8(url_output.stdout)
+        .map_err(|_| anyhow::anyhow!("yt-dlp 输出不是有效的 UTF-8"))?
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp 未返回音频链接"))?
+        .to_string();
+
+    // 获取视频元数据（标题和频道名）
+    let meta_output = timeout(
+        resolve_timeout,
+        tokio::process::Command::new(yt)
+            .args(["--print", "title", "--print", "channel", "--skip-download", url])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("yt-dlp 元数据解析超时 (20s)"))?
+    .map_err(|e| anyhow::anyhow!("yt-dlp 执行失败: {}", e))?;
+
+    if !meta_output.status.success() {
+        let stderr = String::from_utf8_lossy(&meta_output.stderr);
+        return Err(anyhow::anyhow!("yt-dlp 元数据解析失败: {}", stderr.trim()));
+    }
+
+    let meta_stdout = String::from_utf8_lossy(&meta_output.stdout);
+    let mut lines = meta_stdout.lines();
+    let title = lines.next().unwrap_or("Unknown Title").to_string();
+    let channel = lines.next().unwrap_or("Unknown Channel").to_string();
+
+    Ok((audio_url, title, channel))
 }
