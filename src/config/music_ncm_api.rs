@@ -11,6 +11,7 @@ pub struct MusicNcmApiConfig {
     pub unm_proxy_uri: String,
     pub unm_joox_cookie: String,
     pub unm_qq_cookie: String,
+    pub yt_dlp_path: String,
 }
 
 impl Default for MusicNcmApiConfig {
@@ -24,6 +25,7 @@ impl Default for MusicNcmApiConfig {
             unm_proxy_uri: String::new(),
             unm_joox_cookie: String::new(),
             unm_qq_cookie: String::new(),
+            yt_dlp_path: "yt-dlp".to_string(),
         }
     }
 }
