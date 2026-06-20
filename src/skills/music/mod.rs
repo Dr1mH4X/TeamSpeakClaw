@@ -167,7 +167,7 @@ fn ncm_api_schema() -> Value {
             },
             "play_now": {
                 "type": "boolean",
-                "description": "If true, play immediately instead of appending to queue."
+                "description": "If true, play immediately instead of appending to queue. Used by queue_netease and queue_url."
             },
             "limit": {
                 "type": "integer",
