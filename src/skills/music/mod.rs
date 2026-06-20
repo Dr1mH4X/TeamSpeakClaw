@@ -61,7 +61,10 @@ impl Skill for MusicControl {
         match self.backend.as_str() {
             "ncm_api" => "Control the music player. Search, play, and manage a song queue from NetEase Music (网易云). \
                           Supports playback control (play/pause/next/previous), queue management, repeat/shuffle modes, \
-                          volume and audio effects. When there are multiple search results, directly play the first best match.",
+                          volume and audio effects. When there are multiple search results, directly play the first best match. \
+                          Also supports playing audio from video links (YouTube, Bilibili, etc.) via play_url/queue_url \
+                          using yt-dlp. When the user provides a video URL, use play_url to play immediately; \
+                          for multiple URLs, play_url the first and queue_url the rest.",
             "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
                              Use ts_* actions to play songs, manage playlists, and switch modes.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
@@ -130,9 +133,12 @@ fn ncm_api_schema() -> Value {
             "action": {
                 "type": "string",
                 "description": "The action to perform. Use 'search' to find songs, then 'play' with the song_id. \
-                               Use 'queue_netease' to add songs to the queue.",
+                               Use 'queue_netease' to add songs to the queue. \
+                               When the user provides a video URL (YouTube, Bilibili, etc.), use 'play_url' to play \
+                               immediately or 'queue_url' (with play_now=true/false) to add to queue.",
                 "enum": [
                     "search", "play", "queue_netease",
+                    "play_url", "queue_url",
                     "next", "previous",
                     "repeat", "shuffle",
                     "pause", "stop", "seek",
@@ -146,6 +152,10 @@ fn ncm_api_schema() -> Value {
             "song_id": {
                 "type": "string",
                 "description": "NetEase song ID. Required for 'play' and 'queue_netease'."
+            },
+            "url": {
+                "type": "string",
+                "description": "Video URL (required for 'play_url' and 'queue_url'). Supports all yt-dlp compatible platforms."
             },
             "title": {
                 "type": "string",
