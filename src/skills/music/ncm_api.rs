@@ -16,6 +16,7 @@ struct SongInfo {
     name: String,
     artist: String,
     is_url: bool,
+    resolved_url: Option<String>,
 }
 
 /// 播放模式（对齐 ts3audiobot）
@@ -210,6 +211,7 @@ async fn play_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
             name: title.clone(),
             artist: channel.clone(),
             is_url: true,
+            resolved_url: Some(audio_url.clone()),
         });
         state.current_index = state.queue.len() - 1;
     }
@@ -243,6 +245,7 @@ async fn queue_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
                 name: title,
                 artist: channel,
                 is_url: true,
+                resolved_url: Some(audio_url.clone()),
             });
             state.current_index = state.queue.len() - 1;
         }
@@ -262,6 +265,7 @@ async fn queue_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         name: String::new(),
         artist: String::new(),
         is_url: true,
+        resolved_url: None,
     };
     let insert_index = {
         let mut state = player_state().lock().unwrap();
@@ -293,6 +297,7 @@ async fn queue_netease(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         name: title.to_string(),
         artist: artist.to_string(),
         is_url: false,
+        resolved_url: None,
     };
 
     // 添加到队列并获取插入位置
@@ -381,8 +386,20 @@ async fn next(cfg: &MusicNcmApiConfig) -> Result<Value> {
     };
 
     let (audio_url, display_title, song_id) = if song.is_url {
-        let (url, title, channel) = resolve_url(&song.id, cfg).await?;
-        (url, format_title(&title, &channel), song.id.clone())
+        if let Some(cached) = &song.resolved_url {
+            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+        } else {
+            let (url, title, channel) = resolve_url(&song.id, cfg).await?;
+            let display = format_title(&title, &channel);
+            {
+                let mut state = player_state().lock().unwrap();
+                let idx = state.current_index;
+                state.queue[idx].name = title;
+                state.queue[idx].artist = channel;
+                state.queue[idx].resolved_url = Some(url.clone());
+            }
+            (url, display, song.id.clone())
+        }
     } else {
         let (_, _, url) = fetch_song(&song.id, cfg).await?;
         (url, format_title(&song.name, &song.artist), song.id.clone())
@@ -447,8 +464,20 @@ async fn previous(cfg: &MusicNcmApiConfig) -> Result<Value> {
     };
 
     let (audio_url, display_title, song_id) = if song.is_url {
-        let (url, title, channel) = resolve_url(&song.id, cfg).await?;
-        (url, format_title(&title, &channel), song.id.clone())
+        if let Some(cached) = &song.resolved_url {
+            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+        } else {
+            let (url, title, channel) = resolve_url(&song.id, cfg).await?;
+            let display = format_title(&title, &channel);
+            {
+                let mut state = player_state().lock().unwrap();
+                let idx = state.current_index;
+                state.queue[idx].name = title;
+                state.queue[idx].artist = channel;
+                state.queue[idx].resolved_url = Some(url.clone());
+            }
+            (url, display, song.id.clone())
+        }
     } else {
         let (_, _, url) = fetch_song(&song.id, cfg).await?;
         (url, format_title(&song.name, &song.artist), song.id.clone())
@@ -631,7 +660,7 @@ fn format_title(name: &str, artist: &str) -> String {
 /// 通过 yt-dlp 解析视频链接，返回 (音频直链, 标题, 频道名)
 async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, String, String)> {
     let yt = &cfg.yt_dlp_path;
-    let resolve_timeout = Duration::from_secs(60);
+    let resolve_timeout = Duration::from_secs(20);
 
     // 获取音频直链
     let url_output = timeout(
@@ -641,7 +670,7 @@ async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, Stri
             .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("yt-dlp 解析超时 (60s)"))?
+    .map_err(|_| anyhow::anyhow!("yt-dlp 解析超时 (20s)"))?
     .map_err(|e| anyhow::anyhow!("yt-dlp 执行失败: {}。请确保 yt-dlp 已安装", e))?;
 
     if !url_output.status.success() {
@@ -664,7 +693,7 @@ async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, Stri
             .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("yt-dlp 元数据解析超时 (60s)"))?
+    .map_err(|_| anyhow::anyhow!("yt-dlp 元数据解析超时 (20s)"))?
     .map_err(|e| anyhow::anyhow!("yt-dlp 执行失败: {}", e))?;
 
     if !meta_output.status.success() {
