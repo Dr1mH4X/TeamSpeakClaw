@@ -205,6 +205,24 @@ impl HeadlessLlmBridge {
         self.config.headless.tts.enabled && self.speech_provider.is_some()
     }
 
+    async fn should_ignore_stt_while_playing(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+    ) -> bool {
+        if !self.config.music_backend.ignore_stt_playing {
+            return false;
+        }
+        match client.get_status(tonic::Request::new(voicev1::Empty {})).await {
+            Ok(rsp) => {
+                rsp.into_inner().state() == voicev1::status_response::State::Playing
+            }
+            Err(e) => {
+                warn!("ignore_stt_playing: get_status failed: {e}");
+                false
+            }
+        }
+    }
+
     pub async fn run(self) -> Result<()> {
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
@@ -394,6 +412,10 @@ impl HeadlessLlmBridge {
         let musicbot_name = &self.config.music_backend.musicbot_name;
         if !musicbot_name.is_empty() && musicbot_name.eq_ignore_ascii_case(&audio.from_client_name)
         {
+            return Ok(());
+        }
+
+        if self.should_ignore_stt_while_playing(client).await {
             return Ok(());
         }
 
