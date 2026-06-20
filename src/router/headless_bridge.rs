@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -165,6 +165,7 @@ pub struct HeadlessLlmBridge {
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
+    playback_status_cache: Mutex<(Instant, bool)>,
 }
 
 impl HeadlessLlmBridge {
@@ -198,11 +199,41 @@ impl HeadlessLlmBridge {
             ts_adapter,
             ts_clients,
             speech_provider,
+            playback_status_cache: Mutex::new((Instant::now(), false)),
         }
     }
 
     fn is_tts_effectively_enabled(&self) -> bool {
         self.config.headless.tts.enabled && self.speech_provider.is_some()
+    }
+
+    async fn should_ignore_stt_while_playing(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+    ) -> bool {
+        if !self.config.music_backend.ignore_stt_playing {
+            return false;
+        }
+
+        {
+            let cache = self.playback_status_cache.lock().await;
+            if cache.0.elapsed() < Duration::from_secs(1) {
+                return cache.1;
+            }
+        }
+
+        match client.get_status(tonic::Request::new(voicev1::Empty {})).await {
+            Ok(rsp) => {
+                let playing = rsp.into_inner().state() == voicev1::status_response::State::Playing;
+                let mut cache = self.playback_status_cache.lock().await;
+                *cache = (Instant::now(), playing);
+                playing
+            }
+            Err(e) => {
+                debug!("ignore_stt_playing: get_status failed: {e}");
+                false
+            }
+        }
     }
 
     pub async fn run(self) -> Result<()> {
@@ -394,6 +425,10 @@ impl HeadlessLlmBridge {
         let musicbot_name = &self.config.music_backend.musicbot_name;
         if !musicbot_name.is_empty() && musicbot_name.eq_ignore_ascii_case(&audio.from_client_name)
         {
+            return Ok(());
+        }
+
+        if self.should_ignore_stt_while_playing(client).await {
             return Ok(());
         }
 

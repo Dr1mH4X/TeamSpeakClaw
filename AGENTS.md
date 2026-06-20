@@ -8,6 +8,11 @@
 - 格式化: `cargo fmt`
 - 清理构建: `cargo clean`
 
+## 开发提醒
+
+- 修改 `headless_bridge.rs` 的音频/STT 逻辑时，注意 **多模态模型 (`omni_model`)** 和 **纯文本模型** 走不同代码路径：`handle_omni_audio_event` / `handle_audio_event`，需两处同步修改
+- `music_backend.ignore_stt_playing` 在 `headless_bridge.rs` 的 `handle_audio_event` 中**统一拦截**（omni 路径之前），一处修改覆盖两种模型
+
 ## 项目架构
 
 ```
@@ -24,7 +29,7 @@ src/
 │   ├── serverquery/    # TeamSpeak ServerQuery (TCP/SSH)
 │   ├── napcat/         # NapCat OneBot 11 (WebSocket)
 │   └── headless/       # 语音桥接服务
-├── llm/                # LLM 引擎 (OpenAI 兼容)
+├── llm/                # LLM 引擎 (OpenAI 兼容)，流式解析不处理 reasoning_content（不需要思考过程）
 ├── permission/         # 权限门控
 └── skills/             # 技能系统 (music, moderation, information, communication)
 ```
