@@ -6,9 +6,7 @@ sidebar_position: 2
 
 ## 1. Download
 
-Please visit the GitHub Releases page to download the latest version of TeamSpeakClaw:
-
-[**Download Latest Version**](https://github.com/Dr1mH4X/TeamSpeakClaw/releases/latest)
+Please visit the [GitHub Releases](https://github.com/Dr1mH4X/TeamSpeakClaw/releases/latest) page to download the latest version of TeamSpeakClaw:
 
 Select the appropriate file for your operating system (Windows, Linux, macOS).
 
@@ -60,11 +58,7 @@ mkdir -p models
 cd models
 
 # Download whisper model (recommended: ggml-large-v3-turbo)
-# Model list: https://huggingface.co/ggml-org/whisper.cpp/tree/main
-wget https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
-
-More models available at: https://huggingface.co/ggml-org/whisper.cpp
 
 3. Choose STT Solution:
 
