@@ -6,6 +6,7 @@ pub struct MusicBackendConfig {
     pub backend: String,
     pub base_url: String,
     pub musicbot_name: String,
+    pub ignore_stt_playing: bool,
 }
 
 impl Default for MusicBackendConfig {
@@ -14,6 +15,7 @@ impl Default for MusicBackendConfig {
             backend: "ts3audiobot".to_string(),
             base_url: "http://127.0.0.1:8009".to_string(),
             musicbot_name: "TS3AudioBot".to_string(),
+            ignore_stt_playing: false,
         }
     }
 }

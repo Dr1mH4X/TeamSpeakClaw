@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config_dir = crate::config::config_dir();
     let cfg = AppConfig::load(config_dir.join("settings.toml"))?;
-    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging.file_level);
+    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging.file_level, cfg.logging.max_log_days);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
