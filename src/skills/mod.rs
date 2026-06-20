@@ -5,7 +5,7 @@ pub mod music;
 
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::TsAdapter;
-use crate::config::{AppConfig, ErrorPrompts};
+use crate::config::AppConfig;
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use anyhow::Result;
@@ -37,21 +37,19 @@ pub struct ExecutionContext<'a> {
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 
 // ─────────────────────────────────────────────
 // NapCat / QQ 执行上下文（新增）
 // ─────────────────────────────────────────────
 
-pub struct NcExecutionContext<'a> {
+pub struct NcExecutionContext {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
     pub caller_name: String,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 
 // ─────────────────────────────────────────────
@@ -71,7 +69,6 @@ pub struct UnifiedExecutionContext<'a> {
     pub nc_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 
 impl<'a> UnifiedExecutionContext<'a> {
@@ -89,11 +86,10 @@ impl<'a> UnifiedExecutionContext<'a> {
             nc_group_id: None,
             gate: ctx.gate.clone(),
             config: ctx.config.clone(),
-            error_prompts: ctx.error_prompts,
         }
     }
 
-    pub fn from_nc(ctx: &NcExecutionContext<'a>) -> Self {
+    pub fn from_nc(ctx: &NcExecutionContext) -> Self {
         Self {
             platform: Platform::NapCat,
             ts_adapter: None,
@@ -107,7 +103,6 @@ impl<'a> UnifiedExecutionContext<'a> {
             nc_group_id: ctx.caller_group_id,
             gate: ctx.gate.clone(),
             config: ctx.config.clone(),
-            error_prompts: ctx.error_prompts,
         }
     }
 
@@ -139,7 +134,6 @@ impl<'a> UnifiedExecutionContext<'a> {
             caller_channel_group_id: self.caller_channel_group_id,
             gate: self.gate.clone(),
             config: self.config.clone(),
-            error_prompts: self.error_prompts,
         })
     }
 }

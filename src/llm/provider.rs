@@ -5,26 +5,18 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn chat_completion(&self, messages: Vec<Value>, tools: Vec<Value>)
-        -> Result<LlmResponse>;
     async fn chat_completion_stream(
         &self,
         messages: Vec<Value>,
         tools: Vec<Value>,
     ) -> Result<BoxStream<'static, Result<LlmStreamEvent>>>;
-}
-
-#[derive(Debug)]
-pub struct LlmResponse {
-    pub content: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,8 +29,10 @@ pub struct ToolCall {
 #[derive(Debug, Clone)]
 pub enum LlmStreamEvent {
     Token(String),
-    ToolCalls,
-    Done,
+    Done {
+        finish_reason: String,
+        tool_calls: Vec<ToolCall>,
+    },
 }
 
 pub struct OpenAiProvider {
@@ -59,83 +53,6 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn chat_completion(
-        &self,
-        messages: Vec<Value>,
-        tools: Vec<Value>,
-    ) -> Result<LlmResponse> {
-        let url = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-
-        let mut body = json!({
-            "model": self.config.model,
-            "messages": messages,
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
-            body["tool_choice"] = json!("auto");
-        }
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("LLM API error: {}", error_text).into());
-        }
-
-        let data: Value = resp.json().await?;
-
-        let choice = data["choices"][0]
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-        let message = choice["message"]
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("Invalid message format"))?;
-
-        let content = message
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-            for call in calls {
-                let id = call["id"].as_str().unwrap_or_default().to_string();
-                let func = &call["function"];
-                let name = func["name"].as_str().unwrap_or_default().to_string();
-                let args_str = func["arguments"].as_str().unwrap_or("{}");
-                let args = serde_json::from_str(args_str).unwrap_or(json!({}));
-
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments: args,
-                });
-            }
-        }
-
-        let reasoning_content = message
-            .get("reasoning_content")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        Ok(LlmResponse {
-            content,
-            tool_calls,
-            reasoning_content,
-        })
-    }
-
     async fn chat_completion_stream(
         &self,
         messages: Vec<Value>,
@@ -174,6 +91,9 @@ impl LlmProvider for OpenAiProvider {
         let (tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(128);
         tokio::spawn(async move {
             let mut pending: Vec<u8> = Vec::new();
+            let mut tool_call_builders: BTreeMap<usize, (Option<String>, Option<String>, String)> =
+                BTreeMap::new();
+
             while let Some(item) = byte_stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
@@ -206,7 +126,13 @@ impl LlmProvider for OpenAiProvider {
                     }
                     let payload = line.trim_start_matches("data: ").trim();
                     if payload == "[DONE]" {
-                        let _ = tx.send(Ok(LlmStreamEvent::Done)).await;
+                        let tool_calls = finalize_tool_calls(&mut tool_call_builders);
+                        let _ = tx
+                            .send(Ok(LlmStreamEvent::Done {
+                                finish_reason: "stop".to_string(),
+                                tool_calls,
+                            }))
+                            .await;
                         return;
                     }
                     let event: Value = match serde_json::from_str(payload) {
@@ -225,19 +151,68 @@ impl LlmProvider for OpenAiProvider {
                     }
                     if let Some(tool_calls) = event["choices"][0]["delta"]["tool_calls"].as_array()
                     {
-                        if !tool_calls.is_empty() {
-                            let _ = tx.send(Ok(LlmStreamEvent::ToolCalls)).await;
+                        for tc in tool_calls {
+                            let index = tc["index"].as_i64().unwrap_or(0) as usize;
+                            let entry = tool_call_builders.entry(index).or_insert((
+                                None,
+                                None,
+                                String::new(),
+                            ));
+                            if let Some(id) = tc["id"].as_str() {
+                                if !id.is_empty() {
+                                    entry.0 = Some(id.to_string());
+                                }
+                            }
+                            if let Some(func) = tc.get("function").and_then(|v| v.as_object()) {
+                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                    if !name.is_empty() {
+                                        entry.1 = Some(name.to_string());
+                                    }
+                                }
+                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                    entry.2.push_str(args);
+                                }
+                            }
                         }
                     }
-                    if event["choices"][0]["finish_reason"].is_string() {
-                        let _ = tx.send(Ok(LlmStreamEvent::Done)).await;
-                        return;
+                    if let Some(finish_reason) = event["choices"][0]["finish_reason"].as_str() {
+                        if !finish_reason.is_empty() {
+                            let tool_calls = finalize_tool_calls(&mut tool_call_builders);
+                            let _ = tx
+                                .send(Ok(LlmStreamEvent::Done {
+                                    finish_reason: finish_reason.to_string(),
+                                    tool_calls,
+                                }))
+                                .await;
+                            return;
+                        }
                     }
                 }
             }
-            let _ = tx.send(Ok(LlmStreamEvent::Done)).await;
+            let tool_calls = finalize_tool_calls(&mut tool_call_builders);
+            let _ = tx
+                .send(Ok(LlmStreamEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    tool_calls,
+                }))
+                .await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
+}
+
+fn finalize_tool_calls(
+    builders: &mut BTreeMap<usize, (Option<String>, Option<String>, String)>,
+) -> Vec<ToolCall> {
+    std::mem::take(builders)
+        .into_iter()
+        .map(
+            |(_, (id, name, args)): (_, (Option<String>, Option<String>, String))| ToolCall {
+                id: id.unwrap_or_default(),
+                name: name.unwrap_or_default(),
+                arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
+            },
+        )
+        .collect()
 }

@@ -18,7 +18,7 @@ pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use music_ncm_api::MusicNcmApiConfig;
 pub use napcat::NapCatConfig;
-pub use prompts::{ErrorPrompts, PromptsConfig};
+pub use prompts::PromptsConfig;
 pub use rate_limit::RateLimitConfig;
 pub use serverquery::SqConfig;
 
