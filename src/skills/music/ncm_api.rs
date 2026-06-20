@@ -232,36 +232,19 @@ async fn queue_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("Missing url"))?;
     let play_now = args["play_now"].as_bool().unwrap_or(false);
 
-    let song_info = SongInfo {
-        id: url.to_string(),
-        name: String::new(),
-        artist: String::new(),
-        is_url: true,
-    };
-
-    let insert_index = {
-        let mut state = player_state().lock().unwrap();
-        let idx = state.queue.len();
-        state.queue.push(song_info);
-        if play_now {
-            state.current_index = idx;
-        }
-        idx
-    };
-
     if play_now {
-        let item = {
-            let state = player_state().lock().unwrap();
-            state.queue[state.current_index].clone()
-        };
-        let (audio_url, title, channel) = resolve_url(&item.id, cfg).await?;
+        // 先解析 URL，成功后再修改队列状态
+        let (audio_url, title, channel) = resolve_url(url, cfg).await?;
         let display_title = format_title(&title, &channel);
-        // Update the queue item with resolved info
         {
             let mut state = player_state().lock().unwrap();
-            let idx = state.current_index;
-            state.queue[idx].name = title;
-            state.queue[idx].artist = channel;
+            state.queue.push(SongInfo {
+                id: url.to_string(),
+                name: title,
+                artist: channel,
+                is_url: true,
+            });
+            state.current_index = state.queue.len() - 1;
         }
         let mut result = serde_json::json!({
             "status": "playing",
@@ -272,6 +255,20 @@ async fn queue_url(args: &Value, cfg: &MusicNcmApiConfig) -> Result<Value> {
         result[PLAY_TITLE_KEY] = serde_json::Value::String(display_title);
         return Ok(result);
     }
+
+    // play_now=false: 直接入队，不解析
+    let song_info = SongInfo {
+        id: url.to_string(),
+        name: String::new(),
+        artist: String::new(),
+        is_url: true,
+    };
+    let insert_index = {
+        let mut state = player_state().lock().unwrap();
+        let idx = state.queue.len();
+        state.queue.push(song_info);
+        idx
+    };
 
     Ok(serde_json::json!({
         "status": "queued",
@@ -669,6 +666,11 @@ async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, Stri
     .await
     .map_err(|_| anyhow::anyhow!("yt-dlp 元数据解析超时 (60s)"))?
     .map_err(|e| anyhow::anyhow!("yt-dlp 执行失败: {}", e))?;
+
+    if !meta_output.status.success() {
+        let stderr = String::from_utf8_lossy(&meta_output.stderr);
+        return Err(anyhow::anyhow!("yt-dlp 元数据解析失败: {}", stderr.trim()));
+    }
 
     let meta_stdout = String::from_utf8_lossy(&meta_output.stdout);
     let mut lines = meta_stdout.lines();
