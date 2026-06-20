@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
 use crate::llm::context::{ContextWindow, SessionSource};
-use crate::llm::provider::{LlmProvider, LlmResponse, LlmStreamEvent, OpenAiProvider};
+use crate::llm::provider::{LlmProvider, OpenAiProvider};
+use crate::llm::tool_loop::{
+    run_tool_loop, StreamCallbacks, ToolExecutor, ToolLoopError, ToolLoopResult,
+};
 use anyhow::Result;
-use futures_util::stream::BoxStream;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -19,16 +21,23 @@ impl LlmEngine {
         Self { provider, context }
     }
 
-    pub async fn chat(&self, messages: Vec<Value>, tools: Vec<Value>) -> Result<LlmResponse> {
-        Ok(self.provider.chat_completion(messages, tools).await?)
-    }
-
-    pub async fn chat_stream(
+    pub async fn run_tool_loop(
         &self,
-        messages: Vec<Value>,
-        tools: Vec<Value>,
-    ) -> Result<BoxStream<'static, Result<LlmStreamEvent>>> {
-        self.provider.chat_completion_stream(messages, tools).await
+        messages: &mut Vec<Value>,
+        tools: &[Value],
+        executor: &dyn ToolExecutor,
+        max_turns: u32,
+        callbacks: Option<&StreamCallbacks>,
+    ) -> Result<ToolLoopResult, ToolLoopError> {
+        run_tool_loop(
+            messages,
+            tools,
+            self.provider.as_ref(),
+            executor,
+            max_turns as usize,
+            callbacks,
+        )
+        .await
     }
 
     /// 构建带历史上下文的 messages
@@ -44,7 +53,6 @@ impl LlmEngine {
             json!({"role": "system", "content": user_ctx}),
         ];
 
-        // 插入历史对话
         if self.context.is_enabled() {
             let history = self.context.get(source);
             for turn in history {
@@ -53,7 +61,6 @@ impl LlmEngine {
             }
         }
 
-        // 当前用户消息
         messages.push(json!({"role": "user", "content": user_msg}));
 
         messages
