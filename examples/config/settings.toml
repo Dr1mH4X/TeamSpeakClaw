@@ -87,6 +87,7 @@ unm_search_mode = "fast-first"           # fast-first（速度优先）或 order
 unm_proxy_uri = ""                       # 代理地址（如 https://proxy.example.com）
 unm_joox_cookie = ""                     # JOOX cookie（需要时填写）
 unm_qq_cookie = ""                       # QQ cookie（需要时填写）
+yt_dlp_path = "yt-dlp"                   # yt-dlp 可执行文件路径（play_url/queue_url 使用）
 
 # NapCat 配置（可选，用于 QQ 机器人功能）
 # 前置要求：安装并运行 NapCat（https://napneko.github.io/）
