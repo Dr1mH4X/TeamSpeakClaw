@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::{io::ErrorKind, process::Stdio};
 
 use anyhow::{anyhow, Context};
@@ -6,30 +5,20 @@ use audiopus::coder::Encoder;
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::{error, warn};
 
-use super::playback::playback_loop;
 use super::speech::detect_audio_format;
 use super::tsbot::voice::v1 as voicev1;
-use super::types::{emit_log, emit_playback, PersistedVoiceState, SharedStatus};
+use super::types::emit_log;
 use voicev1::voice_service_server::VoiceService;
 
-pub struct PlaybackControl {
-    pub cancel: tokio_util::sync::CancellationToken,
-    pub paused_tx: watch::Sender<bool>,
-    pub handle: tokio::task::JoinHandle<()>,
-}
-
 pub struct VoiceServiceImpl {
-    status: Arc<Mutex<SharedStatus>>,
-    playback: Arc<Mutex<Option<PlaybackControl>>>,
     ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
     ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
     events_tx: broadcast::Sender<voicev1::Event>,
-    persist_tx: mpsc::Sender<PersistedVoiceState>,
     bot_respond_to_private: bool,
     bot_default_reply_mode: String,
     bot_trigger_prefixes: Vec<String>,
@@ -37,22 +26,17 @@ pub struct VoiceServiceImpl {
 
 impl VoiceServiceImpl {
     pub fn new(
-        status: Arc<Mutex<SharedStatus>>,
         ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
         ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
         events_tx: broadcast::Sender<voicev1::Event>,
-        persist_tx: mpsc::Sender<PersistedVoiceState>,
         bot_respond_to_private: bool,
         bot_default_reply_mode: String,
         bot_trigger_prefixes: Vec<String>,
     ) -> Self {
         Self {
-            status,
-            playback: Arc::new(Mutex::new(None)),
             ts3_audio_tx,
             ts3_notice_tx,
             events_tx,
-            persist_tx,
             bot_respond_to_private,
             bot_default_reply_mode,
             bot_trigger_prefixes,
@@ -64,16 +48,6 @@ impl VoiceServiceImpl {
             "channel" => 2,
             "server" => 3,
             _ => 1,
-        }
-    }
-
-    async fn stop_internal(&self) {
-        let mut pb = self.playback.lock().await;
-        if let Some(p) = pb.take() {
-            p.cancel.cancel();
-            let handle = p.handle;
-            handle.abort();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
     }
 }
@@ -250,152 +224,6 @@ impl VoiceService for VoiceServiceImpl {
         }))
     }
 
-    async fn play(
-        &self,
-        req: Request<voicev1::PlayRequest>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        let r = req.into_inner();
-
-        if !r.notice.is_empty() {
-            let mut mode = self.default_reply_mode();
-            if mode == 1 {
-                // PlayRequest 未提供私聊目标，避免发送无效 private 消息。
-                mode = 2;
-            }
-            let target = 0;
-            let _ = self
-                .ts3_notice_tx
-                .try_send((mode, target, r.notice.clone()));
-        }
-
-        {
-            let mut st = self.status.lock().await;
-            st.now_playing_title = r.title.clone();
-            st.now_playing_source_url = r.source_url.clone();
-            st.state = 2;
-        }
-
-        emit_playback(
-            &self.events_tx,
-            1,
-            r.title.clone(),
-            r.source_url.clone(),
-            "",
-        );
-
-        self.stop_internal().await;
-
-        let (paused_tx, paused_rx) = watch::channel(false);
-        let cancel = tokio_util::sync::CancellationToken::new();
-
-        let status = self.status.clone();
-        let tx = self.ts3_audio_tx.clone();
-        let events_tx = self.events_tx.clone();
-        let title = r.title.clone();
-        let source_url = r.source_url;
-        let cancel_child = cancel.clone();
-
-        let handle = tokio::spawn(async move {
-            let r = playback_loop(source_url.clone(), tx, paused_rx, cancel_child, status).await;
-            match r {
-                Ok(()) => {
-                    emit_playback(&events_tx, 2, title, source_url, "");
-                }
-                Err(e) => {
-                    use tracing::error;
-                    error!(%e, "playback loop failed");
-                    emit_playback(&events_tx, 3, title, source_url, format!("{e}"));
-                }
-            }
-        });
-
-        let mut pb = self.playback.lock().await;
-        *pb = Some(PlaybackControl {
-            cancel,
-            paused_tx,
-            handle,
-        });
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "accepted".to_string(),
-        }))
-    }
-
-    async fn pause(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        {
-            let mut st = self.status.lock().await;
-            if st.state == 2 {
-                st.state = 3;
-            }
-        }
-
-        if let Some(pb) = self.playback.lock().await.as_ref() {
-            let _ = pb.paused_tx.send(true);
-        }
-
-        emit_log(&self.events_tx, 2, "paused");
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn resume(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        {
-            let mut st = self.status.lock().await;
-            if st.state == 3 {
-                st.state = 2;
-            }
-        }
-
-        if let Some(pb) = self.playback.lock().await.as_ref() {
-            let _ = pb.paused_tx.send(false);
-        }
-
-        emit_log(&self.events_tx, 2, "resumed");
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn stop(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        self.stop_internal().await;
-
-        {
-            let mut st = self.status.lock().await;
-            st.state = 1;
-            st.now_playing_title.clear();
-            st.now_playing_source_url.clear();
-        }
-
-        emit_log(&self.events_tx, 2, "stopped");
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn skip(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        self.stop(_req).await
-    }
-
     async fn send_notice(
         &self,
         req: Request<voicev1::NoticeRequest>,
@@ -463,130 +291,18 @@ impl VoiceService for VoiceServiceImpl {
         &self,
         req: Request<tonic::Streaming<voicev1::TtsAudioChunk>>,
     ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        self.stop_internal().await;
-
-        {
-            let mut st = self.status.lock().await;
-            st.now_playing_title = "LLM Reply Stream".to_string();
-            st.now_playing_source_url = "grpc://stream_tts_audio".to_string();
-            st.state = 2;
-        }
-        emit_playback(
-            &self.events_tx,
-            1,
-            "LLM Reply Stream".to_string(),
-            "grpc://stream_tts_audio".to_string(),
-            "",
-        );
-
         let result = stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone()).await;
 
         match result {
-            Ok(()) => {
-                emit_playback(
-                    &self.events_tx,
-                    2,
-                    "LLM Reply Stream".to_string(),
-                    "grpc://stream_tts_audio".to_string(),
-                    "",
-                );
-                Ok(Response::new(voicev1::CommandResponse {
-                    ok: true,
-                    message: "ok".to_string(),
-                }))
-            }
+            Ok(()) => Ok(Response::new(voicev1::CommandResponse {
+                ok: true,
+                message: "ok".to_string(),
+            })),
             Err(e) => {
                 error!(%e, "stream tts audio loop failed");
-                emit_playback(
-                    &self.events_tx,
-                    3,
-                    "LLM Reply Stream".to_string(),
-                    "grpc://stream_tts_audio".to_string(),
-                    format!("{e}"),
-                );
                 Err(Status::internal(format!("stream_tts_audio failed: {e}")))
             }
         }
-    }
-
-    async fn set_volume(
-        &self,
-        req: Request<voicev1::SetVolumeRequest>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        let v = req.into_inner().volume_percent.clamp(0, 200);
-        let snapshot = {
-            let mut st = self.status.lock().await;
-            st.volume_percent = v;
-            PersistedVoiceState::from_status(&st)
-        };
-        let _ = self.persist_tx.try_send(snapshot);
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn get_status(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::StatusResponse>, Status> {
-        let st = self.status.lock().await;
-        Ok(Response::new(voicev1::StatusResponse {
-            state: st.state,
-            now_playing_title: st.now_playing_title.clone(),
-            now_playing_source_url: st.now_playing_source_url.clone(),
-            volume_percent: st.volume_percent,
-        }))
-    }
-
-    async fn set_audio_fx(
-        &self,
-        req: Request<voicev1::SetAudioFxRequest>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        let r = req.into_inner();
-        let snapshot = {
-            let mut st = self.status.lock().await;
-
-            if let Some(p) = r.pan {
-                st.fx_pan = p.clamp(-1.0, 1.0);
-            }
-            if let Some(w) = r.width {
-                st.fx_width = w.clamp(0.0, 3.0);
-            }
-            if let Some(s) = r.swap_lr {
-                st.fx_swap_lr = s;
-            }
-
-            if let Some(b) = r.bass_db {
-                st.fx_bass_db = b.clamp(0.0, 18.0);
-            }
-            if let Some(m) = r.reverb_mix {
-                st.fx_reverb_mix = m.clamp(0.0, 1.0);
-            }
-
-            PersistedVoiceState::from_status(&st)
-        };
-        let _ = self.persist_tx.try_send(snapshot);
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn get_audio_fx(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::AudioFxResponse>, Status> {
-        let st = self.status.lock().await;
-        Ok(Response::new(voicev1::AudioFxResponse {
-            pan: st.fx_pan,
-            width: st.fx_width,
-            swap_lr: st.fx_swap_lr,
-            bass_db: st.fx_bass_db,
-            reverb_mix: st.fx_reverb_mix,
-        }))
     }
 
     async fn subscribe_events(
@@ -600,7 +316,6 @@ impl VoiceService for VoiceServiceImpl {
         let rx = self.events_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(move |r| {
             let include_chat = cfg.include_chat;
-            let include_playback = cfg.include_playback;
             let include_log = cfg.include_log;
             let include_audio = cfg.include_audio;
             async move {
@@ -608,7 +323,6 @@ impl VoiceService for VoiceServiceImpl {
                     Ok(ev) => {
                         let ok = match ev.payload {
                             Some(voicev1::event::Payload::Chat(_)) => include_chat,
-                            Some(voicev1::event::Payload::Playback(_)) => include_playback,
                             Some(voicev1::event::Payload::Log(_)) => include_log,
                             Some(voicev1::event::Payload::Audio(_)) => include_audio,
                             None => false,
