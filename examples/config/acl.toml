@@ -29,7 +29,6 @@ server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
 channel_group_ids = []
 allowed_skills = ["*"]
 can_target_admins = true
-rate_limit_override = 60
 
 [[rules]]
 name = "channel_admin"
@@ -44,7 +43,6 @@ allowed_skills = [
   "kick_client"
 ]
 can_target_admins = false
-rate_limit_override = 20
 
 [[rules]]
 name = "default_user"
@@ -58,7 +56,6 @@ allowed_skills = [
   "music_control"
 ]
 can_target_admins = false
-rate_limit_override = 20
 
 # NapCat 映射规则（可按需启用）
 [[rules]]
@@ -72,7 +69,6 @@ allowed_skills = [
   "music_control"
 ]
 can_target_admins = false
-rate_limit_override = 20
 
 # 默认规则 (匹配所有人)
 [[rules]]
