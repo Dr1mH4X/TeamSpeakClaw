@@ -26,12 +26,13 @@ impl Skill for GetClientList {
         let json_clients: Vec<_> = clients
             .iter()
             .map(|c| {
-                json!({
-                    "clid": c.clid,
-                    "nickname": c.nickname,
-                    "dbid": c.cldbid,
-                    "groups": c.server_groups
-                })
+                    json!({
+                        "clid": c.clid,
+                        "nickname": c.nickname,
+                        "dbid": c.cldbid,
+                        "groups": c.server_groups,
+                        "channel_id": c.channel_id
+                    })
             })
             .collect();
 
@@ -60,7 +61,8 @@ impl Skill for GetClientList {
                                 "clid": c.clid,
                                 "nickname": c.nickname,
                                 "dbid": c.cldbid,
-                                "groups": c.server_groups
+                                "groups": c.server_groups,
+                                "channel_id": c.channel_id
                             })
                         })
                         .collect();
@@ -148,8 +150,8 @@ impl Skill for GetClientInfo {
                         }));
                     };
                     let reply = format!(
-                        "TS用户信息 - 昵称:{}, ID:{}, 数据库ID:{}, 服务器分组:{:?}",
-                        client.nickname, client.clid, client.cldbid, client.server_groups
+                        "TS用户信息 - 昵称:{}, ID:{}, 数据库ID:{}, 服务器分组:{:?}, 频道ID:{}",
+                        client.nickname, client.clid, client.cldbid, client.server_groups, client.channel_id
                     );
 
                     return Ok(json!({
