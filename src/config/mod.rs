@@ -6,7 +6,6 @@ pub mod logging;
 pub mod music_backend;
 pub mod napcat;
 pub mod prompts;
-pub mod rate_limit;
 pub use acl::AclConfig;
 pub use bot::BotConfig;
 pub use headless::HeadlessConfig;
@@ -15,7 +14,6 @@ pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use napcat::NapCatConfig;
 pub use prompts::PromptsConfig;
-pub use rate_limit::RateLimitConfig;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -33,7 +31,6 @@ pub fn config_dir() -> PathBuf {
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
-    pub rate_limit: RateLimitConfig,
     pub music_backend: MusicBackendConfig,
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
@@ -45,7 +42,6 @@ impl Default for AppConfig {
         Self {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
-            rate_limit: RateLimitConfig::default(),
             music_backend: MusicBackendConfig::default(),
             napcat: NapCatConfig::default(),
             headless: HeadlessConfig::default(),
