@@ -54,7 +54,7 @@ pub(crate) async fn execute(
     let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
     let audiobot = clients
         .iter()
-        .find(|c| c.nickname.eq_ignore_ascii_case(target_name))
+        .find(|c| c.nickname.to_ascii_lowercase().contains(&target_name.to_ascii_lowercase()))
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
 
     let mut ts_rx;
