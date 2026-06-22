@@ -181,7 +181,7 @@ jobs:
 
   docker:
     name: Build and Push Docker Image
-    needs: [meta, build]
+    needs: [meta]
     runs-on: ubuntu-latest
     permissions:
       contents: read
