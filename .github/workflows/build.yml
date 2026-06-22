@@ -120,6 +120,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare artifacts
