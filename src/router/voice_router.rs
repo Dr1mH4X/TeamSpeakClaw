@@ -12,8 +12,8 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::headless::speech::{
-    detect_audio_format, pcm16_mono_to_wav_bytes, preprocess_stt_text, preprocess_text_message,
-    OpenAiSpeechProvider, OpusSttPipeline,
+    detect_audio_format, is_speakable, pcm16_mono_to_wav_bytes, preprocess_stt_text,
+    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
@@ -480,6 +480,7 @@ impl VoiceRouter {
         {
             Ok(result) => {
                 if !result.content.is_empty() {
+                    info!("[TS&TTS] LLM final reply: {}", &result.content);
                     self.send_reply(client, &ctx, &result.content).await?;
                 }
             }
@@ -536,6 +537,7 @@ impl VoiceRouter {
         };
 
         if !result.content.is_empty() {
+            info!("[TS&TTS] LLM final reply: {}", &result.content);
             self.send_reply(client, &ctx, &result.content).await?;
             self.llm
                 .save_turn(&session_source, user_msg, result.content);
@@ -566,6 +568,10 @@ impl VoiceRouter {
         tokio::spawn(async move {
             let mut rx = sentence_rx;
             while let Some(sentence) = rx.recv().await {
+                if !is_speakable(&sentence) {
+                    debug!("skipping unspeakable tts segment: {sentence}");
+                    continue;
+                }
                 match speech_provider.synthesize(&sentence).await {
                     Ok(audio) => {
                         let codec = detect_audio_format(&audio);
