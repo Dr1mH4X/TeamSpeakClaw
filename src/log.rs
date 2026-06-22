@@ -42,14 +42,20 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
 }
 
 pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) -> WorkerGuard {
-    let console_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(console_level))
-        .add_directive("h2=off".parse().unwrap())
-        .add_directive("hyper::client::connect=off".parse().unwrap())
-        .add_directive("hyper::proto::h2=off".parse().unwrap())
-        .add_directive("hyper_util::client=off".parse().unwrap())
-        .add_directive("reqwest::connect=off".parse().unwrap())
-        .add_directive("tower::buffer::worker=off".parse().unwrap());
+    let noise_directives = [
+        "h2=off",
+        "hyper::client::connect=off",
+        "hyper::proto::h2=off",
+        "hyper_util::client=off",
+        "reqwest::connect=off",
+        "tower::buffer::worker=off",
+    ];
+
+    let console_filter = noise_directives.iter().fold(
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(console_level)),
+        |filter, directive| filter.add_directive(directive.parse().unwrap()),
+    );
 
     let console_layer = fmt::layer()
         .with_target(true)
@@ -69,7 +75,10 @@ pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) ->
     let file_appender = DailyFileAppender::new(log_dir.clone(), "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let file_filter = EnvFilter::new(file_level).add_directive("h2=off".parse().unwrap());
+    let file_filter = noise_directives.iter().fold(
+        EnvFilter::new(file_level),
+        |filter, directive| filter.add_directive(directive.parse().unwrap()),
+    );
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking)

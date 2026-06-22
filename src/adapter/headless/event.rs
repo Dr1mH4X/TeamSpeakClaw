@@ -153,6 +153,28 @@ impl TsAdapter {
             }
         }
 
+        // 加入指定频道
+        if !hc.channel_id.is_empty() {
+            let cid = hc.channel_id.trim();
+            if let Ok(cid_u64) = cid.parse::<u64>() {
+                let pw = &hc.channel_password;
+                let clid = client.client_id();
+                info!(
+                    cid = cid_u64,
+                    "joining channel on startup"
+                );
+                if let Err(e) = tsclient_rs::clientMove(
+                    &client, clid, cid_u64, pw,
+                )
+                .await
+                {
+                    warn!("join channel failed: {e}");
+                }
+            } else {
+                warn!(channel_id = %hc.channel_id, "invalid channel_id, must be a numeric ID");
+            }
+        }
+
         let clid = client.client_id();
 
         let client = Arc::new(client);
