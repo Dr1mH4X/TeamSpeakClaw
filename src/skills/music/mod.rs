@@ -1,5 +1,6 @@
 pub mod ts3audiobot;
 pub mod tsbot_http;
+pub mod tsmusicbot;
 
 use crate::config::MusicBackendConfig;
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
@@ -14,15 +15,14 @@ async fn dispatch_backend(
     cfg: &MusicBackendConfig,
     ts_ctx: Option<&ExecutionContext<'_>>,
 ) -> Result<Value> {
+    let ctx = ts_ctx
+        .ok_or_else(|| anyhow::anyhow!("{} backend requires TeamSpeak context", cfg.backend))?;
     match cfg.backend.as_str() {
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
-        "ts3audiobot" => {
-            let ctx = ts_ctx
-                .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
-            ts3audiobot::execute(action, args, ctx).await
-        }
+        "ts3audiobot" => ts3audiobot::execute(action, args, ctx).await,
+        "tsmusicbot" => tsmusicbot::execute(action, args, ctx).await,
         other => Err(anyhow::anyhow!(
-            "Unknown music backend '{}'. Valid options: ts3audiobot, tsbot_backend",
+            "Unknown music backend '{}'. Valid options: ts3audiobot, tsmusicbot, tsbot_backend",
             other
         )),
     }
@@ -50,6 +50,8 @@ impl Skill for MusicControl {
         match self.backend.as_str() {
             "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
                              Use ts_* actions to play songs, manage playlists, and switch modes.",
+            "tsmusicbot" => "Control the TSMusicBot music player via chat commands. \
+                            Supports play, pause, resume, next/prev, stop, volume, mode, queue, search, add, playlist, fm.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
                                 manage the queue, and control playback.",
             _ => "Control the music player.",
@@ -59,6 +61,7 @@ impl Skill for MusicControl {
     fn parameters(&self) -> Value {
         match self.backend.as_str() {
             "ts3audiobot" => ts3audiobot_schema(),
+            "tsmusicbot" => tsmusicbot_schema(),
             "tsbot_backend" => tsbot_schema(),
             _ => ts3audiobot_schema(),
         }
@@ -121,6 +124,32 @@ fn ts3audiobot_schema() -> Value {
             "value": {
                 "type": "string",
                 "description": "Action argument: song name, playlist name/ID, mode number (0=sequential, 1=sequential loop, 2=random, 3=random loop), etc."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn tsmusicbot_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "The action to perform. Sends ! commands to TSMusicBot via private chat.",
+                "enum": [
+                    "play", "add", "search", "playlist",
+                    "pause", "resume", "next", "skip", "previous", "prev", "stop",
+                    "vol", "volume", "mode", "queue", "now", "fm"
+                ]
+            },
+            "value": {
+                "type": "string",
+                "description": "Action argument: song name, playlist name, volume 0-100, mode (seq/loop/random/rloop), etc."
+            },
+            "keywords": {
+                "type": "string",
+                "description": "Search keywords (alternative to 'value' for search/play actions)."
             }
         },
         "required": ["action"]
