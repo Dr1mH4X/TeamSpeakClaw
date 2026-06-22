@@ -13,7 +13,7 @@ default_reply_mode = "channel"  # 默认回复模式: "private"(私聊) | "chann
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
+omni_model = false    # 多模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
 max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）
 max_context_sessions = 3  # 最大不同用户会话数（超过时淘汰最旧会话）
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
@@ -25,7 +25,6 @@ server_address = "127.0.0.1"
 server_port = 9987
 server_password = ""
 channel_password = ""
-channel_path = ""
 channel_id = ""
 
 [headless.stt]
