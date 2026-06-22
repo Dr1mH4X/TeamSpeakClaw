@@ -6,7 +6,7 @@ ENV PROTOC=/usr/bin/protoc
 RUN cargo build --release
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates libopus ffmpeg
+RUN apk add --no-cache ca-certificates opus ffmpeg
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -D -h /home/appuser -s /sbin/nologin appuser
 WORKDIR /app
