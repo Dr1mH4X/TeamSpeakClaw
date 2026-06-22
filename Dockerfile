@@ -2,8 +2,8 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates libopus ffmpeg
 
-RUN addgroup --gid 1001 appgroup && \
-    adduser --uid 1001 --ingroup appgroup --disabled-password --gecos "" appuser
+RUN addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -D -h /home/appuser -s /sbin/nologin appuser
 
 WORKDIR /app
 
