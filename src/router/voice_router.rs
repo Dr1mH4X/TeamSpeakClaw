@@ -428,6 +428,7 @@ impl VoiceRouter {
 
         let mut ctx = self.resolve_caller_from_audio(&audio);
         ctx.caller_name = chunk.speaker_name;
+        ctx.caller_id = chunk.speaker_client_id;
         self.handle_user_input(client, ctx, text).await
     }
 
@@ -452,6 +453,7 @@ impl VoiceRouter {
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
         let mut ctx = self.resolve_caller_from_audio(&audio);
         ctx.caller_name = chunk.speaker_name;
+        ctx.caller_id = chunk.speaker_client_id;
 
         let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
         let pending_play = Arc::new(Mutex::new(None));
