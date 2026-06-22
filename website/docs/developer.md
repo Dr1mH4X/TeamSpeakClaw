@@ -72,7 +72,6 @@ src/
 │   ├── music_backend.rs     # 音乐后端配置
 │   ├── napcat.rs            # NapCat 配置
 │   ├── prompts.rs           # 提示词与错误消息
-│   └── rate_limit.rs        # 限流配置
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM 引擎封装

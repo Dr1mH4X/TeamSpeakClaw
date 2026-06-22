@@ -72,7 +72,6 @@ src/
 │   ├── music_backend.rs     # Music backend config
 │   ├── napcat.rs            # NapCat config
 │   ├── prompts.rs           # Prompts and error messages
-│   └── rate_limit.rs        # Rate limit config
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM engine wrapper
