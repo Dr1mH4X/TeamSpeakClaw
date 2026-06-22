@@ -44,7 +44,7 @@ pub async fn ts3_actor(
         }
     }));
 
-    // text message → ChatEvent (for TTS via headless_bridge)
+    // text message → ChatEvent (for TTS via voice_router)
     let events_tx_t = events_tx.clone();
     let respond_private = bot_respond_to_private;
     let reply_mode = bot_default_reply_mode.clone();

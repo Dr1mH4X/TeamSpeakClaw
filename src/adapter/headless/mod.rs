@@ -252,7 +252,7 @@ impl Runtime {
                     _ = shutdown_for_bridge.cancelled() => {
                         break;
                     }
-                    run_result = crate::router::HeadlessLlmBridge::new(
+                    run_result = crate::router::VoiceRouter::new(
                         bridge_config.clone(),
                         bridge_prompts.clone(),
                         bridge_gate.clone(),
@@ -262,7 +262,7 @@ impl Runtime {
                         bridge_ts_clients.clone(),
                     ).run() => {
                         if let Err(e) = run_result {
-                            error!("headless LLM bridge failed: {}", e);
+                            error!("voice router failed: {}", e);
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             continue;
                         }
