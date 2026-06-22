@@ -69,12 +69,12 @@ export default function Home(): React.JSX.Element {
             <FeatureItem
               title={
                 <Translate id="homepage.features.cloudMusic.title">
-                  云音乐集成
+                  外部音乐机器人
                 </Translate>
               }
               description={
                 <Translate id="homepage.features.cloudMusic.description">
-                  无缝集成网易云音乐，打造高品质频道。
+                  无缝集成 TSMusicBot 和 NeteaseTSBot 等外部音乐机器人。
                 </Translate>
               }
             />
