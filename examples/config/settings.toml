@@ -44,11 +44,6 @@ api_key = ""
 model = "gpt-4o-mini-tts"
 voice = "alloy"
 
-# 限流配置
-[rate_limit]
-requests_per_minute = 10        # 每个用户的令牌桶限流设置
-burst_size = 3
-
 # 日志配置
 [logging]
 file_level = "info"

@@ -50,7 +50,7 @@ src/
 - OpenAI-compatible (any API with `/v1/chat/completions`)
 - Streamed response parsing: `reasoning_content` fields are **ignored** (not stored or relayed)
 - Context: configurable max turns/sessions via `max_context_turns` / `max_context_sessions`
-- Concurrent request limiting via tokio `Semaphore` + token-bucket rate limit per user
+- Concurrent request limiting via tokio `Semaphore`
 
 
 ## CI/CD
