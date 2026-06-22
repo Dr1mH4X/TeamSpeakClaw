@@ -14,7 +14,7 @@ TeamSpeakClaw 是一个基于 LLM 的 TeamSpeak 智能助手。
 - **🎙️ Headless 语音服务**：支持无界面语音模式，通过 STT（语音转文字）和 TTS（文字转语音）实现语音交互。可配置唤醒词，支持 OpenAI 兼容的语音服务。
 - **🛡️ 细粒度权限控制 (RBAC)**：内置强大的权限系统。您可以为不同的 TeamSpeak 用户组配置特定的技能权限（例如：仅允许管理员使用踢人功能，普通用户仅限点歌）。
 - **🔌 灵活的技能系统 (Skills)**：
-    - **音乐控制**：支持两种模式 — ts3audiobot 后端通过私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)，或 tsbot_backend 后端通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)（支持网易云音乐和 QQ 音乐）。支持点歌、切歌、搜索、音量调节、音效设置等功能。
+    - **音乐控制**：支持三种后端 — ts3audiobot（通过私信控制 TS3AudioBot）、tsmusicbot（通过私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)）、或 tsbot_backend（通过 HTTP API 控制 NeteaseTSBot，支持网易云音乐和 QQ 音乐）。支持点歌、切歌、搜索、音量调节、音效设置等功能。
     - **服务器管理**：支持踢出 (Kick)、封禁 (Ban)、移动用户等操作。
     - **信息查询**：获取在线用户列表、服务器状态等。
     - **可扩展性**：轻松编写自定义 Skill，扩展机器人的能力边界。

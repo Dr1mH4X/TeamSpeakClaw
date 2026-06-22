@@ -16,11 +16,6 @@ sidebar_position: 3
 
 **查看完整配置示例**：[settings.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/settings.toml)
 
-### 连接方式
-
-- **TCP（默认）**：`method = "tcp"`，使用 `port`（默认 10011）连接。
-- **SSH**：`method = "ssh"`，使用 `ssh_port`（默认 10022）连接。
-
 ### NapCat 配置详解
 
 `[napcat]` 区段用于配置 QQ 机器人功能，通过 NapCat（OneBot 11 协议实现）连接 QQ。
@@ -56,8 +51,9 @@ sidebar_position: 3
 `[music_backend]` 区段控制音乐功能使用哪个后端：
 
 | 值 | 说明 |
-|---|---|
+|---|---|---|
 | `ts3audiobot` | （默认）通过 TS 私信控制 TS3AudioBot，需确保音乐机器人昵称为 `TS3AudioBot` |
+| `tsmusicbot` | 通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) |
 | `tsbot_backend` | 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)，需设置 `base_url` |
 
 ### 回复模式

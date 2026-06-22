@@ -28,9 +28,9 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 使用文本编辑器修改 `config/settings.toml`，填入您的 TeamSpeak ServerQuery 账号密码以及 LLM API Key 等信息。
 
 **快速配置检查清单**：
-- `[serverquery]` — 填写 TeamSpeak 服务器地址、端口和登录凭据
+- `[headless]` — 填写 TeamSpeak 服务器地址（`server_address`）、端口（`server_port`）、密码等
 - `[llm]` — 填写 API Key、Base URL 和模型名称
-- `[headless]` — 如需语音服务，启用并配置 STT/TTS（可选）
+- `[headless.stt]` / `[headless.tts]` — 如需语音服务，启用并配置（可选）
 - `[napcat]` — 如需 QQ 机器人，启用并配置 WebSocket 地址（可选）
 
 详细配置说明请参考 [配置指南](/docs/configuration)。

@@ -57,7 +57,11 @@ TeamSpeakClaw supports two music backends:
 
 Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages. Ensure the music bot's nickname is set to `TS3AudioBot`.
 
-**Mode 2: tsbot_backend**
+**Mode 2: tsmusicbot**
+
+Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages, supporting play/pause/skip/queue/radio etc.
+
+**Mode 3: tsbot_backend**
 
 Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `backend = "tsbot_backend"` and `base_url` in `settings.toml`.
 
@@ -115,5 +119,6 @@ Supported actions:
     - Check the configuration in `acl.toml` to ensure your User Group ID is included in an allowed rule.
 
 - **Music features aren't working?**
-    - ts3audiobot mode: Ensure TS3AudioBot is online and its nickname is exactly `TS3AudioBot`.
-    - tsbot_backend mode: Ensure the NeteaseTSBot backend service is running and the `base_url` is correct.
+-   ts3audiobot mode: Ensure TS3AudioBot is online and its nickname is exactly `TS3AudioBot`.
+-   tsmusicbot mode: Ensure TSMusicBot is online and its nickname matches the `musicbot_name` config.
+-   tsbot_backend mode: Ensure the NeteaseTSBot backend service is running and the `base_url` is correct.

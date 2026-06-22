@@ -28,9 +28,9 @@ The extracted archive contains a `config/` directory with the following configur
 Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak ServerQuery account credentials, LLM API Key, and other information.
 
 **Quick Configuration Checklist**:
-- `[serverquery]` — Fill in TeamSpeak server address, port, and login credentials
+- `[headless]` — Fill in TeamSpeak server address (`server_address`), port (`server_port`), password, etc.
 - `[llm]` — Fill in API Key, Base URL, and model name
-- `[headless]` — Enable and configure STT/TTS if you need voice service (optional)
+- `[headless.stt]` / `[headless.tts]` — Enable and configure if you need voice service (optional)
 - `[napcat]` — Enable and configure WebSocket URL if you need QQ bot (optional)
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).

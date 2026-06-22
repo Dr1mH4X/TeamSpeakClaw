@@ -41,50 +41,44 @@ src/
 ├── main.rs                  # Entry: Initialize components, start event loop
 ├── cli.rs                   # CLI argument parsing
 ├── log.rs                   # Logging initialization
-├── router.rs                # Module re-exports (→ router/)
 ├── router/
-│   ├── sq_router.rs         # TeamSpeak event router
+│   ├── mod.rs               # Router orchestration & signal handling
+│   ├── ts_router.rs         # TeamSpeak event router
 │   ├── nc_router.rs         # NapCat/QQ event router
-│   ├── unified.rs           # Unified event model (cross-platform)
-│   └── headless_bridge.rs   # Headless voice LLM bridge
+│   ├── voice_router.rs      # Headless voice LLM bridge
+│   └── unified.rs           # Unified event model (cross-platform)
 ├── adapter/
-│   ├── mod.rs
-│   ├── serverquery/         # TeamSpeak ServerQuery adapter
-│   │   ├── mod.rs
-│   │   ├── connection.rs    # TCP/SSH connection management
-│   │   ├── command.rs       # Command building
-│   │   └── event.rs         # Event parsing
+│   ├── mod.rs               # Re-exports TsAdapter/TsEvent (from headless)
 │   ├── napcat/              # NapCat OneBot 11 adapter
 │   │   ├── mod.rs
 │   │   ├── ws.rs            # WebSocket connection and reconnection
 │   │   ├── api.rs           # OneBot API action definitions
 │   │   ├── event.rs         # Event parsing
 │   │   └── types.rs         # Message segments and response types
-│   └── headless/            # Headless voice service
-│       ├── mod.rs
-│       ├── service.rs        # Voice service main logic
-│       ├── actor.rs          # Voice actor management
-│       ├── playback.rs       # Playback control
-│       ├── speech.rs         # STT/TTS processing
-│       ├── serverquery.rs    # ServerQuery client for Headless
-│       └── types.rs         # Type definitions
+│   └── headless/            # Headless voice service + TsAdapter
+│       ├── mod.rs           # Runtime startup, gRPC service
+│       ├── actor.rs         # TeamSpeak client Actor
+│       ├── event.rs         # TsAdapter/TsEvent (tsclient-rs wrapper)
+│       ├── speech.rs        # STT/TTS processing
+│       ├── types.rs         # Type definitions
+│       └── voice_service.rs # gRPC server implementation
 ├── config/
 │   ├── mod.rs               # AppConfig aggregation
-│   ├── serverquery.rs       # ServerQuery config
-│   ├── napcat.rs            # NapCat config
-│   ├── headless.rs          # Headless voice service config
-│   ├── bot.rs               # Bot behavior config
-│   ├── llm.rs               # LLM config
-│   ├── music_backend.rs     # Music backend config
 │   ├── acl.rs               # ACL rules config
+│   ├── bot.rs               # Bot behavior config
+│   ├── headless.rs          # Headless voice service config
+│   ├── llm.rs               # LLM config
 │   ├── logging.rs           # Logging config
-│   ├── rate_limit.rs        # Rate limit config
-│   └── prompts.rs           # Prompts and error messages
+│   ├── music_backend.rs     # Music backend config
+│   ├── napcat.rs            # NapCat config
+│   ├── prompts.rs           # Prompts and error messages
+│   └── rate_limit.rs        # Rate limit config
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM engine wrapper
 │   ├── provider.rs          # Provider trait and OpenAI implementation
-│   └── context.rs           # Context window management
+│   ├── context.rs           # Context window management
+│   └── tool_loop.rs         # Tool loop execution
 ├── permission/
 │   ├── mod.rs
 │   └── gate.rs              # Permission gating logic
@@ -93,7 +87,11 @@ src/
     ├── communication.rs     # poke_client, send_message
     ├── information.rs       # get_client_list, get_client_info
     ├── moderation.rs        # kick_client, ban_client, move_client
-    └── music.rs             # music_control (dual backend + cross-platform)
+    └── music/               # music_control (3 backends + cross-platform)
+        ├── mod.rs
+        ├── ts3audiobot.rs   # TS3AudioBot backend
+        ├── tsbot_http.rs    # NeteaseTSBot HTTP backend
+        └── tsmusicbot.rs    # TSMusicBot backend
 ```
 
 ### Data Flow
@@ -101,15 +99,15 @@ src/
 **TeamSpeak Path**:
 
 ```
-User Message → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
-                                                 ↓
-                                            Tool Call Request
-                                                 ↓
-                                     PermissionGate (Auth Check)
-                                                 ↓
-                                     SkillRegistry → Skill.execute()
-                                                 ↓
-                                     Result → LlmEngine → TsAdapter → Reply to User
+User Message → TsAdapter (tsclient-rs) → EventRouter → LlmEngine
+                                                  ↓
+                                             Tool Call Request
+                                                  ↓
+                                      PermissionGate (Auth Check)
+                                                  ↓
+                                      SkillRegistry → Skill.execute()
+                                                  ↓
+                                      Result → LlmEngine → TsAdapter → Reply to User
 ```
 
 **NapCat / QQ Path**:
@@ -131,15 +129,17 @@ User Message → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
 **Headless Voice Path**:
 
 ```
-Voice Input → STT (Speech-to-Text) → HeadlessService → HeadlessLlmBridge
-                                                        ↓
-                                                    Tool Call Request
-                                                        ↓
-                                            PermissionGate (Auth Check)
-                                                        ↓
-                                          SkillRegistry → Skill.execute()
-                                                        ↓
-                                             Result → LlmEngine → TTS → Voice Output
+Voice Input → opus audio stream → VoiceRouter
+  ├── omni_model=true  → multimodal LLM (audio directly)
+  └── omni_model=false → OpusSttPipeline → STT → text
+                                                         ↓
+                                                     Tool Call Request
+                                                         ↓
+                                             PermissionGate (Auth Check)
+                                                         ↓
+                                           SkillRegistry → Skill.execute_unified()
+                                                         ↓
+                                              Result → LlmEngine → TTS → Voice Output
 ```
 
 ### Cross-platform Behavior Matrix
@@ -153,41 +153,27 @@ Voice Input → STT (Speech-to-Text) → HeadlessService → HeadlessLlmBridge
 | `move_client` | ✅ TS execution | ✅ forwarded to TS execution | n/a | ✅ TS execution |
 | `get_client_list` | ✅ TS execution | ✅ queries TS online cache and returns | n/a | ✅ TS execution |
 | `get_client_info` | ✅ TS execution | ✅ queries TS online cache and returns | n/a | ✅ TS execution |
-| `music_control` | ✅ TS execution | ✅ NC request forwarded to TS, waits for TS3AudioBot actual reply then returns | n/a | ✅ TS execution |
+| `music_control` | ✅ TS execution (3 backends) | ✅ NC request forwarded to TS, waits for reply then returns | n/a | ✅ TS execution |
 
 Notes:
 - NC side unified execution follows "first `execute_unified`, fallback to `execute_nc` on failure".
 - TS side unified execution follows "first `execute_unified`, fallback to `execute` on failure".
-- Headless mode uses `HeadlessLlmBridge` as bridge, reusing TS execution context.
+- Headless mode uses `VoiceRouter` as bridge, reusing TS execution context.
 - NC permissions are enforced via ACL virtual group mapping (`9000~9003`), see configuration docs.
 
 ## Core Modules Detail
 
 ### adapter — Communication Adapter
 
-#### TeamSpeak Adapter (`adapter/serverquery/`)
+#### TeamSpeak Adapter (`adapter/headless/event.rs`)
 
-Handles low-level communication with the TeamSpeak server.
+Wraps tsclient-rs library, exposing a unified `TsAdapter` interface.
 
-**Core Structure**: `src/adapter/serverquery/connection.rs`
+**Core file**: `src/adapter/headless/event.rs`
 
-```rust
-pub struct TsAdapter {
-    writer: Mutex<tokio::io::WriteHalf<TsStream>>,
-    event_tx: broadcast::Sender<TsEvent>,
-    bot_clid: AtomicU32,
-    query_tx: mpsc::Sender<String>,
-    query_active: AtomicBool,
-    include_event_lines_active: AtomicBool,
-    query_lock: Mutex<()>,
-}
-```
+**Connection**: Handled internally by tsclient-rs. Configured in `[headless]` section (`server_address`, `server_port`, `server_password`, etc.).
 
-**Connection Methods**:
-- TCP (Default): `method = "tcp"`
-- SSH: `method = "ssh"`
-
-**Event Types**: `src/adapter/serverquery/event.rs`
+**Event Types**: `src/adapter/headless/event.rs`
 
 | Event | Description |
 |---|---|
@@ -223,15 +209,17 @@ pub struct NapCatAdapter {
 
 #### Headless Voice Service (`adapter/headless/`)
 
-Provides headless voice interaction capability, integrating STT (Speech-to-Text) and TTS (Text-to-Speech).
+Provides headless voice interaction capability via gRPC with the TeamSpeak client, integrating STT and TTS.
 
 **Core Components**:
-- `service.rs` — Voice service main logic, manages voice connections and audio streams
-- `actor.rs` — Voice actor management, handles voice client state
-- `playback.rs` — Playback control, manages audio playback queue
-- `speech.rs` — STT/TTS processing, calls external voice service APIs
-- `serverquery.rs` — ServerQuery client for Headless
+- `mod.rs` — `Runtime::start()` launches gRPC service + VoiceRouter bridge
+- `actor.rs` — tsclient-rs TeamSpeak client facade, handles audio/notifications/events
+- `event.rs` — `TsAdapter` / `TsEvent` wrapper (decoupled from tsclient-rs)
+- `speech.rs` — STT/TTS processing, Opus audio pipeline
 - `types.rs` — Type definitions
+- `voice_service.rs` — gRPC `VoiceService` server implementation
+
+**Note**: TsAdapter does not directly manage TCP/SSH connections — those are handled internally by tsclient-rs.
 
 **Configuration**: Configure via `[headless]`, `[headless.stt]`, `[headless.tts]` sections in `settings.toml`.
 
@@ -342,9 +330,9 @@ Provides cross-platform event abstraction, unifying message handling from differ
 | `NapCatGroup { group_id, at_user_id }` | QQ group reply |
 | `Headless { target_mode, target_client_id }` | Headless reply |
 
-#### SqRouter (TeamSpeak)
+#### EventRouter (TeamSpeak)
 
-`src/router/sq_router.rs` — Handles TeamSpeak text message events.
+`src/router/ts_router.rs` — Handles TeamSpeak text message events.
 
 Message processing flow:
 1. Filter out self-messages
@@ -360,7 +348,7 @@ Message processing flow:
 
 `src/router/nc_router.rs` — Handles NapCat private and group message events.
 
-Key differences from SqRouter:
+Key differences from EventRouter:
 - Has `ts_adapter` and `ts_clients`, can construct `UnifiedExecutionContext::from_nc()` for cross-platform tool calls
 - NC user permissions are mapped via virtual group IDs (`9000-9003`)
 
@@ -402,7 +390,7 @@ pub trait Skill: Send + Sync {
 
 ### ExecutionContext
 
-Context during TeamSpeak skill execution: `src/skills/mod.rs:31-41`
+Context during TeamSpeak skill execution: `src/skills/mod.rs:31-40`
 
 ```rust
 pub struct ExecutionContext<'a> {
@@ -414,29 +402,27 @@ pub struct ExecutionContext<'a> {
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
 ### NcExecutionContext
 
-Context during NapCat skill execution: `src/skills/mod.rs:47-55`
+Context during NapCat skill execution: `src/skills/mod.rs:46-52`
 
 ```rust
-pub struct NcExecutionContext<'a> {
+pub struct NcExecutionContext {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
     pub caller_name: String,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
 ### UnifiedExecutionContext
 
-Cross-platform unified context, built via `from_ts()` or `from_nc()`, with cross-end adapters injected via `with_cross_adapters()`: `src/skills/mod.rs:61-75`
+Cross-platform unified context, built via `from_ts()` or `from_nc()`, with cross-end adapters injected via `with_cross_adapters()`: `src/skills/mod.rs:59-72`
 
 ```rust
 pub struct UnifiedExecutionContext<'a> {
@@ -452,7 +438,6 @@ pub struct UnifiedExecutionContext<'a> {
     pub nc_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
@@ -575,7 +560,7 @@ can_target_admins = false
 
 1. **Naming**: Use `snake_case`, e.g., `kick_client`, `get_client_list`
 2. **Parameter Validation**: Validate required parameters in `execute`
-3. **Error Handling**: Return meaningful error messages, use `ctx.error_prompts` templates
+3. **Error Handling**: Return meaningful error messages
 4. **Permission Check**: Use `ctx.gate.can_target()` to check operation permissions
 5. **Return Values**: Return JSON objects with `status: "ok"` and execution results
 6. **Cross-Platform**: Implement `execute_unified()`, use `ctx.to_ts_ctx()?` for one-line TS context restoration
@@ -592,7 +577,7 @@ can_target_admins = false
 | `move_client` | `moderation.rs` | Move a user to a specified channel |
 | `get_client_list` | `information.rs` | Get online user list |
 | `get_client_info` | `information.rs` | Get detailed user info |
-| `music_control` | `music.rs` | Music control (dual backend + cross-platform + Headless support) |
+| `music_control` | `music/` | Music control (ts3audiobot / tsmusicbot / tsbot_backend + cross-platform + Headless support) |
 
 ## Permission System
 
