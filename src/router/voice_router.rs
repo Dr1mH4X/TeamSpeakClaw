@@ -19,9 +19,7 @@ use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::{
-    LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor,
-};
+use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
 use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
@@ -470,12 +468,7 @@ impl VoiceRouter {
 
         match self
             .llm
-            .run_tool_loop(
-                &mut messages,
-                &tools,
-                &executor,
-                callbacks.as_ref(),
-            )
+            .run_tool_loop(&mut messages, &tools, &executor, callbacks.as_ref())
             .await
         {
             Ok(result) => {
@@ -515,12 +508,7 @@ impl VoiceRouter {
 
         let result = match self
             .llm
-            .run_tool_loop(
-                &mut messages,
-                &tools,
-                &executor,
-                callbacks.as_ref(),
-            )
+            .run_tool_loop(&mut messages, &tools, &executor, callbacks.as_ref())
             .await
         {
             Ok(r) => r,
