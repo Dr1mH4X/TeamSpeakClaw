@@ -1,12 +1,11 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde_json::json;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -31,24 +30,16 @@ use voicev1::voice_service_client::VoiceServiceClient;
 
 fn validate_play_url(raw: &str) -> anyhow::Result<()> {
     let parsed = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
-
     match parsed.scheme() {
         "http" | "https" => {}
-        scheme => {
-            return Err(anyhow::anyhow!(
-                "play URL scheme '{scheme}' is not allowed; only http/https are accepted"
-            ))
-        }
+        scheme => return Err(anyhow::anyhow!("play URL scheme '{scheme}' is not allowed")),
     }
-
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("play URL has no host"))?;
-
     if host.eq_ignore_ascii_case("localhost") {
         return Err(anyhow::anyhow!("play URL must not point to localhost"));
     }
-
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         if ip.is_loopback() {
             return Err(anyhow::anyhow!(
@@ -61,7 +52,6 @@ fn validate_play_url(raw: &str) -> anyhow::Result<()> {
             ));
         }
     }
-
     Ok(())
 }
 
@@ -97,17 +87,16 @@ struct PendingPlay {
     requested_by: String,
 }
 
-struct HeadlessExecutor<'a> {
-    bridge: &'a HeadlessLlmBridge,
+struct VoiceExecutor<'a> {
+    router: &'a VoiceRouter,
     ctx: &'a CallerContext,
     pending_play: Arc<Mutex<Option<PendingPlay>>>,
 }
 
 #[async_trait]
-impl ToolExecutor for HeadlessExecutor<'_> {
+impl ToolExecutor for VoiceExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
-        let tool_result = self.bridge.execute_skill(call, self.ctx).await;
-
+        let tool_result = self.router.execute_skill(call, self.ctx).await;
         if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&tool_result) {
             if let Some(url) = parsed.get(PLAY_URL_KEY).and_then(|v| v.as_str()) {
                 let title = parsed
@@ -115,15 +104,8 @@ impl ToolExecutor for HeadlessExecutor<'_> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                debug!(
-                    event = "headless.play_url",
-                    title = %title,
-                    "embedded backend requested playback"
-                );
                 match validate_play_url(url) {
-                    Err(e) => {
-                        warn!("rejected play URL from tool result: {e}");
-                    }
+                    Err(e) => warn!("rejected play URL from tool result: {e}"),
                     Ok(()) => {
                         let mut guard = self.pending_play.lock().await;
                         *guard = Some(PendingPlay {
@@ -141,12 +123,8 @@ impl ToolExecutor for HeadlessExecutor<'_> {
             match serde_json::to_string(&parsed) {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!("failed to re-serialize tool result after stripping play fields: {e}");
-                    json!({
-                        "error": "serialization_failed",
-                        "raw": tool_result,
-                    })
-                    .to_string()
+                    warn!("failed to re-serialize tool result: {e}");
+                    json!({ "error": "serialization_failed", "raw": tool_result }).to_string()
                 }
             }
         } else {
@@ -155,7 +133,7 @@ impl ToolExecutor for HeadlessExecutor<'_> {
     }
 }
 
-pub struct HeadlessLlmBridge {
+pub struct VoiceRouter {
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
     gate: Arc<PermissionGate>,
@@ -168,8 +146,7 @@ pub struct HeadlessLlmBridge {
     playback_status_cache: Mutex<(Instant, bool)>,
 }
 
-impl HeadlessLlmBridge {
-    const OBS_CHAT: bool = true;
+impl VoiceRouter {
     const OBS_TEXT_MAX_LEN: usize = 240;
     const STREAM_TTS_MIN_CHARS: usize = 4;
     const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
@@ -214,15 +191,16 @@ impl HeadlessLlmBridge {
         if !self.config.music_backend.ignore_stt_playing {
             return false;
         }
-
         {
             let cache = self.playback_status_cache.lock().await;
             if cache.0.elapsed() < Duration::from_secs(1) {
                 return cache.1;
             }
         }
-
-        match client.get_status(tonic::Request::new(voicev1::Empty {})).await {
+        match client
+            .get_status(tonic::Request::new(voicev1::Empty {}))
+            .await
+        {
             Ok(rsp) => {
                 let playing = rsp.into_inner().state() == voicev1::status_response::State::Playing;
                 let mut cache = self.playback_status_cache.lock().await;
@@ -247,9 +225,7 @@ impl HeadlessLlmBridge {
             include_log: true,
             include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
-
         let mut stream = client.subscribe_events(req).await?.into_inner();
-        debug!("Headless LLM bridge subscribed: {}", endpoint);
 
         while let Some(item) = stream.next().await {
             match item {
@@ -260,24 +236,23 @@ impl HeadlessLlmBridge {
                     match payload {
                         voicev1::event::Payload::Chat(chat) => {
                             if let Err(e) = self.handle_chat_event(&mut client, chat).await {
-                                error!("headless bridge chat handling failed: {e}");
+                                error!("Voice router chat handling failed: {e}");
                             }
                         }
                         voicev1::event::Payload::Audio(audio) => {
                             if let Err(e) = self.handle_audio_event(&mut client, audio).await {
-                                error!("headless bridge audio handling failed: {e}");
+                                error!("Voice router audio handling failed: {e}");
                             }
                         }
                         _ => {}
                     }
                 }
                 Err(e) => {
-                    warn!("headless event stream error: {e}");
+                    warn!("voice event stream error: {e}");
                     break;
                 }
             }
         }
-
         Ok(())
     }
 
@@ -318,7 +293,11 @@ impl HeadlessLlmBridge {
     }
 
     fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
-        let reply_target_mode = self.default_reply_target_mode();
+        let reply_target_mode = match self.config.bot.default_reply_mode.as_str() {
+            "channel" => 2,
+            "server" => 3,
+            _ => 1,
+        };
         let reply_target_client_id = if reply_target_mode == 1 {
             audio.from_client_id
         } else {
@@ -347,14 +326,6 @@ impl HeadlessLlmBridge {
         }
     }
 
-    fn default_reply_target_mode(&self) -> i32 {
-        match self.config.bot.default_reply_mode.as_str() {
-            "channel" => 2,
-            "server" => 3,
-            _ => 1,
-        }
-    }
-
     fn should_ignore_chat(&self, chat: &voicev1::ChatEvent, caller_id: u32) -> bool {
         if chat.invoker_name == self.config.bot.nickname {
             return true;
@@ -380,17 +351,13 @@ impl HeadlessLlmBridge {
                 Some(self.ts_clients.as_ref()),
                 None,
             );
-
             let args = call.arguments.clone();
-            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
+            match skill.execute_unified(args.clone(), &unified_ctx).await {
                 Ok(v) => Ok(v),
                 Err(_) => skill.execute(args, &exec_ctx).await,
-            };
-
-            match result {
-                Ok(v) => v.to_string(),
-                Err(e) => format!("技能执行失败: {}", e),
             }
+            .map(|v| v.to_string())
+            .unwrap_or_else(|e| format!("技能执行失败: {}", e))
         } else {
             "未找到指定的技能".to_string()
         }
@@ -408,8 +375,7 @@ impl HeadlessLlmBridge {
         let Some(clean_text) = preprocess_text_message(&chat.message) else {
             return Ok(());
         };
-        self.handle_user_input(client, ctx, clean_text, "text")
-            .await
+        self.handle_user_input(client, ctx, clean_text).await
     }
 
     async fn handle_audio_event(
@@ -421,13 +387,11 @@ impl HeadlessLlmBridge {
         if bot_clid != 0 && audio.from_client_id == bot_clid {
             return Ok(());
         }
-
         let musicbot_name = &self.config.music_backend.musicbot_name;
         if !musicbot_name.is_empty() && musicbot_name.eq_ignore_ascii_case(&audio.from_client_name)
         {
             return Ok(());
         }
-
         if self.should_ignore_stt_while_playing(client).await {
             return Ok(());
         }
@@ -443,15 +407,13 @@ impl HeadlessLlmBridge {
             };
             pipeline.process_audio_frame(&audio)?
         };
-
         let Some(chunk) = chunk else {
             return Ok(());
         };
+
         let Some(speech_provider) = self.speech_provider.as_ref() else {
-            warn!("speech provider unavailable, skip stt");
             return Ok(());
         };
-
         let wav = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
         let raw_text = match speech_provider.transcribe_wav(wav).await {
             Ok(t) => t,
@@ -464,17 +426,9 @@ impl HeadlessLlmBridge {
             return Ok(());
         };
 
-        debug!(
-            event = "headless.stt.result",
-            speaker = %chunk.speaker_name,
-            clid = chunk.speaker_client_id,
-            text = %self.truncate_for_log(&text),
-            "headless stt text"
-        );
-
         let mut ctx = self.resolve_caller_from_audio(&audio);
         ctx.caller_name = chunk.speaker_name;
-        self.handle_user_input(client, ctx, text, "voice").await
+        self.handle_user_input(client, ctx, text).await
     }
 
     async fn handle_omni_audio_event(
@@ -485,15 +439,10 @@ impl HeadlessLlmBridge {
         let chunk = {
             let mut guard = self.audio_pipeline.lock().await;
             let Some(pipeline) = guard.as_mut() else {
-                warn!(
-                    event = "headless.omni.no_pipeline",
-                    "omni model: audio pipeline not available, dropping audio frame"
-                );
                 return Ok(());
             };
             pipeline.process_audio_frame(&audio)?
         };
-
         let Some(chunk) = chunk else {
             return Ok(());
         };
@@ -501,20 +450,42 @@ impl HeadlessLlmBridge {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
         let audio_base64 = BASE64.encode(&wav_bytes);
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
-
         let mut ctx = self.resolve_caller_from_audio(&audio);
         ctx.caller_name = chunk.speaker_name;
 
-        info!(
-            event = "headless.omni.audio_input",
-            speaker = %ctx.caller_name,
-            clid = ctx.caller_id,
-            audio_size = wav_bytes.len(),
-            "omni model: sending audio directly to LLM"
-        );
+        let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
+        let pending_play = Arc::new(Mutex::new(None));
+        let executor = VoiceExecutor {
+            router: self,
+            ctx: &ctx,
+            pending_play: pending_play.clone(),
+        };
+        let callbacks = if self.is_tts_effectively_enabled() {
+            Some(self.build_tts_callbacks().await?)
+        } else {
+            None
+        };
 
-        self.handle_omni_user_input(client, ctx, audio_data, "voice")
+        match self
+            .llm
+            .run_tool_loop(
+                &mut messages,
+                &tools,
+                &executor,
+                self.config.llm.max_tool_turns,
+                callbacks.as_ref(),
+            )
             .await
+        {
+            Ok(result) => {
+                if !result.content.is_empty() {
+                    self.send_reply(client, &ctx, &result.content).await?;
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Self::execute_pending_play(client, pending_play.lock().await.take()).await;
+        Ok(())
     }
 
     async fn handle_user_input(
@@ -522,28 +493,18 @@ impl HeadlessLlmBridge {
         client: &mut VoiceServiceClient<Channel>,
         ctx: CallerContext,
         user_msg: String,
-        source: &str,
     ) -> Result<()> {
-        if Self::OBS_CHAT {
-            info!(
-                event = "headless.chat.user_message",
-                source = source,
-                invoker = %ctx.caller_name,
-                uid = %ctx.caller_uid,
-                clid = ctx.caller_id,
-                message = %self.truncate_for_log(&user_msg),
-                "headless inbound message"
-            );
-        }
+        info!(event = "voice.chat.user_message", invoker = %ctx.caller_name, clid = ctx.caller_id, message = %self.truncate_for_log(&user_msg));
 
         let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone());
         let pending_play = Arc::new(Mutex::new(None));
-        let executor = HeadlessExecutor {
-            bridge: self,
+        let executor = VoiceExecutor {
+            router: self,
             ctx: &ctx,
             pending_play: pending_play.clone(),
         };
 
+        // 如果开启了 TTS，传入 callbacks 实现边流式输出边合成语音
         let callbacks = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
@@ -563,7 +524,6 @@ impl HeadlessLlmBridge {
         {
             Ok(r) => r,
             Err(ToolLoopError::MaxTurnsExceeded) => {
-                // 清理 TTS 管道
                 if let Some(ref cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
                         on_end("stop");
@@ -578,7 +538,6 @@ impl HeadlessLlmBridge {
                 return Err(ToolLoopError::MaxTurnsExceeded.into());
             }
             Err(e) => {
-                // 清理 TTS 管道
                 if let Some(ref cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
                         on_end("stop");
@@ -599,80 +558,23 @@ impl HeadlessLlmBridge {
         Ok(())
     }
 
-    async fn handle_omni_user_input(
-        &self,
-        client: &mut VoiceServiceClient<Channel>,
-        ctx: CallerContext,
-        audio_data: String,
-        _source: &str,
-    ) -> Result<()> {
-        if Self::OBS_CHAT {
-            info!(
-                event = "headless.omni.user_input",
-                invoker = %ctx.caller_name,
-                uid = %ctx.caller_uid,
-                clid = ctx.caller_id,
-                "omni model: processing audio input"
-            );
-        }
-
-        let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
-        let pending_play = Arc::new(Mutex::new(None));
-        let executor = HeadlessExecutor {
-            bridge: self,
-            ctx: &ctx,
-            pending_play: pending_play.clone(),
-        };
-
-        let callbacks = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks().await?)
-        } else {
-            None
-        };
-
-        let result = match self
-            .llm
-            .run_tool_loop(
-                &mut messages,
-                &tools,
-                &executor,
-                self.config.llm.max_tool_turns,
-                callbacks.as_ref(),
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
-
-        if !result.content.is_empty() {
-            self.send_reply(client, &ctx, &result.content).await?;
-        }
-        Self::execute_pending_play(client, pending_play.lock().await.take()).await;
-        Ok(())
-    }
-
     async fn build_tts_callbacks(&self) -> Result<StreamCallbacks> {
         let speech_provider = self
             .speech_provider
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("TTS enabled but speech provider not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("TTS provider missing"))?;
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint)?.connect().await?;
-
         let (sentence_tx, sentence_rx) = mpsc::channel::<String>(128);
         let (audio_tx, audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
         let trace_id = format!(
-            "tts-stream-{}",
+            "tts-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis()
         );
 
-        // TTS synthesis task: consume sentences, synthesize, produce audio chunks
         let synth_audio_tx = audio_tx.clone();
         let synth_trace = trace_id.clone();
         tokio::spawn(async move {
@@ -690,9 +592,7 @@ impl HeadlessLlmBridge {
                             })
                             .await;
                     }
-                    Err(e) => {
-                        warn!(event = "headless.tts.synthesis_error", error = %e, "tts synthesis failed");
-                    }
+                    Err(e) => warn!(error = %e, "tts synthesis failed"),
                 }
             }
             let _ = synth_audio_tx
@@ -705,22 +605,13 @@ impl HeadlessLlmBridge {
                 .await;
         });
 
-        // gRPC streaming task
         tokio::spawn(async move {
             let mut tts_client = VoiceServiceClient::new(channel);
-            let rsp = tts_client
+            if let Err(e) = tts_client
                 .stream_tts_audio(tonic::Request::new(ReceiverStream::new(audio_rx)))
-                .await;
-            match rsp {
-                Ok(resp) => {
-                    let body = resp.into_inner();
-                    if !body.ok {
-                        warn!("stream_tts_audio rejected: {}", body.message);
-                    }
-                }
-                Err(e) => {
-                    warn!("stream_tts_audio failed: {e}");
-                }
+                .await
+            {
+                warn!("stream_tts_audio failed: {e}");
             }
         });
 
@@ -729,7 +620,6 @@ impl HeadlessLlmBridge {
             Self::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
             Self::STREAM_TTS_MAX_CHARS,
         )));
-
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(sentence_tx)));
 
         let on_text_token_shared = shared_tx.clone();
@@ -741,11 +631,10 @@ impl HeadlessLlmBridge {
             let Ok(tx_guard) = on_text_token_shared.lock() else {
                 return;
             };
-            let Some(ref tx) = *tx_guard else {
-                return;
-            };
-            for segment in chunker_guard.push_token(token) {
-                let _ = tx.try_send(segment);
+            if let Some(ref tx) = *tx_guard {
+                for segment in chunker_guard.push_token(token) {
+                    let _ = tx.try_send(segment);
+                }
             }
         };
 
@@ -797,22 +686,10 @@ impl HeadlessLlmBridge {
         ctx: &CallerContext,
     ) -> (String, String, Vec<serde_json::Value>) {
         let system_prompt = self.prompts.system.content.clone();
-
-        let online_clients: Vec<_> = self
-            .ts_clients
-            .iter()
-            .map(|item| {
-                let c = item.value();
-                json!({
-                    "clid": c.clid,
-                    "nickname": c.nickname,
-                    "uid": c.cldbid,
-                    "groups": c.server_groups,
-                    "channel_id": c.channel_id,
-                })
-            })
-            .collect();
-
+        let online_clients: Vec<_> = self.ts_clients.iter().map(|item| {
+            let c = item.value();
+            json!({ "clid": c.clid, "nickname": c.nickname, "uid": c.cldbid, "groups": c.server_groups, "channel_id": c.channel_id })
+        }).collect();
         let user_ctx = format!(
             "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})\nOnline clients: {}",
             ctx.caller_name,
@@ -822,7 +699,6 @@ impl HeadlessLlmBridge {
             ctx.channel_group_id,
             serde_json::to_string(&online_clients).unwrap_or_default()
         );
-
         let allowed_skills = self
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
@@ -855,14 +731,7 @@ impl HeadlessLlmBridge {
         audio_data: String,
     ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
         let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
-
-        let content = vec![json!({
-            "type": "input_audio",
-            "input_audio": {
-                "data": audio_data
-            }
-        })];
-
+        let content = vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
         let messages = vec![
             json!({"role": "system", "content": format!("{system_prompt}\n\n{user_ctx}")}),
             json!({"role": "user", "content": content}),
