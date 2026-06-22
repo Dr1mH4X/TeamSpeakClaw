@@ -17,7 +17,16 @@
   </a>
 
   <img src="https://img.shields.io/badge/TeamSpeak-2580C3?style=for-the-badge&logo=teamspeak&logoColor=white" alt="TeamSpeak Support">
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/%E2%9A%A0%EF%B8%8F%20%E5%8D%87%E7%BA%A7%E8%AD%A6%E5%91%8A-white?style=for-the-badge&labelColor=red&color=red">
+    <img src="https://img.shields.io/badge/%E2%9A%A0%EF%B8%8F%20%E5%8D%87%E7%BA%A7%E8%AD%A6%E5%91%8A-red?style=for-the-badge&labelColor=red&color=red" alt="升级警告">
+  </picture>
 </div>
+
+> ⚠️ **v0.5.0 以前版本的升级警告**：自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的配置模板重新编写配置文件，**切勿**直接使用旧版配置，否则可能导致程序无法启动或数据异常。
+
+
 
 TeamSpeakClaw 是一个基于 LLM (大语言模型) 的 TeamSpeak 智能助手。
 
