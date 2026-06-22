@@ -28,11 +28,11 @@ use tsbot::voice::v1 as voicev1;
 use voicev1::voice_service_server::VoiceServiceServer;
 
 mod actor;
-mod playback;
-mod service;
-pub mod speech;
 mod event;
+mod playback;
+pub mod speech;
 mod types;
+mod voice_service;
 
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 pub use types::{PersistedVoiceState, SharedStatus};
@@ -55,7 +55,6 @@ pub async fn run(
 
     let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
     let (ts3_notice_tx, ts3_notice_rx) = mpsc::channel::<(i32, u32, String)>(50);
-    let (ts3_cmd_tx, ts3_cmd_rx) = mpsc::channel::<String>(50);
 
     let (events_tx, _events_rx) = broadcast::channel::<voicev1::Event>(512);
 
@@ -70,7 +69,6 @@ pub async fn run(
             ts3_client,
             ts3_audio_rx,
             ts3_notice_rx,
-            ts3_cmd_rx,
             events_tx_clone,
             ts3_shutdown,
             respond_private,
@@ -155,11 +153,10 @@ pub async fn run(
         });
     }
 
-    let svc = service::VoiceServiceImpl::new(
+    let svc = voice_service::VoiceServiceImpl::new(
         Arc::new(Mutex::new(init_status)),
         ts3_audio_tx,
         ts3_notice_tx,
-        ts3_cmd_tx,
         events_tx,
         persist_tx,
         config.bot_respond_to_private,
@@ -175,7 +172,10 @@ pub async fn run(
         .await
         .map_err(|e| anyhow!("grpc listen failed on {addr}: {e}"))?;
 
-        info!("Headless started, voice-service on {}", listener.local_addr()?);
+    info!(
+        "Headless started, voice-service on {}",
+        listener.local_addr()?
+    );
 
     let server = tonic::transport::Server::builder()
         .add_service(VoiceServiceServer::new(svc))

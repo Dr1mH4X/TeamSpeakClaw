@@ -92,10 +92,7 @@ pub async fn run_tool_loop(
     callbacks: Option<&StreamCallbacks>,
 ) -> Result<ToolLoopResult, ToolLoopError> {
     loop {
-        debug!(
-            "Tool loop turn (messages: {})",
-            messages.len()
-        );
+        debug!("Tool loop turn (messages: {})", messages.len());
 
         let acc = accumulate_stream(messages, tools, provider, callbacks).await?;
 
@@ -161,5 +158,4 @@ pub async fn run_tool_loop(
             }));
         }
     }
-
 }

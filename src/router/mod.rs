@@ -1,12 +1,12 @@
-mod voice_router;
 mod nc_router;
 mod ts_router;
 mod unified;
+mod voice_router;
 
-pub use voice_router::VoiceRouter;
 pub use nc_router::NcRouter;
 pub use ts_router::{ClientInfo, EventRouter};
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
+pub use voice_router::VoiceRouter;
 
 use std::sync::Arc;
 
@@ -46,7 +46,10 @@ pub async fn run_routers(
         );
         let nc_future = tokio::spawn(async move { nc_router.run().await });
 
-        info!("Bot ready (clid={}). Listening for TS + NapCat events.", bot_clid);
+        info!(
+            "Bot ready (clid={}). Listening for TS + NapCat events.",
+            bot_clid
+        );
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),
@@ -60,7 +63,10 @@ pub async fn run_routers(
         }
     } else {
         info!("NapCat adapter disabled, running in TeamSpeak-only mode");
-        info!("Bot ready (clid={}). Listening for TeamSpeak events.", adapter.get_bot_clid());
+        info!(
+            "Bot ready (clid={}). Listening for TeamSpeak events.",
+            adapter.get_bot_clid()
+        );
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),

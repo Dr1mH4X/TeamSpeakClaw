@@ -16,7 +16,6 @@ pub async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
     mut audio_rx: mpsc::Receiver<(Vec<u8>, i32)>,
     mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
-    mut cmd_rx: mpsc::Receiver<String>,
     events_tx: broadcast::Sender<voicev1::Event>,
     shutdown_token: CancellationToken,
     bot_respond_to_private: bool,
@@ -115,16 +114,6 @@ pub async fn ts3_actor(
                         &text,
                     ).await {
                         warn!("sendTextMessage failed: {e}");
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            cmd = cmd_rx.recv() => {
-                if let Some(c) = cmd {
-                    if let Err(e) = client.exec_command(&c, 10000).await {
-                        warn!("exec_command failed: {e}");
                     }
                 } else {
                     break;
