@@ -24,7 +24,6 @@ pub struct AclRule {
     pub channel_group_ids: Vec<u32>,
     pub allowed_skills: Vec<String>,
     pub can_target_admins: bool,
-    pub rate_limit_override: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
