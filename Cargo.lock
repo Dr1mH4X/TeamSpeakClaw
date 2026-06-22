@@ -3232,6 +3232,7 @@ dependencies = [
  "unm_types",
  "url",
  "uuid",
+ "winapi",
 ]
 
 [[package]]
