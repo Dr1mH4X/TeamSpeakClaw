@@ -11,9 +11,6 @@ use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use tsproto_packets::packets::OutPacket;
-use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
-
 use crate::adapter::headless::types::SharedStatus;
 
 struct ChildKillOnDrop {
@@ -109,7 +106,7 @@ impl SimpleReverb {
 
 pub async fn playback_loop(
     source_url: String,
-    ts3_audio_tx: tokio::sync::mpsc::Sender<OutPacket>,
+    ts3_audio_tx: tokio::sync::mpsc::Sender<(Vec<u8>, i32)>,
     mut paused_rx: watch::Receiver<bool>,
     cancel: CancellationToken,
     status: Arc<Mutex<SharedStatus>>,
@@ -452,13 +449,7 @@ pub async fn playback_loop(
             .encode_float(&float_buf, &mut opus_out)
             .map_err(|e| anyhow!("opus encode failed: {e}"))?;
 
-        let packet = OutAudio::new(&AudioData::C2S {
-            id: 0,
-            codec: CodecType::OpusMusic,
-            data: &opus_out[..len],
-        });
-
-        let _ = ts3_audio_tx.send(packet).await;
+        let _ = ts3_audio_tx.send((opus_out[..len].to_vec(), 5)).await;
 
         if now >= diag_next {
             diag_next = now + Duration::from_secs(5);
@@ -490,12 +481,7 @@ pub async fn playback_loop(
         }
     }
 
-    let eos = OutAudio::new(&AudioData::C2S {
-        id: 0,
-        codec: CodecType::OpusMusic,
-        data: &[],
-    });
-    let _ = ts3_audio_tx.send(eos).await;
+    let _ = ts3_audio_tx.send((vec![], 5)).await;
 
     if let Some(mut c) = child.child.take() {
         let _ = c.start_kill();

@@ -1,4 +1,3 @@
-use crate::adapter::command::{cmd_poke, cmd_send_text};
 use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -31,7 +30,7 @@ impl Skill for PokeClient {
             .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
-        ctx.adapter.send_raw(&cmd_poke(clid, msg)).await?;
+        ctx.adapter.poke(clid, msg).await?;
         Ok(json!({"status": "ok", "message": "Poke sent"}))
     }
 
@@ -56,7 +55,7 @@ impl Skill for PokeClient {
                     .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?
                     as u32;
 
-                ts_adapter.send_raw(&cmd_poke(clid, msg)).await?;
+                ts_adapter.poke(clid, msg).await?;
 
                 Ok(json!({
                     "status": "ok",
@@ -146,7 +145,7 @@ impl Skill for SendMessage {
         };
 
         ctx.adapter
-            .send_raw(&cmd_send_text(targetmode, target, msg))
+            .send_text_message(targetmode, target, msg)
             .await?;
 
         Ok(json!({
@@ -252,7 +251,7 @@ impl Skill for SendMessage {
                         };
 
                         ts_adapter
-                            .send_raw(&cmd_send_text(targetmode, target_id, &prefixed_msg))
+                            .send_text_message(targetmode, target_id, &prefixed_msg)
                             .await?;
 
                         // 结果返回给 NC

@@ -30,9 +30,10 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
         }
         if let Ok(meta) = fs::metadata(&path) {
             if let Ok(modified) = meta.modified() {
-                let age = now.signed_duration_since::<chrono::Local>(
-                    chrono::DateTime::<chrono::Local>::from(modified),
-                );
+                let age =
+                    now.signed_duration_since::<chrono::Local>(
+                        chrono::DateTime::<chrono::Local>::from(modified),
+                    );
                 if age.num_days() >= max_days as i64 {
                     let _ = fs::remove_file(&path);
                 }
@@ -42,15 +43,19 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
 }
 
 pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) -> WorkerGuard {
-    let console_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(console_level))
-        .add_directive("russh::client=off".parse().unwrap())
-        .add_directive("russh=off".parse().unwrap())
-        .add_directive("tsclientlib=off".parse().unwrap())
-        .add_directive("tsproto=off".parse().unwrap())
-        .add_directive("tsproto-packets=off".parse().unwrap())
-        .add_directive("ts-bookkeeping=off".parse().unwrap())
-        .add_directive("h2=off".parse().unwrap());
+    let noise_directives = [
+        "h2=off",
+        "hyper::client::connect=off",
+        "hyper::proto::h2=off",
+        "hyper_util::client=off",
+        "reqwest::connect=off",
+        "tower::buffer::worker=off",
+    ];
+
+    let console_filter = noise_directives.iter().fold(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(console_level)),
+        |filter, directive| filter.add_directive(directive.parse().unwrap()),
+    );
 
     let console_layer = fmt::layer()
         .with_target(true)
@@ -70,7 +75,11 @@ pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) ->
     let file_appender = DailyFileAppender::new(log_dir.clone(), "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let file_filter = EnvFilter::new(file_level).add_directive("h2=off".parse().unwrap());
+    let file_filter = noise_directives
+        .iter()
+        .fold(EnvFilter::new(file_level), |filter, directive| {
+            filter.add_directive(directive.parse().unwrap())
+        });
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking)

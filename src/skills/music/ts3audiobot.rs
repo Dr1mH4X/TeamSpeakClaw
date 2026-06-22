@@ -1,5 +1,4 @@
-use crate::adapter::command::cmd_send_text;
-use crate::adapter::serverquery::event::{TextMessageTarget, TsEvent};
+use crate::adapter::{TextMessageTarget, TsEvent};
 use crate::skills::ExecutionContext;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -86,7 +85,7 @@ pub(crate) async fn execute(
     let mut ts_rx = ctx.adapter.subscribe();
 
     ctx.adapter
-        .send_raw(&cmd_send_text(1, audiobot.clid, &bot_cmd))
+        .send_text_message(1, audiobot.clid, &bot_cmd)
         .await?;
 
     let reply = tokio::time::timeout(Duration::from_secs(10), async {

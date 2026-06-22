@@ -387,7 +387,11 @@ async fn next(cfg: &MusicNcmApiConfig) -> Result<Value> {
 
     let (audio_url, display_title, song_id) = if song.is_url {
         if let Some(cached) = &song.resolved_url {
-            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+            (
+                cached.clone(),
+                format_title(&song.name, &song.artist),
+                song.id.clone(),
+            )
         } else {
             let (url, title, channel) = resolve_url(&song.id, cfg).await?;
             let display = format_title(&title, &channel);
@@ -465,7 +469,11 @@ async fn previous(cfg: &MusicNcmApiConfig) -> Result<Value> {
 
     let (audio_url, display_title, song_id) = if song.is_url {
         if let Some(cached) = &song.resolved_url {
-            (cached.clone(), format_title(&song.name, &song.artist), song.id.clone())
+            (
+                cached.clone(),
+                format_title(&song.name, &song.artist),
+                song.id.clone(),
+            )
         } else {
             let (url, title, channel) = resolve_url(&song.id, cfg).await?;
             let display = format_title(&title, &channel);
@@ -689,7 +697,14 @@ async fn resolve_url(url: &str, cfg: &MusicNcmApiConfig) -> Result<(String, Stri
     let meta_output = timeout(
         resolve_timeout,
         tokio::process::Command::new(yt)
-            .args(["--print", "title", "--print", "channel", "--skip-download", url])
+            .args([
+                "--print",
+                "title",
+                "--print",
+                "channel",
+                "--skip-download",
+                url,
+            ])
             .output(),
     )
     .await
