@@ -1,11 +1,11 @@
 mod headless_bridge;
 mod nc_router;
-mod sq_router;
+mod ts_router;
 mod unified;
 
 pub use headless_bridge::HeadlessLlmBridge;
 pub use nc_router::NcRouter;
-pub use sq_router::{ClientInfo, EventRouter};
+pub use ts_router::{ClientInfo, EventRouter};
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 
 use std::sync::Arc;
@@ -33,6 +33,7 @@ pub async fn run_routers(
     let sigterm = wait_for_sigterm();
 
     if let Some(nc_adapter) = nc_adapter {
+        let bot_clid = adapter.get_bot_clid();
         let nc_router = NcRouter::new_with_ts(
             config,
             prompts,
@@ -45,32 +46,28 @@ pub async fn run_routers(
         );
         let nc_future = tokio::spawn(async move { nc_router.run().await });
 
-        info!("Bot ready. Listening for TS + NapCat events.");
+        info!("Bot ready (clid={}). Listening for TS + NapCat events.", bot_clid);
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),
             res = nc_future => map_nc_router_result(res),
             _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
             _ = sigterm => {
-                info!("Received SIGTERM, shutting down...");
                 Ok(())
             }
         }
     } else {
         info!("NapCat adapter disabled, running in TeamSpeak-only mode");
-        info!("Bot ready. Listening for TeamSpeak events.");
+        info!("Bot ready (clid={}). Listening for TeamSpeak events.", adapter.get_bot_clid());
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),
             _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl+C, shutting down...");
                 Ok(())
             }
             _ = sigterm => {
-                info!("Received SIGTERM, shutting down...");
                 Ok(())
             }
         }

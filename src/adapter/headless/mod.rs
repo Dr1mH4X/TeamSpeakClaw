@@ -10,8 +10,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use tsproto_packets::packets::{OutCommand, OutPacket};
-
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -33,46 +31,51 @@ mod actor;
 mod playback;
 mod service;
 pub mod speech;
+mod event;
 mod types;
 
+pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 pub use types::{PersistedVoiceState, SharedStatus};
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 
 #[derive(Clone)]
 pub struct HeadlessRuntimeConfig {
-    pub ts3_host: String,
-    pub ts3_port: u16,
-    pub nickname: String,
-    pub server_password: String,
-    pub channel_password: String,
-    pub channel_path: String,
-    pub channel_id: String,
     pub bot_respond_to_private: bool,
     pub bot_default_reply_mode: String,
     pub bot_trigger_prefixes: Vec<String>,
 }
 
-pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> Result<()> {
+pub async fn run(
+    client: Arc<tsclient_rs::Client>,
+    config: HeadlessRuntimeConfig,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let addr = INTERNAL_GRPC_ADDR.to_string();
 
-    let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<OutPacket>(200);
+    let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
     let (ts3_notice_tx, ts3_notice_rx) = mpsc::channel::<(i32, u32, String)>(50);
-    let (ts3_cmd_tx, ts3_cmd_rx) = mpsc::channel::<OutCommand>(50);
+    let (ts3_cmd_tx, ts3_cmd_rx) = mpsc::channel::<String>(50);
 
     let (events_tx, _events_rx) = broadcast::channel::<voicev1::Event>(512);
 
-    let ts3_config = config.clone();
+    let ts3_client = client.clone();
     let events_tx_clone = events_tx.clone();
     let ts3_shutdown = shutdown.clone();
+    let respond_private = config.bot_respond_to_private;
+    let trigger_prefixes = config.bot_trigger_prefixes.clone();
+    let default_reply = config.bot_default_reply_mode.clone();
     let ts3_task = tokio::spawn(async move {
         if let Err(e) = actor::ts3_actor(
+            ts3_client,
             ts3_audio_rx,
             ts3_notice_rx,
             ts3_cmd_rx,
             events_tx_clone,
             ts3_shutdown,
-            ts3_config,
+            respond_private,
+            trigger_prefixes,
+            default_reply,
         )
         .await
         {
@@ -172,7 +175,7 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
         .await
         .map_err(|e| anyhow!("grpc listen failed on {addr}: {e}"))?;
 
-    info!("voice-service listening on {}", listener.local_addr()?);
+        info!("Headless started, voice-service on {}", listener.local_addr()?);
 
     let server = tonic::transport::Server::builder()
         .add_service(VoiceServiceServer::new(svc))
@@ -184,16 +187,13 @@ pub async fn run(config: HeadlessRuntimeConfig, shutdown: CancellationToken) -> 
                 error!("gRPC server failed: {e:?}");
             }
         }
-        _ = shutdown.cancelled() => {
-            info!("Voice service shutting down...");
-        }
+        _ = shutdown.cancelled() => {}
     }
 
     if let Err(e) = ts3_task.await {
         error!("Failed to wait for TS3 task: {e}");
     }
 
-    info!("Voice service shutdown complete");
     Ok(())
 }
 
@@ -204,15 +204,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    fn disabled() -> Self {
-        Self {
-            shutdown: CancellationToken::new(),
-            service_handle: None,
-            bridge_handle: None,
-        }
-    }
-
-    pub fn start_if_enabled(
+    pub fn start(
         config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
         gate: Arc<PermissionGate>,
@@ -221,32 +213,30 @@ impl Runtime {
         ts_adapter: Arc<crate::adapter::TsAdapter>,
         ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
-        if !config.headless.enabled {
-            return Self::disabled();
+        let voice_enabled = config.headless.stt.enabled || config.headless.tts.enabled;
+        if !voice_enabled {
+            info!("headless: voice disabled (stt/tts not enabled), management-only mode");
+            return Self {
+                shutdown: CancellationToken::new(),
+                service_handle: None,
+                bridge_handle: None,
+            };
         }
 
         let shutdown = CancellationToken::new();
         let hl_runtime = HeadlessRuntimeConfig {
-            ts3_host: config.headless.ts3_host.clone(),
-            ts3_port: config.headless.ts3_port,
-            nickname: config.bot.nickname.clone(),
-            server_password: config.headless.server_password.clone(),
-            channel_password: config.headless.channel_password.clone(),
-            channel_path: config.headless.channel_path.clone(),
-            channel_id: config.headless.channel_id.clone(),
             bot_respond_to_private: config.bot.respond_to_private,
             bot_default_reply_mode: config.bot.default_reply_mode.clone(),
             bot_trigger_prefixes: config.bot.trigger_prefixes.clone(),
         };
 
         let shutdown_for_service = shutdown.clone();
+        let ts_client = ts_adapter.get_client().clone();
         let service_handle = Some(tokio::spawn(async move {
-            if let Err(e) = run(hl_runtime, shutdown_for_service).await {
+            if let Err(e) = run(ts_client, hl_runtime, shutdown_for_service).await {
                 error!("headless service failed: {}", e);
             }
         }));
-
-        info!("Headless voice service enabled");
 
         let bridge_config = config.clone();
         let bridge_prompts = prompts.clone();
@@ -290,15 +280,14 @@ impl Runtime {
     }
 
     pub async fn shutdown(self) {
+        info!("headless: shutting down");
         self.shutdown.cancel();
 
         if let Some(handle) = self.bridge_handle {
-            info!("Shutting down headless LLM bridge...");
             let _ = handle.await;
         }
 
         if let Some(handle) = self.service_handle {
-            info!("Shutting down headless voice service...");
             let _ = handle.await;
         }
     }

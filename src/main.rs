@@ -40,7 +40,6 @@ async fn main() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter.set_nickname(&config.bot.nickname).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
     let clients = Arc::new(DashMap::new());
@@ -56,7 +55,7 @@ async fn main() -> Result<()> {
         nc_adapter.clone(),
     );
 
-    let headless = adapter::headless::Runtime::start_if_enabled(
+    let headless = adapter::headless::Runtime::start(
         config.clone(),
         prompts.clone(),
         gate.clone(),
