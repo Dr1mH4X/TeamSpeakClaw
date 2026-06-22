@@ -181,7 +181,7 @@ jobs:
 
   docker:
     name: Build and Push Docker Image
-    needs: [meta, build]
+    needs: [meta]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -189,21 +189,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Download linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: artifacts-linux-amd64
-          path: ./docker-artifact
-
-      - name: Prepare binary for Docker
-        shell: bash
-        run: |
-          ARTIFACT_PATH=$(find ./docker-artifact -name "TeamSpeakClaw-*" -type f)
-          tar -xzf "$ARTIFACT_PATH" -C ./docker-artifact
-          cp ./docker-artifact/teamspeakclaw ./teamspeakclaw
-          cp -r ./docker-artifact/config ./config-docker
-          chmod +x ./teamspeakclaw
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

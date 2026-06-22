@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/TeamSpeak-2580C3?style=for-the-badge&logo=teamspeak&logoColor=white" alt="TeamSpeak Support">
 </div>
 
-> ⚠️ **v0.5.0 以前版本的升级警告**：自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。
+> ⚠️ 自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。
 
 
 
