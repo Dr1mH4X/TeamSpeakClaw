@@ -57,20 +57,22 @@ pub(crate) async fn execute(
         .find(|c| c.nickname.eq_ignore_ascii_case(target_name))
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
 
-    let _guard = TSMUSICBOT_LOCK.lock().await;
+    let mut ts_rx;
+    {
+        let _guard = TSMUSICBOT_LOCK.lock().await;
+        ts_rx = ctx.adapter.subscribe();
 
-    let mut ts_rx = ctx.adapter.subscribe();
-
-    ctx.adapter
-        .send_text_message(1, audiobot.clid, &bot_cmd)
-        .await?;
+        ctx.adapter
+            .send_text_message(1, audiobot.clid, &bot_cmd)
+            .await?;
+    }
 
     let reply = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match ts_rx.recv().await {
                 Ok(TsEvent::TextMessage(msg))
                     if msg.invoker_name.eq_ignore_ascii_case(target_name)
-                        && msg.target_mode == TextMessageTarget::Private =>
+                        && msg.target_mode == TextMessageTarget::Channel =>
                 {
                     return msg.message;
                 }
@@ -84,12 +86,18 @@ pub(crate) async fn execute(
     })
     .await;
 
-    drop(_guard);
-
     match reply {
         Ok(content) if !content.is_empty() => {
             info!("TSMusicBot replied: {content}");
             Ok(content.into())
+        }
+        Err(_) => {
+            debug!("Timed out waiting for TSMusicBot reply");
+            Ok(json!({
+                "status": "timeout",
+                "sent_to": "TSMusicBot",
+                "command": bot_cmd
+            }))
         }
         _ => Ok(json!({
             "status": "ok",
