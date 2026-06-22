@@ -21,6 +21,7 @@ pub struct ClientInfo {
     pub nickname: String,
     pub server_groups: Vec<u32>,
     pub channel_group_id: u32,
+    pub channel_id: u32,
 }
 
 struct SqExecutor<'a> {
@@ -95,6 +96,7 @@ impl EventRouter {
                         client.client_nickname,
                         client.client_server_groups,
                         client.client_channel_group_id,
+                        client.channel_id,
                     );
                 }
                 info!(
@@ -153,6 +155,7 @@ impl EventRouter {
                         e.client_nickname,
                         e.client_server_groups,
                         e.client_channel_group_id,
+                        e.channel_id,
                     );
                 }
                 TsEvent::ClientLeftView(e) => {
@@ -170,6 +173,7 @@ impl EventRouter {
         nickname: String,
         server_groups: Vec<u32>,
         channel_group_id: u32,
+        channel_id: u32,
     ) {
         self.clients.insert(
             clid,
@@ -179,6 +183,7 @@ impl EventRouter {
                 nickname,
                 server_groups,
                 channel_group_id,
+                channel_id,
             },
         );
     }
