@@ -41,50 +41,44 @@ src/
 ├── main.rs                  # 入口：初始化组件，启动事件循环
 ├── cli.rs                   # 命令行参数解析
 ├── log.rs                   # 日志初始化
-├── router.rs                # 模块重导出（→ router/）
 ├── router/
-│   ├── sq_router.rs         # TeamSpeak 事件路由
+│   ├── mod.rs               # 路由器编排与信号处理
+│   ├── ts_router.rs         # TeamSpeak 事件路由
 │   ├── nc_router.rs         # NapCat/QQ 事件路由
-│   ├── unified.rs           # 统一事件模型（跨平台）
-│   └── headless_bridge.rs   # Headless 语音桥接 LLM 路由
+│   ├── voice_router.rs      # Headless 语音桥接 LLM 路由
+│   └── unified.rs           # 统一事件模型（跨平台）
 ├── adapter/
-│   ├── mod.rs
-│   ├── serverquery/         # TeamSpeak ServerQuery 适配器
-│   │   ├── mod.rs
-│   │   ├── connection.rs    # TCP/SSH 连接管理
-│   │   ├── command.rs       # 命令构建
-│   │   └── event.rs         # 事件解析
+│   ├── mod.rs               # 重导出 TsAdapter/TsEvent（来自 headless）
 │   ├── napcat/              # NapCat OneBot 11 适配器
 │   │   ├── mod.rs
 │   │   ├── ws.rs            # WebSocket 连接与重连
 │   │   ├── api.rs           # OneBot API action 定义
 │   │   ├── event.rs         # 事件解析
 │   │   └── types.rs         # 消息段与响应类型
-│   └── headless/            # Headless 语音服务
-│       ├── mod.rs
-│       ├── service.rs        # 语音服务主逻辑
-│       ├── actor.rs          # 语音角色管理
-│       ├── playback.rs       # 播放控制
-│       ├── speech.rs         # STT/TTS 处理
-│       ├── serverquery.rs    # Headless 使用的 ServerQuery 客户端
-│       └── types.rs         # 类型定义
+│   └── headless/            # Headless 语音服务 + TsAdapter
+│       ├── mod.rs           # Runtime 启动、gRPC 服务
+│       ├── actor.rs         # TeamSpeak 客户端 Actor
+│       ├── event.rs         # TsAdapter/TsEvent（tsclient-rs 封装）
+│       ├── speech.rs        # STT/TTS 处理
+│       ├── types.rs         # 类型定义
+│       └── voice_service.rs # gRPC 服务端实现
 ├── config/
 │   ├── mod.rs               # AppConfig 聚合
-│   ├── serverquery.rs       # ServerQuery 配置
-│   ├── napcat.rs            # NapCat 配置
-│   ├── headless.rs          # Headless 语音服务配置
-│   ├── bot.rs               # 机器人行为配置
-│   ├── llm.rs               # LLM 配置
-│   ├── music_backend.rs     # 音乐后端配置
 │   ├── acl.rs               # 权限规则配置
+│   ├── bot.rs               # 机器人行为配置
+│   ├── headless.rs          # Headless 语音服务配置
+│   ├── llm.rs               # LLM 配置
 │   ├── logging.rs           # 日志配置
-│   ├── rate_limit.rs        # 限流配置
-│   └── prompts.rs           # 提示词与错误消息
+│   ├── music_backend.rs     # 音乐后端配置
+│   ├── napcat.rs            # NapCat 配置
+│   ├── prompts.rs           # 提示词与错误消息
+│   └── rate_limit.rs        # 限流配置
 ├── llm/
 │   ├── mod.rs
 │   ├── engine.rs            # LLM 引擎封装
 │   ├── provider.rs          # 提供者 trait 与 OpenAI 实现
-│   └── context.rs           # 上下文窗口管理
+│   ├── context.rs           # 上下文窗口管理
+│   └── tool_loop.rs         # 工具循环执行
 ├── permission/
 │   ├── mod.rs
 │   └── gate.rs              # 权限门控逻辑
@@ -93,7 +87,11 @@ src/
     ├── communication.rs     # poke_client、send_message
     ├── information.rs       # get_client_list、get_client_info
     ├── moderation.rs        # kick_client、ban_client、move_client
-    └── music.rs             # music_control（双后端 + 跨平台）
+    └── music/               # music_control（三后端 + 跨平台）
+        ├── mod.rs
+        ├── ts3audiobot.rs   # TS3AudioBot 后端
+        ├── tsbot_http.rs    # NeteaseTSBot HTTP 后端
+        └── tsmusicbot.rs    # TSMusicBot 后端
 ```
 
 ### 数据流
@@ -101,45 +99,47 @@ src/
 **TeamSpeak 路径**：
 
 ```
-用户消息 → TsAdapter (TCP/SSH) → SqRouter → LlmEngine
-                                                 ↓
-                                            工具调用请求
-                                                 ↓
-                                     PermissionGate (权限检查)
-                                                 ↓
-                                     SkillRegistry → Skill.execute()
-                                                 ↓
-                                     执行结果 → LlmEngine → TsAdapter → 回复用户
+用户消息 → TsAdapter (tsclient-rs) → EventRouter → LlmEngine
+                                                  ↓
+                                             工具调用请求
+                                                  ↓
+                                      PermissionGate (权限检查)
+                                                  ↓
+                                      SkillRegistry → Skill.execute()
+                                                  ↓
+                                      执行结果 → LlmEngine → TsAdapter → 回复用户
 ```
 
 **NapCat / QQ 路径**：
 
 ```
 用户消息 → NapCatAdapter (WebSocket) → NcRouter → LlmEngine
-                                                       ↓
-                                                  工具调用请求
-                                                       ↓
-                                           PermissionGate (权限检查)
-                                                       ↓
-                                     SkillRegistry → Skill.execute_unified()
-                                           ↓              ↓
-                                     NC 原生执行    转发到 TS 执行
-                                           ↓              ↓
-                                     回复 NC 用户    回复 NC 用户
-```
-
-**Headless 语音路径**：
-
-```
-语音输入 → STT (语音转文字) → HeadlessService → HeadlessLlmBridge
                                                         ↓
                                                    工具调用请求
                                                         ↓
                                             PermissionGate (权限检查)
                                                         ↓
-                                          SkillRegistry → Skill.execute()
-                                                        ↓
-                                            执行结果 → LlmEngine → TTS → 语音输出
+                                      SkillRegistry → Skill.execute_unified()
+                                            ↓              ↓
+                                      NC 原生执行    转发到 TS 执行
+                                            ↓              ↓
+                                      回复 NC 用户    回复 NC 用户 (中转到 TS)
+```
+
+**Headless 语音路径**：
+
+```
+语音输入 → opus 音频流 → VoiceRouter
+  ├── omni_model=true  → 多模态 LLM（音频直接输入）
+  └── omni_model=false → OpusSttPipeline → STT → 文本
+                                                         ↓
+                                                    工具调用请求
+                                                         ↓
+                                             PermissionGate (权限检查)
+                                                         ↓
+                                           SkillRegistry → Skill.execute_unified()
+                                                         ↓
+                                             执行结果 → LlmEngine → TTS → 语音输出
 ```
 
 ### 跨平台行为矩阵
@@ -153,41 +153,27 @@ src/
 | `move_client` | ✅ TS 执行 | ✅ 转发到 TS 执行 | 不适用 | ✅ TS 执行 |
 | `get_client_list` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 | ✅ TS 执行 |
 | `get_client_info` | ✅ TS 执行 | ✅ 查询 TS 在线缓存并回传 | 不适用 | ✅ TS 执行 |
-| `music_control` | ✅ TS 执行 | ✅ NC 请求转发到 TS，等待 TS3AudioBot 实际回复后回传 | 不适用 | ✅ TS 执行 |
+| `music_control` | ✅ TS 执行（三后端） | ✅ NC 请求转发到 TS，等待回复后回传 | 不适用 | ✅ TS 执行 |
 
 说明：
 - NC 侧统一执行遵循"先 `execute_unified`，失败再回退 `execute_nc`"。
 - TS 侧统一执行遵循"先 `execute_unified`，失败回退 `execute`"。
-- Headless 模式通过 `HeadlessLlmBridge` 桥接，复用 TS 的执行上下文。
+- Headless 模式通过 `VoiceRouter` 桥接，复用 TS 的执行上下文。
 - NC 权限通过 ACL 虚拟组映射（`9000~9003`）实现，详见配置文档。
 
 ## 核心模块详解
 
 ### adapter — 通信适配器
 
-#### TeamSpeak 适配器 (`adapter/serverquery/`)
+#### TeamSpeak 适配器 (`adapter/headless/event.rs`)
 
-负责与 TeamSpeak 服务器的底层通信。
+封装 tsclient-rs 库，对外提供统一的 `TsAdapter` 接口。
 
-**核心结构**：`src/adapter/serverquery/connection.rs`
+**核心结构**：`src/adapter/headless/event.rs`
 
-```rust
-pub struct TsAdapter {
-    writer: Mutex<tokio::io::WriteHalf<TsStream>>,
-    event_tx: broadcast::Sender<TsEvent>,
-    bot_clid: AtomicU32,
-    query_tx: mpsc::Sender<String>,
-    query_active: AtomicBool,
-    include_event_lines_active: AtomicBool,
-    query_lock: Mutex<()>,
-}
-```
+**连接方式**：通过 tsclient-rs 内部处理，配置在 `[headless]` 区段（`server_address`、`server_port`、`server_password` 等）。
 
-**连接方式**：
-- TCP（默认）：`method = "tcp"`
-- SSH：`method = "ssh"`
-
-**事件类型**：`src/adapter/serverquery/event.rs`
+**事件类型**：`src/adapter/headless/event.rs`
 
 | 事件 | 说明 |
 | --- | --- |
@@ -223,15 +209,17 @@ pub struct NapCatAdapter {
 
 #### Headless 语音服务 (`adapter/headless/`)
 
-提供无界面语音交互能力，集成 STT（语音转文字）和 TTS（文字转语音）。
+提供无界面语音交互能力，通过 gRPC 与 TeamSpeak 客户端通信，集成 STT 和 TTS。
 
 **核心组件**：
-- `service.rs` — 语音服务主逻辑，管理语音连接和音频流
-- `actor.rs` — 语音角色管理，处理语音客户端的状态
-- `playback.rs` — 播放控制，管理音频播放队列
-- `speech.rs` — STT/TTS 处理，调用外部语音服务 API
-- `serverquery.rs` — Headless 专用的 ServerQuery 客户端
+- `mod.rs` — `Runtime::start()` 启动 gRPC 服务 + VoiceRouter 桥梁
+- `actor.rs` — tsclient-rs TeamSpeak 客户端对外接口，处理音频/通知/事件
+- `event.rs` — `TsAdapter` / `TsEvent` 封装（与 tsclient-rs 解耦）
+- `speech.rs` — STT/TTS 处理，Opus 音频流水线
 - `types.rs` — 类型定义
+- `voice_service.rs` — gRPC `VoiceService` 服务端实现
+
+**注意**：TsAdapter 不直接管理 TCP/SSH 连接——连接由 tsclient-rs 内部处理。
 
 **配置**：通过 `settings.toml` 的 `[headless]`、`[headless.stt]`、`[headless.tts]` 区段配置。
 
@@ -342,9 +330,9 @@ pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, ta
 | `NapCatGroup { group_id, at_user_id }` | QQ 群聊回复 |
 | `Headless { target_mode, target_client_id }` | Headless 回复 |
 
-#### SqRouter（TeamSpeak）
+#### EventRouter（TeamSpeak）
 
-`src/router/sq_router.rs` — 处理 TeamSpeak 文本消息事件。
+`src/router/ts_router.rs` — 处理 TeamSpeak 文本消息事件。
 
 消息处理流程：
 1. 过滤自身消息
@@ -360,19 +348,22 @@ pub fn can_target(&self, caller_groups: &[u32], caller_channel_group_id: u32, ta
 
 `src/router/nc_router.rs` — 处理 NapCat 私聊和群消息事件。
 
-与 SqRouter 的关键差异：
+与 EventRouter 的关键差异：
 - 拥有 `ts_adapter` 和 `ts_clients`，可构造 `UnifiedExecutionContext::from_nc()` 实现跨平台工具调用
 - NC 用户的权限通过虚拟组 ID（`9000-9003`）映射
 
-#### HeadlessLlmBridge（`router/headless_bridge.rs`）
+#### VoiceRouter（`router/voice_router.rs`）
 
-`src/router/headless_bridge.rs` — 连接 Headless 语音服务与 LLM 引擎的桥梁。
+`src/router/voice_router.rs` — 连接 Headless gRPC 服务与 LLM 引擎的桥梁，处理语音事件。
 
 处理流程：
-1. 从 Headless 服务接收 STT 转换的文本
-2. 构造 `UnifiedInboundEvent::from_headless()`
-3. 执行 LLM 调用和工具执行
-4. 将回复文本通过 TTS 转换为语音输出
+1. 通过 gRPC 流订阅 Headless 事件（聊天/音频）
+2. 音频事件分流：
+   - `omni_model=true` → 直接送多模态 LLM（`handle_omni_audio_event`）
+   - `omni_model=false` → Opus 解码 → STT → 文本 LLM（`handle_audio_event`）
+3. 聊天事件直接送 LLM
+4. TTS 回调：LLM 流式输出时实时合成语音并推送
+5. 音乐机器人音频（`musicbot_name`）自动过滤，不送入 STT
 
 ## 技能系统开发
 
@@ -412,7 +403,7 @@ pub trait Skill: Send + Sync {
 
 ### ExecutionContext
 
-TeamSpeak 技能执行时的上下文：`src/skills/mod.rs:31-41`
+TeamSpeak 技能执行时的上下文：`src/skills/mod.rs:31-40`
 
 ```rust
 pub struct ExecutionContext<'a> {
@@ -424,29 +415,27 @@ pub struct ExecutionContext<'a> {
     pub caller_channel_group_id: u32,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
 ### NcExecutionContext
 
-NapCat 技能执行时的上下文：`src/skills/mod.rs:47-55`
+NapCat 技能执行时的上下文：`src/skills/mod.rs:46-52`
 
 ```rust
-pub struct NcExecutionContext<'a> {
+pub struct NcExecutionContext {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
     pub caller_name: String,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
 ### UnifiedExecutionContext
 
-跨平台统一上下文，由 `from_ts()` 或 `from_nc()` 构建，通过 `with_cross_adapters()` 注入对端适配器：`src/skills/mod.rs:61-75`
+跨平台统一上下文，由 `from_ts()` 或 `from_nc()` 构建，通过 `with_cross_adapters()` 注入对端适配器：`src/skills/mod.rs:59-72`
 
 ```rust
 pub struct UnifiedExecutionContext<'a> {
@@ -462,7 +451,6 @@ pub struct UnifiedExecutionContext<'a> {
     pub nc_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
-    pub error_prompts: &'a ErrorPrompts,
 }
 ```
 
@@ -585,7 +573,7 @@ can_target_admins = false
 
 1. **命名规范**：使用 `snake_case`，如 `kick_client`、`get_client_list`
 2. **参数验证**：在 `execute` 中验证必填参数
-3. **错误处理**：返回有意义的错误消息，使用 `ctx.error_prompts` 模板
+3. **错误处理**：返回有意义的错误消息
 4. **权限检查**：使用 `ctx.gate.can_target()` 检查操作权限
 5. **返回值**：返回 JSON 对象，包含 `status: "ok"` 及执行结果
 6. **跨平台**：实现 `execute_unified()`，使用 `ctx.to_ts_ctx()?` 一行还原 TS 上下文
@@ -601,7 +589,7 @@ can_target_admins = false
 | `move_client` | `moderation.rs` | 移动用户到指定频道 |
 | `get_client_list` | `information.rs` | 获取在线用户列表 |
 | `get_client_info` | `information.rs` | 获取用户详细信息 |
-| `music_control` | `music.rs` | 音乐控制（双后端 + 跨平台 + Headless 支持） |
+| `music_control` | `music/` | 音乐控制（ts3audiobot / tsmusicbot / tsbot_backend 三后端 + 跨平台 + Headless 支持） |
 
 ## 权限系统
 
