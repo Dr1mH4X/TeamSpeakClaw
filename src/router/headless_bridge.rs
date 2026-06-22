@@ -808,6 +808,7 @@ impl HeadlessLlmBridge {
                     "nickname": c.nickname,
                     "uid": c.cldbid,
                     "groups": c.server_groups,
+                    "channel_id": c.channel_id,
                 })
             })
             .collect();

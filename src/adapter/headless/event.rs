@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tsclient_rs;
 
@@ -100,7 +100,12 @@ impl TsAdapter {
                         client_nickname: info.nickname.clone(),
                         client_server_groups: groups,
                         client_channel_group_id: 0,
+                        channel_id: info.channel_id as u32,
                     }));
+                    debug!(
+                        "Client entered view: clid={}, nickname={}, channel_id={}",
+                        info.id, info.nickname, info.channel_id
+                    );
                 }
             }));
         }
@@ -284,12 +289,13 @@ impl TsAdapter {
                     .filter_map(|g| g.parse().ok())
                     .collect();
                 ClientEnterEvent {
-                    clid: c.id as u32,
-                    cldbid: 0,
-                    client_nickname: c.nickname,
-                    client_server_groups: groups,
-                    client_channel_group_id: 0,
-                }
+                        clid: c.id as u32,
+                        cldbid: 0,
+                        client_nickname: c.nickname,
+                        client_server_groups: groups,
+                        client_channel_group_id: 0,
+                        channel_id: c.channel_id as u32,
+                    }
             })
             .collect())
     }
@@ -340,6 +346,7 @@ pub struct ClientEnterEvent {
     pub client_nickname: String,
     pub client_server_groups: Vec<u32>,
     pub client_channel_group_id: u32,
+    pub channel_id: u32,
 }
 
 #[derive(Debug, Clone)]
