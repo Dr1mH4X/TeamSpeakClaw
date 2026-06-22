@@ -610,3 +610,22 @@ fn count_cjk_chars(input: &str) -> usize {
         })
         .count()
 }
+
+pub fn is_speakable(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if count_cjk_chars(text) > 0 {
+        return true;
+    }
+    let total = text.chars().count();
+    if total <= 3 {
+        return true;
+    }
+    let garbled_chars = text
+        .chars()
+        .filter(|c| matches!(c, '+' | '/' | '='))
+        .count();
+    garbled_chars == 0 || total <= 8
+}
