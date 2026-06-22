@@ -11,7 +11,7 @@
 ## 开发提醒
 
 - 修改 `headless_bridge.rs` 的音频/STT 逻辑时，注意 **多模态模型 (`omni_model`)** 和 **纯文本模型** 走不同代码路径：`handle_omni_audio_event` / `handle_audio_event`，需两处同步修改
-- `music_backend.ignore_stt_playing` 在 `headless_bridge.rs` 的 `handle_audio_event` 中**统一拦截**（omni 路径之前），一处修改覆盖两种模型
+- `music_backend.musicbot_name` 用于过滤音乐机器人音频（不送入 STT），在 `voice_router.rs` 的 `handle_audio_event` 中拦截
 
 ## 项目架构
 
