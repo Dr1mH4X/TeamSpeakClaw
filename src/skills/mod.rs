@@ -196,7 +196,7 @@ impl SkillRegistry {
         registry.register(Box::new(GetClientList));
         registry.register(Box::new(GetClientInfo));
         registry.register(Box::new(MusicControl::new(music_backend)));
-        info!("已注册技能: {:?}", registry.list_skills());
+        info!("Skills registered: {:?}", registry.list_skills());
         registry
     }
 

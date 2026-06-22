@@ -1,15 +1,13 @@
-use async_trait::async_trait;
-
-use crate::adapter::command::cmd_send_text;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, ToolLoopError};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -22,6 +20,7 @@ pub struct ClientInfo {
     pub nickname: String,
     pub server_groups: Vec<u32>,
     pub channel_group_id: u32,
+    pub channel_id: u32,
 }
 
 struct SqExecutor<'a> {
@@ -96,6 +95,7 @@ impl EventRouter {
                         client.client_nickname,
                         client.client_server_groups,
                         client.client_channel_group_id,
+                        client.channel_id,
                     );
                 }
                 info!(
@@ -103,16 +103,8 @@ impl EventRouter {
                     snapshot_count
                 );
             }
-            Ok(Err(err)) => {
-                warn!(
-                    "Failed to prewarm client cache from snapshot, continuing without cache prewarm: {err}"
-                );
-            }
-            Err(_) => {
-                warn!(
-                    "Timed out while prewarming client cache from snapshot, continuing without cache prewarm"
-                );
-            }
+            Ok(Err(err)) => warn!("Failed to prewarm client cache: {err}"),
+            Err(_) => warn!("Timed out while prewarming client cache"),
         }
 
         while let Ok(event) = rx.recv().await {
@@ -136,7 +128,6 @@ impl EventRouter {
                                 return;
                             }
                         };
-
                         let router = Self::new_with_clients(
                             config, prompts, adapter, gate, llm, registry, clients, nc_adapter,
                         );
@@ -144,7 +135,7 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
-                    info!(
+                    debug!(
                         "Client entered view: clid={}, nickname={}",
                         e.clid, e.client_nickname
                     );
@@ -154,12 +145,12 @@ impl EventRouter {
                         e.client_nickname,
                         e.client_server_groups,
                         e.client_channel_group_id,
+                        e.channel_id,
                     );
                 }
                 TsEvent::ClientLeftView(e) => {
                     self.clients.remove(&e.clid);
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -172,6 +163,7 @@ impl EventRouter {
         nickname: String,
         server_groups: Vec<u32>,
         channel_group_id: u32,
+        channel_id: u32,
     ) {
         self.clients.insert(
             clid,
@@ -181,11 +173,11 @@ impl EventRouter {
                 nickname,
                 server_groups,
                 channel_group_id,
+                channel_id,
             },
         );
     }
 
-    /// 执行单个工具调用，返回结果字符串
     async fn execute_skill(
         &self,
         call: &ToolCall,
@@ -209,81 +201,45 @@ impl EventRouter {
                 Some(self.clients.as_ref()),
                 self.nc_adapter.clone(),
             );
+
             let args = call.arguments.clone();
             let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
                 Ok(val) => {
-                    info!(
-                        skill = %call.name,
-                        caller = %event.invoker_name,
-                        args = %call.arguments,
-                        result = %val,
-                        "Unified skill executed successfully"
-                    );
+                    info!(skill = %call.name, caller = %event.invoker_name, "Unified skill executed successfully");
                     Ok(val)
                 }
                 Err(unified_err) => {
-                    debug!(
-                        skill = %call.name,
-                        caller = %event.invoker_name,
-                        error = %unified_err,
-                        "Unified execution unavailable, falling back to TS execution"
-                    );
+                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
                     skill.execute(args, &ctx).await
                 }
             };
+
             match result {
-                Ok(val) => {
-                    info!(
-                        skill = %call.name,
-                        caller = %event.invoker_name,
-                        args = %call.arguments,
-                        result = %val,
-                        "Skill executed successfully"
-                    );
-                    val.to_string()
-                }
+                Ok(val) => val.to_string(),
                 Err(e) => {
-                    let err_msg = format!("技能执行失败: {}", e);
-                    error!(
-                        skill = %call.name,
-                        caller = %event.invoker_name,
-                        args = %call.arguments,
-                        error = %e,
-                        "Skill execution failed"
-                    );
-                    err_msg
+                    error!(skill = %call.name, error = %e, "Skill execution failed");
+                    format!("技能执行失败: {}", e)
                 }
             }
         } else {
-            warn!(
-                caller = %event.invoker_name,
-                skill = %call.name,
-                "Skill not found"
-            );
+            warn!(caller = %event.invoker_name, skill = %call.name, "Skill not found");
             "未找到指定的技能".to_string()
         }
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
-        if event.invoker_id == self.adapter.get_bot_clid() {
+        if event.invoker_id == self.adapter.get_bot_clid() || event.invoker_name == "TS3AudioBot" {
             return;
         }
 
-        if event.invoker_name == "TS3AudioBot" {
+        // 开启了语音桥接时，纯文本由 voice_router 处理
+        if self.config.headless.stt.enabled || self.config.headless.tts.enabled {
             return;
         }
 
         let Some(unified_event) = UnifiedInboundEvent::from_ts(&event, &self.config) else {
             return;
         };
-        debug!(
-            source = ?unified_event.source,
-            sender_id = %unified_event.sender_id,
-            sender_name = %unified_event.sender_name,
-            trace_id = %unified_event.trace_id,
-            should_trigger_llm = unified_event.should_trigger_llm,
-            "SQ unified inbound event"
-        );
         if !unified_event.should_respond {
             return;
         }
@@ -293,29 +249,24 @@ impl EventRouter {
                 target_mode,
                 target,
             } => (target_mode, target),
-            _ => {
-                debug!(
-                    "Unexpected reply policy for TS event: {:?}",
-                    unified_event.reply_policy
-                );
-                return;
-            }
+            _ => return,
         };
-        let msg_content = unified_event.text.as_str();
 
+        let msg_content = unified_event.text.as_str();
         info!(
-            "消息接收: {} (clid: {}, uid: {}, content: {})",
-            event.invoker_name, event.invoker_id, event.invoker_uid, msg_content
+            "消息接收: {} (clid: {}, content: {})",
+            event.invoker_name, event.invoker_id, msg_content
         );
 
         let (groups, channel_group_id) = if let Some(client) = self.clients.get(&event.invoker_id) {
             (client.server_groups.clone(), client.channel_group_id)
         } else {
-            debug!(
-                "Client {} not in store, assuming default permissions",
-                event.invoker_id
-            );
-            (vec![], 0)
+            let groups: Vec<u32> = event
+                .invoker_groups
+                .iter()
+                .filter_map(|g| g.parse().ok())
+                .collect();
+            (groups, 0)
         };
 
         let source = SessionSource::TeamSpeak {
@@ -330,7 +281,6 @@ impl EventRouter {
         let mut messages = self
             .llm
             .build_messages(&source, system_prompt, &user_ctx, msg_content);
-
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
 
@@ -341,44 +291,28 @@ impl EventRouter {
             channel_group_id,
         };
 
-        let max_turns = self.config.llm.max_tool_turns;
-
+        // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
         match self
             .llm
-            .run_tool_loop(&mut messages, &tools, &executor, max_turns, None)
+            .run_tool_loop(&mut messages, &tools, &executor, None)
             .await
         {
             Ok(result) => {
                 if !result.content.is_empty() {
-                    info!("[SQ] LLM final reply: {}", &result.content);
+                    info!("[TS] LLM final reply: {}", &result.content);
                     self.llm
                         .save_turn(&source, msg_content.to_string(), result.content.clone());
                     let _ = self
                         .adapter
-                        .send_raw(&cmd_send_text(reply_mode, reply_target, &result.content))
+                        .send_text_message(reply_mode, reply_target, &result.content)
                         .await;
                 }
-            }
-            Err(ToolLoopError::MaxTurnsExceeded) => {
-                warn!("[SQ] Reached max tool turns ({})", max_turns);
-                let _ = self
-                    .adapter
-                    .send_raw(&cmd_send_text(
-                        reply_mode,
-                        reply_target,
-                        "达到最大工具调用次数，请在设置中调整 max_tool_turns",
-                    ))
-                    .await;
             }
             Err(e) => {
                 error!("LLM error: {}", e);
                 let _ = self
                     .adapter
-                    .send_raw(&cmd_send_text(
-                        reply_mode,
-                        reply_target,
-                        "AI 后端当前不可用。请稍后再试。",
-                    ))
+                    .send_text_message(reply_mode, reply_target, "AI 后端当前不可用。请稍后再试。")
                     .await;
             }
         }

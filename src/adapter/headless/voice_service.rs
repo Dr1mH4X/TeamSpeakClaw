@@ -9,11 +9,7 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info, warn};
-
-use tsproto_packets::packets::{
-    AudioData, CodecType, Direction, Flags, OutAudio, OutCommand, OutPacket, PacketType,
-};
+use tracing::{error, warn};
 
 use super::playback::playback_loop;
 use super::speech::detect_audio_format;
@@ -30,9 +26,8 @@ pub struct PlaybackControl {
 pub struct VoiceServiceImpl {
     status: Arc<Mutex<SharedStatus>>,
     playback: Arc<Mutex<Option<PlaybackControl>>>,
-    ts3_audio_tx: mpsc::Sender<OutPacket>,
+    ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
     ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-    ts3_cmd_tx: mpsc::Sender<OutCommand>,
     events_tx: broadcast::Sender<voicev1::Event>,
     persist_tx: mpsc::Sender<PersistedVoiceState>,
     bot_respond_to_private: bool,
@@ -43,9 +38,8 @@ pub struct VoiceServiceImpl {
 impl VoiceServiceImpl {
     pub fn new(
         status: Arc<Mutex<SharedStatus>>,
-        ts3_audio_tx: mpsc::Sender<OutPacket>,
+        ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
         ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-        ts3_cmd_tx: mpsc::Sender<OutCommand>,
         events_tx: broadcast::Sender<voicev1::Event>,
         persist_tx: mpsc::Sender<PersistedVoiceState>,
         bot_respond_to_private: bool,
@@ -57,7 +51,6 @@ impl VoiceServiceImpl {
             playback: Arc::new(Mutex::new(None)),
             ts3_audio_tx,
             ts3_notice_tx,
-            ts3_cmd_tx,
             events_tx,
             persist_tx,
             bot_respond_to_private,
@@ -105,7 +98,7 @@ impl Drop for ChildKillOnDrop {
 
 async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
-    ts3_audio_tx: mpsc::Sender<OutPacket>,
+    ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
 ) -> anyhow::Result<()> {
     let encoder = Encoder::new(
         audiopus::SampleRate::Hz48000,
@@ -116,7 +109,6 @@ async fn stream_tts_audio_loop(
 
     let frame_samples_per_channel = 48_000 / 50;
     let frame_bytes = frame_samples_per_channel * 2 * 2;
-    let mut packet_id = 0u16;
 
     loop {
         let chunk = match stream.message().await.context("recv tts chunk failed")? {
@@ -228,13 +220,7 @@ async fn stream_tts_audio_loop(
                     break;
                 }
             };
-            let packet = OutAudio::new(&AudioData::C2S {
-                id: packet_id,
-                codec: CodecType::OpusMusic,
-                data: &opus_out[..len],
-            });
-            packet_id = packet_id.wrapping_add(1);
-            if let Err(e) = ts3_audio_tx.send(packet).await {
+            if let Err(e) = ts3_audio_tx.send((opus_out[..len].to_vec(), 5)).await {
                 warn!("send ts3 audio failed: {e}");
                 break;
             }
@@ -246,12 +232,7 @@ async fn stream_tts_audio_loop(
         }
     }
 
-    let eos = OutAudio::new(&AudioData::C2S {
-        id: packet_id,
-        codec: CodecType::OpusMusic,
-        data: &[],
-    });
-    if let Err(e) = ts3_audio_tx.send(eos).await {
+    if let Err(e) = ts3_audio_tx.send((vec![], 5)).await {
         warn!("send stream_tts eos failed: {e}");
     }
 
@@ -357,54 +338,6 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         emit_log(&self.events_tx, 2, "paused");
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn set_client_description(
-        &self,
-        req: Request<voicev1::SetClientDescriptionRequest>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        let r = req.into_inner();
-        let desc = r.description;
-        let msg = format!("set client_description requested (len={})", desc.len());
-        emit_log(&self.events_tx, 2, msg.clone());
-        info!("{msg}");
-        if desc.len() > 700 {
-            return Ok(Response::new(voicev1::CommandResponse {
-                ok: false,
-                message: "description too long".to_string(),
-            }));
-        }
-
-        let cleaned = desc.replace(['\r', '\n', '\t'], " ");
-        let compact = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-
-        let encoded = crate::adapter::serverquery::command::ts_escape(&compact);
-
-        if encoded.len() != desc.len() {
-            debug!(
-                "client_description encoded: orig_len={} encoded_len={}",
-                desc.len(),
-                encoded.len()
-            );
-        }
-
-        let mut cmd = OutCommand::new(
-            Direction::C2S,
-            Flags::empty(),
-            PacketType::Command,
-            "clientupdate",
-        );
-        cmd.write_arg("client_description", &encoded);
-
-        self.ts3_cmd_tx
-            .send(cmd)
-            .await
-            .map_err(|e| Status::internal(format!("send failed: {e}")))?;
 
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,

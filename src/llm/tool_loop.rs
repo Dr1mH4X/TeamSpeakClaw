@@ -19,8 +19,6 @@ pub trait ToolExecutor: Send + Sync {
 
 #[derive(Error, Debug)]
 pub enum ToolLoopError {
-    #[error("max tool turns exceeded")]
-    MaxTurnsExceeded,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -91,16 +89,10 @@ pub async fn run_tool_loop(
     tools: &[Value],
     provider: &dyn LlmProvider,
     executor: &dyn ToolExecutor,
-    max_turns: usize,
     callbacks: Option<&StreamCallbacks>,
 ) -> Result<ToolLoopResult, ToolLoopError> {
-    for turn in 0..max_turns {
-        debug!(
-            "Tool loop turn {}/{} (messages: {})",
-            turn + 1,
-            max_turns,
-            messages.len()
-        );
+    loop {
+        debug!("Tool loop turn (messages: {})", messages.len());
 
         let acc = accumulate_stream(messages, tools, provider, callbacks).await?;
 
@@ -166,6 +158,4 @@ pub async fn run_tool_loop(
             }));
         }
     }
-
-    Err(ToolLoopError::MaxTurnsExceeded)
 }

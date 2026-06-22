@@ -17,9 +17,6 @@ pub struct LlmConfig {
     /// 最大并发 LLM 请求数
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: u32,
-    /// 最大工具调用轮数
-    #[serde(default = "default_max_tool_turns")]
-    pub max_tool_turns: u32,
 }
 
 fn default_max_context_sessions() -> usize {
@@ -28,10 +25,6 @@ fn default_max_context_sessions() -> usize {
 
 fn default_max_concurrent_requests() -> u32 {
     4
-}
-
-fn default_max_tool_turns() -> u32 {
-    3
 }
 
 impl Default for LlmConfig {
@@ -44,7 +37,6 @@ impl Default for LlmConfig {
             max_context_turns: 0,
             max_context_sessions: 1000,
             max_concurrent_requests: 4,
-            max_tool_turns: 3,
         }
     }
 }

@@ -3,7 +3,7 @@
 
 # Bot 配置
 [bot]
-nickname = "TSClaw"                       # 机器人名称（ServerQuery 会自动追加随机后缀）
+nickname = "TSClaw"                       # 机器人名称
 trigger_prefixes = ["!tsclaw", "!bot", "@TSClaw"]       # 在频道/服务器聊天中触发机器人的前缀
 respond_to_private = true       # 私聊消息始终触发机器人
 default_reply_mode = "channel"  # 默认回复模式: "private"(私聊) | "channel"(频道) | "server"(服务器广播)
@@ -13,30 +13,17 @@ default_reply_mode = "channel"  # 默认回复模式: "private"(私聊) | "chann
 api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
-omni_model = false    # 全模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
+omni_model = false    # 多模态模型：true 时自动禁用 TTS/STT，直接使用语音输入输出
 max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）
 max_context_sessions = 3  # 最大不同用户会话数（超过时淘汰最旧会话）
 max_concurrent_requests = 4     # 最大并发 LLM 请求数
-max_tool_turns = 3              # 最大工具调用轮数（支持多轮工具调用）
-
-# ServerQuery 配置
-[serverquery]
-host = "127.0.0.1"
-port = 10011
-ssh_port = 10022
-method = "tcp"            # 连接方式: tcp 或 ssh
-login_name = "serveradmin"
-login_pass = ""
-server_id = 1
 
 # Headless 语音服务配置
 [headless]
-enabled = false
-ts3_host = "127.0.0.1"
-ts3_port = 9987
+server_address = "127.0.0.1"
+server_port = 9987
 server_password = ""
 channel_password = ""
-channel_path = ""
 channel_id = ""
 
 [headless.stt]
