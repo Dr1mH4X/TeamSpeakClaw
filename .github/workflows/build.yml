@@ -68,7 +68,7 @@ jobs:
             bin_suffix: .exe
           - platform: linux-amd64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             bin_suffix: ""
           - platform: macos-aarch64
             os: macos-latest
@@ -114,13 +114,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libopus-dev musl-tools
+          sudo apt-get install -y cmake libopus-dev
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare artifacts
@@ -192,21 +189,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Download linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: artifacts-linux-amd64
-          path: ./docker-artifact
-
-      - name: Prepare binary for Docker
-        shell: bash
-        run: |
-          ARTIFACT_PATH=$(find ./docker-artifact -name "TeamSpeakClaw-*" -type f)
-          tar -xzf "$ARTIFACT_PATH" -C ./docker-artifact
-          cp ./docker-artifact/teamspeakclaw ./teamspeakclaw
-          cp -r ./docker-artifact/config ./config-docker
-          chmod +x ./teamspeakclaw
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
