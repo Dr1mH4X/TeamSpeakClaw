@@ -27,7 +27,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config_dir = crate::config::config_dir();
     let cfg = AppConfig::load(config_dir.join("settings.toml"))?;
-    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging.file_level, cfg.logging.max_log_days);
+    let _guard = crate::log::init_tracing(
+        &args.log_level,
+        &cfg.logging.file_level,
+        cfg.logging.max_log_days,
+    );
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
@@ -40,7 +44,6 @@ async fn main() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     let adapter = TsAdapter::connect(config.clone()).await?;
-    adapter.set_nickname(&config.bot.nickname).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
     let clients = Arc::new(DashMap::new());
@@ -56,7 +59,7 @@ async fn main() -> Result<()> {
         nc_adapter.clone(),
     );
 
-    let headless = adapter::headless::Runtime::start_if_enabled(
+    let headless = adapter::headless::Runtime::start(
         config.clone(),
         prompts.clone(),
         gate.clone(),

@@ -8,8 +8,6 @@ pub mod music_ncm_api;
 pub mod napcat;
 pub mod prompts;
 pub mod rate_limit;
-pub mod serverquery;
-
 pub use acl::AclConfig;
 pub use bot::BotConfig;
 pub use headless::HeadlessConfig;
@@ -20,7 +18,6 @@ pub use music_ncm_api::MusicNcmApiConfig;
 pub use napcat::NapCatConfig;
 pub use prompts::PromptsConfig;
 pub use rate_limit::RateLimitConfig;
-pub use serverquery::SqConfig;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -36,7 +33,6 @@ pub fn config_dir() -> PathBuf {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
-    pub serverquery: SqConfig,
     pub llm: LlmConfig,
     pub bot: BotConfig,
     pub rate_limit: RateLimitConfig,
@@ -51,7 +47,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            serverquery: SqConfig::default(),
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
             rate_limit: RateLimitConfig::default(),
