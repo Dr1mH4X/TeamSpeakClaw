@@ -9,7 +9,7 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 use super::playback::playback_loop;
 use super::speech::detect_audio_format;
@@ -28,7 +28,6 @@ pub struct VoiceServiceImpl {
     playback: Arc<Mutex<Option<PlaybackControl>>>,
     ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
     ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-    ts3_cmd_tx: mpsc::Sender<String>,
     events_tx: broadcast::Sender<voicev1::Event>,
     persist_tx: mpsc::Sender<PersistedVoiceState>,
     bot_respond_to_private: bool,
@@ -41,7 +40,6 @@ impl VoiceServiceImpl {
         status: Arc<Mutex<SharedStatus>>,
         ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
         ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-        ts3_cmd_tx: mpsc::Sender<String>,
         events_tx: broadcast::Sender<voicev1::Event>,
         persist_tx: mpsc::Sender<PersistedVoiceState>,
         bot_respond_to_private: bool,
@@ -53,7 +51,6 @@ impl VoiceServiceImpl {
             playback: Arc::new(Mutex::new(None)),
             ts3_audio_tx,
             ts3_notice_tx,
-            ts3_cmd_tx,
             events_tx,
             persist_tx,
             bot_respond_to_private,
@@ -341,37 +338,6 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         emit_log(&self.events_tx, 2, "paused");
-
-        Ok(Response::new(voicev1::CommandResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
-    }
-
-    async fn set_client_description(
-        &self,
-        req: Request<voicev1::SetClientDescriptionRequest>,
-    ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
-        let r = req.into_inner();
-        let desc = r.description;
-        let msg = format!("set client_description requested (len={})", desc.len());
-        emit_log(&self.events_tx, 2, msg.clone());
-        info!("{msg}");
-        if desc.len() > 700 {
-            return Ok(Response::new(voicev1::CommandResponse {
-                ok: false,
-                message: "description too long".to_string(),
-            }));
-        }
-
-        let cleaned = desc.replace(['\r', '\n', '\t'], " ");
-        let compact = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-        let cmd = format!("clientupdate client_description={compact}");
-
-        self.ts3_cmd_tx
-            .send(cmd)
-            .await
-            .map_err(|e| Status::internal(format!("send failed: {e}")))?;
 
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,

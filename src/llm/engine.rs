@@ -28,14 +28,7 @@ impl LlmEngine {
         executor: &dyn ToolExecutor,
         callbacks: Option<&StreamCallbacks>,
     ) -> Result<ToolLoopResult, ToolLoopError> {
-        run_tool_loop(
-            messages,
-            tools,
-            self.provider.as_ref(),
-            executor,
-            callbacks,
-        )
-        .await
+        run_tool_loop(messages, tools, self.provider.as_ref(), executor, callbacks).await
     }
 
     /// 构建带历史上下文的 messages
@@ -47,9 +40,7 @@ impl LlmEngine {
         user_msg: &str,
     ) -> Vec<Value> {
         let system_content = format!("{system_prompt}\n\n{user_ctx}");
-        let mut messages = vec![
-            json!({"role": "system", "content": system_content}),
-        ];
+        let mut messages = vec![json!({"role": "system", "content": system_content})];
 
         if self.context.is_enabled() {
             let history = self.context.get(source);

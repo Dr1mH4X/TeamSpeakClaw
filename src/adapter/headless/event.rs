@@ -159,15 +159,8 @@ impl TsAdapter {
             if let Ok(cid_u64) = cid.parse::<u64>() {
                 let pw = &hc.channel_password;
                 let clid = client.client_id();
-                info!(
-                    cid = cid_u64,
-                    "joining channel on startup"
-                );
-                if let Err(e) = tsclient_rs::clientMove(
-                    &client, clid, cid_u64, pw,
-                )
-                .await
-                {
+                info!(cid = cid_u64, "joining channel on startup");
+                if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await {
                     warn!("join channel failed: {e}");
                 }
             } else {
@@ -196,7 +189,10 @@ impl TsAdapter {
         &self.client
     }
 
-    fn load_or_create_identity(path: &std::path::Path, level: u32) -> Result<tsclient_rs::Identity> {
+    fn load_or_create_identity(
+        path: &std::path::Path,
+        level: u32,
+    ) -> Result<tsclient_rs::Identity> {
         if path.exists() {
             let s = std::fs::read_to_string(path)
                 .map_err(|e| anyhow!("read identity file failed: {e}"))?;
@@ -264,13 +260,15 @@ impl TsAdapter {
     }
 
     pub async fn kick(&self, clid: u32, reason: &str) -> Result<()> {
-        let cmd = format!("clientkick clid={clid} reasonid=5 reasonmsg={reason}");
-        self.exec_command(&cmd).await
+        tsclient_rs::clientKick(&self.client, clid as i32, tsclient_rs::KickReason::Server, reason)
+            .await
+            .map_err(|e| anyhow!("clientKick failed: {e}"))
     }
 
     pub async fn ban(&self, clid: u32, time_secs: u64, reason: &str) -> Result<()> {
-        let cmd = format!("banclient clid={clid} time={time_secs} banreason={reason}");
-        self.exec_command(&cmd).await
+        tsclient_rs::banClient(&self.client, clid as i32, time_secs, reason)
+            .await
+            .map_err(|e| anyhow!("banClient failed: {e}"))
     }
 
     pub async fn move_client(&self, clid: u32, channel_id: u32) -> Result<()> {
@@ -311,22 +309,15 @@ impl TsAdapter {
                     .filter_map(|g| g.parse().ok())
                     .collect();
                 ClientEnterEvent {
-                        clid: c.id as u32,
-                        cldbid: 0,
-                        client_nickname: c.nickname,
-                        client_server_groups: groups,
-                        client_channel_group_id: 0,
-                        channel_id: c.channel_id as u32,
-                    }
+                    clid: c.id as u32,
+                    cldbid: 0,
+                    client_nickname: c.nickname,
+                    client_server_groups: groups,
+                    client_channel_group_id: 0,
+                    channel_id: c.channel_id as u32,
+                }
             })
             .collect())
-    }
-
-    pub async fn exec_command(&self, cmd: &str) -> Result<()> {
-        self.client
-            .exec_command(cmd, 10000)
-            .await
-            .map_err(|e| check_ts_error(e, cmd))
     }
 
     pub async fn quit(&self) -> Result<()> {
