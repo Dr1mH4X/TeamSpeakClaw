@@ -1,9 +1,9 @@
-mod headless_bridge;
+mod voice_router;
 mod nc_router;
 mod ts_router;
 mod unified;
 
-pub use headless_bridge::HeadlessLlmBridge;
+pub use voice_router::HeadlessLlmBridge;
 pub use nc_router::NcRouter;
 pub use ts_router::{ClientInfo, EventRouter};
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
