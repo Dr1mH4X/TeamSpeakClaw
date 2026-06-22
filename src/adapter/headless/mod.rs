@@ -1,10 +1,8 @@
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -29,13 +27,11 @@ use voicev1::voice_service_server::VoiceServiceServer;
 
 mod actor;
 mod event;
-mod playback;
 pub mod speech;
 mod types;
 mod voice_service;
 
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
-pub use types::{PersistedVoiceState, SharedStatus};
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 
@@ -81,84 +77,10 @@ pub async fn run(
         }
     });
 
-    let persist_file = resolve_repo_relative("voice_state.json");
-
-    let mut init_status = SharedStatus {
-        state: 1,
-        now_playing_title: String::new(),
-        now_playing_source_url: String::new(),
-        volume_percent: 100,
-        fx_pan: 0.0,
-        fx_width: 1.0,
-        fx_swap_lr: false,
-        fx_bass_db: 0.0,
-        fx_reverb_mix: 0.0,
-    };
-
-    if let Some(ps) = types::load_persisted_voice_state(&persist_file) {
-        init_status.volume_percent = ps.volume_percent.clamp(0, 200);
-        init_status.fx_pan = ps.fx_pan.clamp(-1.0, 1.0);
-        init_status.fx_width = ps.fx_width.clamp(0.0, 3.0);
-        init_status.fx_swap_lr = ps.fx_swap_lr;
-        init_status.fx_bass_db = ps.fx_bass_db.clamp(0.0, 18.0);
-        init_status.fx_reverb_mix = ps.fx_reverb_mix.clamp(0.0, 1.0);
-    }
-
-    let (persist_tx, mut persist_rx) = mpsc::channel::<PersistedVoiceState>(32);
-    {
-        let persist_file = persist_file.clone();
-        tokio::spawn(async move {
-            let mut pending: Option<PersistedVoiceState> = None;
-            let mut debounce: Option<Pin<Box<tokio::time::Sleep>>> = None;
-
-            loop {
-                tokio::select! {
-                    r = persist_rx.recv() => {
-                        match r {
-                            Some(st) => {
-                                pending = Some(st);
-                                debounce = Some(Box::pin(tokio::time::sleep(std::time::Duration::from_millis(200))));
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = async {
-                        if let Some(t) = debounce.as_mut() {
-                            t.as_mut().await;
-                        } else {
-                            futures::future::pending::<()>().await;
-                        }
-                    } => {
-                        if let Some(st) = pending.take() {
-                            debounce = None;
-                            if let Some(parent) = persist_file.parent() {
-                                let _ = tokio::fs::create_dir_all(parent).await;
-                            }
-                            if let Ok(s) = serde_json::to_string_pretty(&st) {
-                                let _ = tokio::fs::write(&persist_file, s).await;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(st) = pending.take() {
-                if let Some(parent) = persist_file.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                if let Ok(s) = serde_json::to_string_pretty(&st) {
-                    let _ = tokio::fs::write(&persist_file, s).await;
-                }
-            }
-        });
-    }
-
     let svc = voice_service::VoiceServiceImpl::new(
-        Arc::new(Mutex::new(init_status)),
         ts3_audio_tx,
         ts3_notice_tx,
         events_tx,
-        persist_tx,
         config.bot_respond_to_private,
         config.bot_default_reply_mode.clone(),
         config.bot_trigger_prefixes.clone(),
@@ -291,12 +213,4 @@ impl Runtime {
             let _ = handle.await;
         }
     }
-}
-
-fn resolve_repo_relative(path: &str) -> PathBuf {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        return p.to_path_buf();
-    }
-    crate::config::config_dir().join(path)
 }
