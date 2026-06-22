@@ -1,7 +1,10 @@
 FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev cmake make gcc protoc
 WORKDIR /app
-COPY . .
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY .cargo ./.cargo
+COPY src ./src
+COPY proto ./proto
 ENV PROTOC=/usr/bin/protoc
 RUN cargo build --release
 
