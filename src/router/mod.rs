@@ -3,7 +3,7 @@ mod nc_router;
 mod ts_router;
 mod unified;
 
-pub use voice_router::HeadlessLlmBridge;
+pub use voice_router::VoiceRouter;
 pub use nc_router::NcRouter;
 pub use ts_router::{ClientInfo, EventRouter};
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
