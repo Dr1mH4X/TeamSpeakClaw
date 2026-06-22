@@ -44,13 +44,12 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
 pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) -> WorkerGuard {
     let console_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(console_level))
-        .add_directive("russh::client=off".parse().unwrap())
-        .add_directive("russh=off".parse().unwrap())
-        .add_directive("tsclientlib=off".parse().unwrap())
-        .add_directive("tsproto=off".parse().unwrap())
-        .add_directive("tsproto-packets=off".parse().unwrap())
-        .add_directive("ts-bookkeeping=off".parse().unwrap())
-        .add_directive("h2=off".parse().unwrap());
+        .add_directive("h2=off".parse().unwrap())
+        .add_directive("hyper::client::connect=off".parse().unwrap())
+        .add_directive("hyper::proto::h2=off".parse().unwrap())
+        .add_directive("hyper_util::client=off".parse().unwrap())
+        .add_directive("reqwest::connect=off".parse().unwrap())
+        .add_directive("tower::buffer::worker=off".parse().unwrap());
 
     let console_layer = fmt::layer()
         .with_target(true)

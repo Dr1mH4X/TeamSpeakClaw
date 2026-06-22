@@ -48,9 +48,9 @@ impl LlmEngine {
         user_ctx: &str,
         user_msg: &str,
     ) -> Vec<Value> {
+        let system_content = format!("{system_prompt}\n\n{user_ctx}");
         let mut messages = vec![
-            json!({"role": "system", "content": system_prompt}),
-            json!({"role": "system", "content": user_ctx}),
+            json!({"role": "system", "content": system_content}),
         ];
 
         if self.context.is_enabled() {
