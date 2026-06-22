@@ -1,9 +1,9 @@
-FROM ubuntu:24.04
+FROM alpine:3.20
 
-RUN apt-get update && apt-get install -y ca-certificates libopus0 ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates libopus ffmpeg
 
-RUN groupadd --gid 1001 appgroup && \
-    useradd --uid 1001 --gid appgroup --create-home --shell /usr/sbin/nologin appuser
+RUN addgroup --gid 1001 appgroup && \
+    adduser --uid 1001 --ingroup appgroup --disabled-password --gecos "" appuser
 
 WORKDIR /app
 
