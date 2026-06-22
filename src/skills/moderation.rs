@@ -1,4 +1,3 @@
-use crate::adapter::command::{cmd_ban, cmd_channellist, cmd_kick, cmd_move};
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -37,23 +36,11 @@ async fn validate_channel_exists(ctx: &ExecutionContext<'_>, channel_id: u32) ->
         return Err(anyhow::anyhow!("目标频道 ID 必须大于 0"));
     }
 
-    let response = ctx.adapter.send_query(&cmd_channellist()).await?;
-    let channel_exists = response
-        .lines()
-        .filter(|line| !line.starts_with("error id="))
-        .flat_map(|line| line.split('|'))
-        .any(|entry| {
-            entry
-                .split_whitespace()
-                .filter_map(|token| token.strip_prefix("cid="))
-                .filter_map(|cid| cid.parse::<u32>().ok())
-                .any(|cid| cid == channel_id)
-        });
-
-    if !channel_exists {
+    let channels = ctx.adapter.list_channels().await?;
+    let exists = channels.iter().any(|c| c.id == channel_id as u64);
+    if !exists {
         return Err(anyhow::anyhow!("目标频道不存在: {}", channel_id));
     }
-
     Ok(())
 }
 
@@ -86,7 +73,7 @@ impl Skill for KickClient {
         // 权限和自操作检查
         validate_target(ctx, clid)?;
 
-        ctx.adapter.send_raw(&cmd_kick(clid, reason)).await?;
+        ctx.adapter.kick(clid, reason).await?;
         Ok(json!({"status": "ok", "message": "Client kicked"}))
     }
 
@@ -130,7 +117,7 @@ impl Skill for BanClient {
         // 权限和自操作检查
         validate_target(ctx, clid)?;
 
-        ctx.adapter.send_raw(&cmd_ban(clid, time, reason)).await?;
+        ctx.adapter.ban(clid, time, reason).await?;
         Ok(json!({"status": "ok", "message": "Client banned"}))
     }
 
@@ -181,7 +168,7 @@ impl Skill for MoveClient {
 
         validate_channel_exists(ctx, channel_id).await?;
 
-        ctx.adapter.send_raw(&cmd_move(clid, channel_id)).await?;
+        ctx.adapter.move_client(clid, channel_id).await?;
         Ok(json!({
             "status": "ok",
             "message": format!("Client {} moved to channel {}", clid, channel_id)

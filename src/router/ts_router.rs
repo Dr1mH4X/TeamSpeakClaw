@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-use crate::adapter::command::cmd_send_text;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
@@ -144,7 +143,7 @@ impl EventRouter {
                     });
                 }
                 TsEvent::ClientEnterView(e) => {
-                    info!(
+                    debug!(
                         "Client entered view: clid={}, nickname={}",
                         e.clid, e.client_nickname
                     );
@@ -159,7 +158,6 @@ impl EventRouter {
                 TsEvent::ClientLeftView(e) => {
                     self.clients.remove(&e.clid);
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -273,6 +271,11 @@ impl EventRouter {
             return;
         }
 
+        // voice 服务启动时文本走 headless_bridge（有 TTS / STT）
+        if self.config.headless.stt.enabled || self.config.headless.tts.enabled {
+            return;
+        }
+
         let Some(unified_event) = UnifiedInboundEvent::from_ts(&event, &self.config) else {
             return;
         };
@@ -282,7 +285,7 @@ impl EventRouter {
             sender_name = %unified_event.sender_name,
             trace_id = %unified_event.trace_id,
             should_trigger_llm = unified_event.should_trigger_llm,
-            "SQ unified inbound event"
+            "TS unified inbound event"
         );
         if !unified_event.should_respond {
             return;
@@ -311,11 +314,12 @@ impl EventRouter {
         let (groups, channel_group_id) = if let Some(client) = self.clients.get(&event.invoker_id) {
             (client.server_groups.clone(), client.channel_group_id)
         } else {
+            let groups: Vec<u32> = event.invoker_groups.iter().filter_map(|g| g.parse().ok()).collect();
             debug!(
-                "Client {} not in store, assuming default permissions",
-                event.invoker_id
+                "Client {} not in store, using event invoker_groups: {:?}",
+                event.invoker_id, groups
             );
-            (vec![], 0)
+            (groups, 0)
         };
 
         let source = SessionSource::TeamSpeak {
@@ -350,35 +354,35 @@ impl EventRouter {
         {
             Ok(result) => {
                 if !result.content.is_empty() {
-                    info!("[SQ] LLM final reply: {}", &result.content);
+                    info!("[TS] LLM final reply: {}", &result.content);
                     self.llm
                         .save_turn(&source, msg_content.to_string(), result.content.clone());
                     let _ = self
                         .adapter
-                        .send_raw(&cmd_send_text(reply_mode, reply_target, &result.content))
+                        .send_text_message(reply_mode, reply_target, &result.content)
                         .await;
                 }
             }
             Err(ToolLoopError::MaxTurnsExceeded) => {
-                warn!("[SQ] Reached max tool turns ({})", max_turns);
+                warn!("[TS] Reached max tool turns ({})", max_turns);
                 let _ = self
                     .adapter
-                    .send_raw(&cmd_send_text(
+                    .send_text_message(
                         reply_mode,
                         reply_target,
                         "达到最大工具调用次数，请在设置中调整 max_tool_turns",
-                    ))
+                    )
                     .await;
             }
             Err(e) => {
                 error!("LLM error: {}", e);
                 let _ = self
                     .adapter
-                    .send_raw(&cmd_send_text(
+                    .send_text_message(
                         reply_mode,
                         reply_target,
                         "AI 后端当前不可用。请稍后再试。",
-                    ))
+                    )
                     .await;
             }
         }

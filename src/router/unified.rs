@@ -1,6 +1,6 @@
 use crate::adapter::napcat::event::{GroupMessageEvent, PrivateMessageEvent};
 use crate::adapter::napcat::types::segments_to_text;
-use crate::adapter::serverquery::event::{TextMessageEvent, TextMessageTarget};
+use crate::adapter::{TextMessageEvent, TextMessageTarget};
 use crate::config::AppConfig;
 
 #[derive(Debug, Clone)]

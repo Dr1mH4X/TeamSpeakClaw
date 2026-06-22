@@ -249,7 +249,7 @@ impl HeadlessLlmBridge {
         });
 
         let mut stream = client.subscribe_events(req).await?.into_inner();
-        info!("Headless LLM bridge subscribed: {}", endpoint);
+        debug!("Headless LLM bridge subscribed: {}", endpoint);
 
         while let Some(item) = stream.next().await {
             match item {
@@ -863,8 +863,7 @@ impl HeadlessLlmBridge {
         })];
 
         let messages = vec![
-            json!({"role": "system", "content": system_prompt}),
-            json!({"role": "system", "content": user_ctx}),
+            json!({"role": "system", "content": format!("{system_prompt}\n\n{user_ctx}")}),
             json!({"role": "user", "content": content}),
         ];
         (messages, tools)
