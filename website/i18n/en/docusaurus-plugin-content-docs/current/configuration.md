@@ -16,11 +16,6 @@ Contains basic configurations for connecting to the TeamSpeak server, LLM provid
 
 **View full configuration example**: [settings.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/settings.toml)
 
-### Connection Method
-
-- **TCP (Default)**: `method = "tcp"`, connects using `port` (default 10011).
-- **SSH**: `method = "ssh"`, connects using `ssh_port` (default 10022).
-
 ### NapCat Configuration Details
 
 The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11 protocol implementation).
@@ -56,8 +51,9 @@ The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11
 The `[music_backend]` section controls which backend is used for music functionality:
 
 | Value | Description |
-|---|---|
+|---|---|---|
 | `ts3audiobot` | (Default) Controls TS3AudioBot via TS private messages. Ensure the music bot's nickname is `TS3AudioBot`. |
+| `tsmusicbot` | Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. |
 | `tsbot_backend` | Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `base_url`. |
 
 ### Reply Mode

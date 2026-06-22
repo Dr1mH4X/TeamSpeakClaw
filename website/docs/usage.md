@@ -57,7 +57,11 @@ TeamSpeakClaw 支持两种音乐后端：
 
 通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。需确保音乐机器人昵称为 `TS3AudioBot`。
 
-**模式二：tsbot_backend**
+**模式二：tsmusicbot**
+
+通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)，支持播放/暂停/切歌/队列/电台等操作。
+
+**模式三：tsbot_backend**
 
 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)。需在 `settings.toml` 中配置 `backend = "tsbot_backend"` 和 `base_url`。
 
@@ -115,5 +119,6 @@ TeamSpeakClaw 支持两种音乐后端：
     -   检查 `acl.toml` 中的配置，确认您的用户组 ID 是否在允许的规则中。
 
 - **音乐功能不工作？**
-    -   ts3audiobot 模式：确认 TS3AudioBot 是否在线且昵称是否为 `TS3AudioBot`。
-    -   tsbot_backend 模式：确认 NeteaseTSBot 后端服务是否运行，`base_url` 是否正确。
+-   ts3audiobot 模式：确认 TS3AudioBot 是否在线且昵称是否为 `TS3AudioBot`。
+-   tsmusicbot 模式：确认 TSMusicBot 是否在线且昵称匹配 `musicbot_name` 配置。
+-   tsbot_backend 模式：确认 NeteaseTSBot 后端服务是否运行，`base_url` 是否正确。
