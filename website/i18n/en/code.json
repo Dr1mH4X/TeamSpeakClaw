@@ -24,10 +24,10 @@
     "message": "Role-based access control system. Secure, granular, and robust."
   },
   "homepage.features.cloudMusic.title": {
-    "message": "CLOUD MUSIC"
+    "message": "EXTERNAL MUSIC BOT"
   },
   "homepage.features.cloudMusic.description": {
-    "message": "Seamless NetEase Music integration for your high-quality channels."
+    "message": "Seamless integration with TS3AudioBot, TSMusicBot and NeteaseTSBot."
   },
   "theme.ErrorPageContent.title": {
     "message": "This page crashed.",
