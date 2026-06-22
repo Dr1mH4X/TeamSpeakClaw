@@ -26,7 +26,6 @@ impl LlmEngine {
         messages: &mut Vec<Value>,
         tools: &[Value],
         executor: &dyn ToolExecutor,
-        max_turns: u32,
         callbacks: Option<&StreamCallbacks>,
     ) -> Result<ToolLoopResult, ToolLoopError> {
         run_tool_loop(
@@ -34,7 +33,6 @@ impl LlmEngine {
             tools,
             self.provider.as_ref(),
             executor,
-            max_turns as usize,
             callbacks,
         )
         .await

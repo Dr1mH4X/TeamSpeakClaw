@@ -8,7 +8,7 @@ use crate::adapter::napcat::{
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, ToolLoopError};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -402,7 +402,6 @@ impl NcRouter {
         allowed_skills: &[String],
     ) -> String {
         let error_msg = "AI 后端当前不可用。请稍后再试。".to_string();
-        let max_turns = self.config.llm.max_tool_turns;
 
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
@@ -430,7 +429,7 @@ impl NcRouter {
 
         match self
             .llm
-            .run_tool_loop(&mut messages, &tools, &executor, max_turns, None)
+            .run_tool_loop(&mut messages, &tools, &executor, None)
             .await
         {
             Ok(result) => {
@@ -439,10 +438,6 @@ impl NcRouter {
                 self.llm
                     .save_turn(&source, user_msg.to_string(), content.clone());
                 content
-            }
-            Err(ToolLoopError::MaxTurnsExceeded) => {
-                warn!("[NC] Reached max tool turns ({})", max_turns);
-                "达到最大工具调用次数，请在设置中调整 max_tool_turns".to_string()
             }
             Err(e) => {
                 error!("NC LLM error: {}", e);

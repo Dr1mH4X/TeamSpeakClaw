@@ -20,7 +20,7 @@ use crate::adapter::headless::INTERNAL_GRPC_ADDR;
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{
-    LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor, ToolLoopError,
+    LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor,
 };
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
@@ -474,7 +474,6 @@ impl VoiceRouter {
                 &mut messages,
                 &tools,
                 &executor,
-                self.config.llm.max_tool_turns,
                 callbacks.as_ref(),
             )
             .await
@@ -519,26 +518,11 @@ impl VoiceRouter {
                 &mut messages,
                 &tools,
                 &executor,
-                self.config.llm.max_tool_turns,
                 callbacks.as_ref(),
             )
             .await
         {
             Ok(r) => r,
-            Err(ToolLoopError::MaxTurnsExceeded) => {
-                if let Some(ref cb) = callbacks {
-                    if let Some(ref on_end) = cb.on_turn_end {
-                        on_end("stop");
-                    }
-                }
-                self.send_reply(
-                    client,
-                    &ctx,
-                    "达到最大工具调用次数，请在设置中调整 max_tool_turns",
-                )
-                .await?;
-                return Err(ToolLoopError::MaxTurnsExceeded.into());
-            }
             Err(e) => {
                 if let Some(ref cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
