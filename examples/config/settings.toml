@@ -57,24 +57,9 @@ max_log_days = 7  # 日志保留天数，超出自动删除
 # 联动项目配置
 # 音乐后端配置
 [music_backend]
-backend = "ncm_api"  # "ts3audiobot"（通过 TS 私信控制）或 "tsbot_backend"（NeteaseTSBot）或 "ncm_api"（内置播放）
+backend = "ts3audiobot"  # "ts3audiobot"（TS3AudioBot插件 私信控制）| "tsmusicbot"（TSMusicBot 私信控制）| "tsbot_backend"（NeteaseTSBot HTTP API）
 base_url = "http://127.0.0.1:8009"   # backend = "tsbot_backend" 时生效
 musicbot_name = "TS3AudioBot"  # 音乐机器人名称，其音频不会被送入 STT
-ignore_stt_playing = false  # true: 播放音乐时忽略 STT 语音输入，防止 TTS 打断音乐
-
-# NCM API 专属配置（backend = "ncm_api" 时生效）
-[music_ncm_api]
-ncm_cookie = ""  # 可选，填 MUSIC_U=xxx 以播放 VIP 歌曲
-
-# UNM 配置（可选，解锁灰色歌曲）
-unm_enabled = true
-unm_sources = "ytdl,bilibili,kugou"    # 音源，逗号分隔（ytdl=yt-dlp, bilibili, kugou, kuwo, qq, joox, pyncm）
-unm_enable_flac = false                  # 启用无损音质
-unm_search_mode = "fast-first"           # fast-first（速度优先）或 order-first（顺序优先）
-unm_proxy_uri = ""                       # 代理地址（如 https://proxy.example.com）
-unm_joox_cookie = ""                     # JOOX cookie（需要时填写）
-unm_qq_cookie = ""                       # QQ cookie（需要时填写）
-yt_dlp_path = "yt-dlp"                   # yt-dlp 可执行文件路径（play_url/queue_url 使用）
 
 # NapCat 配置（可选，用于 QQ 机器人功能）
 # 前置要求：安装并运行 NapCat（https://napneko.github.io/）

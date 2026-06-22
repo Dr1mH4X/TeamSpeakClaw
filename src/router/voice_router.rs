@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -22,52 +22,8 @@ use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::ClientInfo;
-use crate::skills::music::{PLAY_TITLE_KEY, PLAY_URL_KEY};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
-
-fn validate_play_url(raw: &str) -> anyhow::Result<()> {
-    let parsed = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("invalid play URL: {e}"))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        scheme => return Err(anyhow::anyhow!("play URL scheme '{scheme}' is not allowed")),
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("play URL has no host"))?;
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err(anyhow::anyhow!("play URL must not point to localhost"));
-    }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if ip.is_loopback() {
-            return Err(anyhow::anyhow!(
-                "play URL must not point to a loopback address"
-            ));
-        }
-        if is_private_ip(ip) {
-            return Err(anyhow::anyhow!(
-                "play URL must not point to a private network address"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            octets[0] == 10
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 169 && octets[1] == 254)
-        }
-        std::net::IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            (seg[0] & 0xfe00) == 0xfc00 || (seg[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
 
 struct CallerContext {
     caller_id: u32,
@@ -79,55 +35,15 @@ struct CallerContext {
     reply_target_client_id: u32,
 }
 
-struct PendingPlay {
-    source_url: String,
-    title: String,
-    requested_by: String,
-}
-
-struct VoiceExecutor<'a> {
+struct SkillExecutor<'a> {
     router: &'a VoiceRouter,
     ctx: &'a CallerContext,
-    pending_play: Arc<Mutex<Option<PendingPlay>>>,
 }
 
 #[async_trait]
-impl ToolExecutor for VoiceExecutor<'_> {
+impl ToolExecutor for SkillExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
-        let tool_result = self.router.execute_skill(call, self.ctx).await;
-        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&tool_result) {
-            if let Some(url) = parsed.get(PLAY_URL_KEY).and_then(|v| v.as_str()) {
-                let title = parsed
-                    .get(PLAY_TITLE_KEY)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                match validate_play_url(url) {
-                    Err(e) => warn!("rejected play URL from tool result: {e}"),
-                    Ok(()) => {
-                        let mut guard = self.pending_play.lock().await;
-                        *guard = Some(PendingPlay {
-                            source_url: url.to_string(),
-                            title: title.clone(),
-                            requested_by: self.ctx.caller_name.clone(),
-                        });
-                    }
-                }
-                if let Some(obj) = parsed.as_object_mut() {
-                    obj.remove(PLAY_URL_KEY);
-                    obj.remove(PLAY_TITLE_KEY);
-                }
-            }
-            match serde_json::to_string(&parsed) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("failed to re-serialize tool result: {e}");
-                    json!({ "error": "serialization_failed", "raw": tool_result }).to_string()
-                }
-            }
-        } else {
-            tool_result
-        }
+        self.router.execute_skill(call, self.ctx).await
     }
 }
 
@@ -141,7 +57,6 @@ pub struct VoiceRouter {
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
-    playback_status_cache: Mutex<(Instant, bool)>,
 }
 
 impl VoiceRouter {
@@ -174,42 +89,11 @@ impl VoiceRouter {
             ts_adapter,
             ts_clients,
             speech_provider,
-            playback_status_cache: Mutex::new((Instant::now(), false)),
         }
     }
 
     fn is_tts_effectively_enabled(&self) -> bool {
         self.config.headless.tts.enabled && self.speech_provider.is_some()
-    }
-
-    async fn should_ignore_stt_while_playing(
-        &self,
-        client: &mut VoiceServiceClient<Channel>,
-    ) -> bool {
-        if !self.config.music_backend.ignore_stt_playing {
-            return false;
-        }
-        {
-            let cache = self.playback_status_cache.lock().await;
-            if cache.0.elapsed() < Duration::from_secs(1) {
-                return cache.1;
-            }
-        }
-        match client
-            .get_status(tonic::Request::new(voicev1::Empty {}))
-            .await
-        {
-            Ok(rsp) => {
-                let playing = rsp.into_inner().state() == voicev1::status_response::State::Playing;
-                let mut cache = self.playback_status_cache.lock().await;
-                *cache = (Instant::now(), playing);
-                playing
-            }
-            Err(e) => {
-                debug!("ignore_stt_playing: get_status failed: {e}");
-                false
-            }
-        }
     }
 
     pub async fn run(self) -> Result<()> {
@@ -219,7 +103,6 @@ impl VoiceRouter {
 
         let req = tonic::Request::new(voicev1::SubscribeRequest {
             include_chat: true,
-            include_playback: false,
             include_log: true,
             include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
@@ -390,9 +273,6 @@ impl VoiceRouter {
         {
             return Ok(());
         }
-        if self.should_ignore_stt_while_playing(client).await {
-            return Ok(());
-        }
 
         if self.config.llm.omni_model {
             return self.handle_omni_audio_event(client, audio).await;
@@ -454,11 +334,9 @@ impl VoiceRouter {
         ctx.caller_id = chunk.speaker_client_id;
 
         let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
-        let pending_play = Arc::new(Mutex::new(None));
-        let executor = VoiceExecutor {
+        let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
-            pending_play: pending_play.clone(),
         };
         let callbacks = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
@@ -479,7 +357,6 @@ impl VoiceRouter {
             }
             Err(e) => return Err(e.into()),
         };
-        Self::execute_pending_play(client, pending_play.lock().await.take()).await;
         Ok(())
     }
 
@@ -492,14 +369,11 @@ impl VoiceRouter {
         info!(event = "voice.chat.user_message", invoker = %ctx.caller_name, clid = ctx.caller_id, message = %self.truncate_for_log(&user_msg));
 
         let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone());
-        let pending_play = Arc::new(Mutex::new(None));
-        let executor = VoiceExecutor {
+        let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
-            pending_play: pending_play.clone(),
         };
 
-        // 如果开启了 TTS，传入 callbacks 实现边流式输出边合成语音
         let callbacks = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
@@ -530,7 +404,6 @@ impl VoiceRouter {
             self.llm
                 .save_turn(&session_source, user_msg, result.content);
         }
-        Self::execute_pending_play(client, pending_play.lock().await.take()).await;
         Ok(())
     }
 
@@ -642,23 +515,6 @@ impl VoiceRouter {
             on_text_token: Some(Box::new(on_text_token)),
             on_turn_end: Some(Box::new(on_turn_end)),
         })
-    }
-
-    async fn execute_pending_play(
-        client: &mut VoiceServiceClient<Channel>,
-        pending: Option<PendingPlay>,
-    ) {
-        if let Some(pp) = pending {
-            let play_req = voicev1::PlayRequest {
-                source_url: pp.source_url,
-                title: pp.title,
-                requested_by: pp.requested_by,
-                notice: String::new(),
-            };
-            if let Err(e) = client.play(tonic::Request::new(play_req)).await {
-                warn!("deferred play failed: {e}");
-            }
-        }
     }
 
     fn build_llm_base_context(
