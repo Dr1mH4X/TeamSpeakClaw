@@ -2,7 +2,7 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, ToolLoopError};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -290,12 +290,11 @@ impl EventRouter {
             groups: &groups,
             channel_group_id,
         };
-        let max_turns = self.config.llm.max_tool_turns;
 
         // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
         match self
             .llm
-            .run_tool_loop(&mut messages, &tools, &executor, max_turns, None)
+            .run_tool_loop(&mut messages, &tools, &executor, None)
             .await
         {
             Ok(result) => {
@@ -308,17 +307,6 @@ impl EventRouter {
                         .send_text_message(reply_mode, reply_target, &result.content)
                         .await;
                 }
-            }
-            Err(ToolLoopError::MaxTurnsExceeded) => {
-                warn!("[TS] Reached max tool turns ({})", max_turns);
-                let _ = self
-                    .adapter
-                    .send_text_message(
-                        reply_mode,
-                        reply_target,
-                        "达到最大工具调用次数，请在设置中调整 max_tool_turns",
-                    )
-                    .await;
             }
             Err(e) => {
                 error!("LLM error: {}", e);
