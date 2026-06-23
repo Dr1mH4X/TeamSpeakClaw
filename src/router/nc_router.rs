@@ -15,7 +15,6 @@ use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 struct NcExecutor<'a> {
@@ -41,7 +40,6 @@ pub struct NcRouter {
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
-    semaphore: Arc<Semaphore>,
     ts_adapter: Option<Arc<TsAdapter>>,
     ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
 }
@@ -87,7 +85,6 @@ impl NcRouter {
         ts_adapter: Option<Arc<TsAdapter>>,
         ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
     ) -> Self {
-        let max_concurrent = config.llm.max_concurrent_requests;
         Self {
             config,
             prompts,
@@ -95,7 +92,6 @@ impl NcRouter {
             gate,
             llm,
             registry,
-            semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             ts_adapter,
             ts_clients,
         }
@@ -149,18 +145,10 @@ impl NcRouter {
         let gate = self.gate.clone();
         let llm = self.llm.clone();
         let registry = self.registry.clone();
-        let semaphore = self.semaphore.clone();
         let ts_adapter = self.ts_adapter.clone();
         let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
-            let _permit = match semaphore.acquire().await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("NcRouter semaphore error: {e}");
-                    return;
-                }
-            };
             let router = NcRouter {
                 config,
                 prompts,
@@ -168,7 +156,6 @@ impl NcRouter {
                 gate,
                 llm,
                 registry,
-                semaphore: Arc::new(Semaphore::new(1)),
                 ts_adapter,
                 ts_clients,
             };
@@ -183,18 +170,10 @@ impl NcRouter {
         let gate = self.gate.clone();
         let llm = self.llm.clone();
         let registry = self.registry.clone();
-        let semaphore = self.semaphore.clone();
         let ts_adapter = self.ts_adapter.clone();
         let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
-            let _permit = match semaphore.acquire().await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("NcRouter semaphore error: {e}");
-                    return;
-                }
-            };
             let router = NcRouter {
                 config,
                 prompts,
@@ -202,7 +181,6 @@ impl NcRouter {
                 gate,
                 llm,
                 registry,
-                semaphore: Arc::new(Semaphore::new(1)),
                 ts_adapter,
                 ts_clients,
             };
@@ -359,7 +337,8 @@ impl NcRouter {
                     );
                     val.to_string()
                 }
-                Err(_unified_err) => {
+                Err(unified_err) => {
+                    debug!(skill = %call.name, error = %unified_err, "Falling back to NC execution");
                     let nc_ctx = NcExecutionContext {
                         adapter: self.adapter.clone(),
                         caller_id: user_id,
