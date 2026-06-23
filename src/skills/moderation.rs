@@ -9,7 +9,7 @@ use tracing::info;
 fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     // 自操作防护
     if clid == ctx.caller_id {
-        return Err(anyhow::anyhow!("不能对自己执行此操作"));
+        return Err(anyhow::anyhow!("Cannot perform this action on yourself"));
     }
 
     // 获取目标的组信息
@@ -25,7 +25,7 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
         ctx.caller_channel_group_id,
         &target_groups,
     ) {
-        return Err(anyhow::anyhow!("无权对该用户执行此操作"));
+        return Err(anyhow::anyhow!("No permission to perform this action on that user"));
     }
 
     Ok(target_groups)
@@ -33,13 +33,13 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
 
 async fn validate_channel_exists(ctx: &ExecutionContext<'_>, channel_id: u32) -> Result<()> {
     if channel_id == 0 {
-        return Err(anyhow::anyhow!("目标频道 ID 必须大于 0"));
+        return Err(anyhow::anyhow!("Target channel ID must be greater than 0"));
     }
 
     let channels = ctx.adapter.list_channels().await?;
     let exists = channels.iter().any(|c| c.id == channel_id as u64);
     if !exists {
-        return Err(anyhow::anyhow!("目标频道不存在: {}", channel_id));
+        return Err(anyhow::anyhow!("Target channel does not exist: {}", channel_id));
     }
     Ok(())
 }
@@ -154,16 +154,16 @@ impl Skill for MoveClient {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))? as u32;
         let channel_id = args["channel_id"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: channel_id"))?
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: channel_id"))?
             as u32;
 
         validate_target(ctx, clid)?;
 
         if !ctx.clients.contains_key(&clid) {
-            return Err(anyhow::anyhow!("客户端 {} 不在线或不存在", clid));
+            return Err(anyhow::anyhow!("Client {} is not online or does not exist", clid));
         }
 
         validate_channel_exists(ctx, channel_id).await?;
