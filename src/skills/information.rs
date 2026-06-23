@@ -68,13 +68,17 @@ impl Skill for GetClientList {
                         .collect();
 
                     let reply = if json_clients.is_empty() {
-                        "TS服务器当前没有在线用户".to_string()
+                        "No online users on TS server".to_string()
                     } else {
                         let names: Vec<_> = json_clients
                             .iter()
                             .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
                             .collect();
-                        format!("TS服务器在线用户 ({})：{}", names.len(), names.join(", "))
+                        format!(
+                            "TS server online users ({}): {}",
+                            names.len(),
+                            names.join(", ")
+                        )
                     };
 
                     return Ok(json!({
@@ -112,11 +116,12 @@ impl Skill for GetClientInfo {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
+            as u32;
 
         // 确认目标客户端在线
         if !ctx.clients.contains_key(&clid) {
-            let msg = format!("客户端 {} 不在线或不存在", clid);
+            let msg = format!("Client {} is not online or does not exist", clid);
             return Ok(json!({"status": "error", "message": msg}));
         }
 
@@ -139,18 +144,18 @@ impl Skill for GetClientInfo {
                 // NC 请求查询 TS 指定用户信息
                 let clid = args["clid"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
                     as u32;
 
                 if let Some(ref ts_clients) = ctx.ts_clients {
                     let Some(client) = ts_clients.get(&clid) else {
                         return Ok(json!({
                             "status": "error",
-                            "message": format!("客户端 {} 不在线或不存在", clid)
+                            "message": format!("Client {} is not online or does not exist", clid)
                         }));
                     };
                     let reply = format!(
-                        "TS用户信息 - 昵称:{}, ID:{}, 数据库ID:{}, 服务器分组:{:?}, 频道ID:{}",
+                        "TS user info - nickname:{}, ID:{}, DBID:{}, server groups:{:?}, channel ID:{}",
                         client.nickname,
                         client.clid,
                         client.cldbid,

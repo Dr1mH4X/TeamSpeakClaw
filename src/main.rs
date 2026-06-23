@@ -43,7 +43,8 @@ async fn main() -> Result<()> {
     let registry = Arc::new(SkillRegistry::with_defaults(&config.music_backend.backend));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
-    let adapter = TsAdapter::connect(config.clone()).await?;
+    let identity_file = config_dir.join("identity.json");
+    let adapter = TsAdapter::connect(config.clone(), identity_file).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
     let clients = Arc::new(DashMap::new());

@@ -206,12 +206,12 @@ impl EventRouter {
                 Ok(val) => val.to_string(),
                 Err(e) => {
                     error!(skill = %call.name, error = %e, "Skill execution failed");
-                    format!("技能执行失败: {}", e)
+                    format!("Skill execution failed: {}", e)
                 }
             }
         } else {
             warn!(caller = %event.invoker_name, skill = %call.name, "Skill not found");
-            "未找到指定的技能".to_string()
+            "Skill not found".to_string()
         }
     }
 
@@ -251,7 +251,7 @@ impl EventRouter {
 
         let msg_content = unified_event.text.as_str();
         info!(
-            "消息接收: {} (clid: {}, content: {})",
+            "Message received: {} (clid: {}, content: {})",
             event.invoker_name, event.invoker_id, msg_content
         );
 
@@ -309,7 +309,11 @@ impl EventRouter {
                 error!("LLM error: {}", e);
                 let _ = self
                     .adapter
-                    .send_text_message(reply_mode, reply_target, "AI 后端当前不可用。请稍后再试。")
+                    .send_text_message(
+                        reply_mode,
+                        reply_target,
+                        "AI backend unavailable. Please try again later.",
+                    )
                     .await;
             }
         }

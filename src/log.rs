@@ -155,7 +155,7 @@ impl Write for DailyFileAppender {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Log lock poisoned"))?;
         Self::ensure_open(&mut inner, &self.dir, &self.prefix)?;
         inner.file.as_mut().unwrap().write(buf)
     }
@@ -164,7 +164,7 @@ impl Write for DailyFileAppender {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "日志锁被污染"))?;
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Log lock poisoned"))?;
         if let Some(ref mut file) = inner.file {
             file.flush()?;
         }

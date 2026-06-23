@@ -247,12 +247,12 @@ impl VoiceRouter {
                 Ok(val) => val.to_string(),
                 Err(e) => {
                     error!(skill = %call.name, error = %e, "Skill execution failed");
-                    format!("技能执行失败: {}", e)
+                    format!("Skill execution failed: {}", e)
                 }
             }
         } else {
             warn!(caller = %ctx.caller_name, skill = %call.name, "Skill not found");
-            "未找到指定的技能".to_string()
+            "Skill not found".to_string()
         }
     }
 
@@ -370,7 +370,7 @@ impl VoiceRouter {
                     info!("[TS&TTS] LLM final reply: {}", &result.content);
                     self.send_reply(client, &ctx, &result.content).await?;
                     self.llm
-                        .save_turn(&session_source, "[音频消息]".into(), result.content);
+                        .save_turn(&session_source, "[Audio message]".into(), result.content);
                 }
             }
             Err(e) => {
@@ -379,8 +379,12 @@ impl VoiceRouter {
                         on_end("stop");
                     }
                 }
-                self.send_reply(client, &ctx, "AI 后端当前不可用。请稍后再试。")
-                    .await?;
+                self.send_reply(
+                    client,
+                    &ctx,
+                    "AI backend unavailable. Please try again later.",
+                )
+                .await?;
                 return Err(e.into());
             }
         };
@@ -419,8 +423,12 @@ impl VoiceRouter {
                         on_end("stop");
                     }
                 }
-                self.send_reply(client, &ctx, "AI 后端当前不可用。请稍后再试。")
-                    .await?;
+                self.send_reply(
+                    client,
+                    &ctx,
+                    "AI backend unavailable. Please try again later.",
+                )
+                .await?;
                 return Err(e.into());
             }
         };

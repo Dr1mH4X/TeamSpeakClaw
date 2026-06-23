@@ -8,10 +8,6 @@ pub enum InboundSource {
     TeamSpeakText,
     NapCatPrivate,
     NapCatGroup,
-    #[allow(dead_code)]
-    HeadlessText,
-    #[allow(dead_code)]
-    HeadlessVoiceStt,
 }
 
 #[derive(Debug, Clone)]
@@ -26,11 +22,6 @@ pub enum ReplyPolicy {
     NapCatGroup {
         group_id: i64,
         at_user_id: Option<i64>,
-    },
-    #[allow(dead_code)]
-    Headless {
-        target_mode: i32,
-        target_client_id: u32,
     },
 }
 
