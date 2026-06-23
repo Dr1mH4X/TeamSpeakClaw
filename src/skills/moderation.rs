@@ -25,7 +25,9 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
         ctx.caller_channel_group_id,
         &target_groups,
     ) {
-        return Err(anyhow::anyhow!("No permission to perform this action on that user"));
+        return Err(anyhow::anyhow!(
+            "No permission to perform this action on that user"
+        ));
     }
 
     Ok(target_groups)
@@ -39,7 +41,10 @@ async fn validate_channel_exists(ctx: &ExecutionContext<'_>, channel_id: u32) ->
     let channels = ctx.adapter.list_channels().await?;
     let exists = channels.iter().any(|c| c.id == channel_id as u64);
     if !exists {
-        return Err(anyhow::anyhow!("Target channel does not exist: {}", channel_id));
+        return Err(anyhow::anyhow!(
+            "Target channel does not exist: {}",
+            channel_id
+        ));
     }
     Ok(())
 }
@@ -154,7 +159,8 @@ impl Skill for MoveClient {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
+            as u32;
         let channel_id = args["channel_id"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: channel_id"))?
@@ -163,7 +169,10 @@ impl Skill for MoveClient {
         validate_target(ctx, clid)?;
 
         if !ctx.clients.contains_key(&clid) {
-            return Err(anyhow::anyhow!("Client {} is not online or does not exist", clid));
+            return Err(anyhow::anyhow!(
+                "Client {} is not online or does not exist",
+                clid
+            ));
         }
 
         validate_channel_exists(ctx, channel_id).await?;

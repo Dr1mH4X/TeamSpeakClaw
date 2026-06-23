@@ -309,7 +309,11 @@ impl EventRouter {
                 error!("LLM error: {}", e);
                 let _ = self
                     .adapter
-                    .send_text_message(reply_mode, reply_target, "AI backend unavailable. Please try again later.")
+                    .send_text_message(
+                        reply_mode,
+                        reply_target,
+                        "AI backend unavailable. Please try again later.",
+                    )
                     .await;
             }
         }
