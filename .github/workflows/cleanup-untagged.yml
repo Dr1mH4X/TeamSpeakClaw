@@ -17,6 +17,5 @@ jobs:
         with:
           package: teamspeakclaw
           delete-untagged: true
-          keep-n-untagged: 0
           # 首次运行取消先预览将要删除的内容
           dry-run: true
