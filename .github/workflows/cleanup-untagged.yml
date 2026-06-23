@@ -1,22 +1,51 @@
 name: Cleanup Untagged Images
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 仅允许手动触发
 
 jobs:
   clean-untagged:
     name: Delete untagged GHCR images
     runs-on: ubuntu-latest
     permissions:
-      packages: write
+      packages: write # 删除镜像所需权限
       contents: read
 
     steps:
-      - name: Cleanup untagged images
-        uses: snok/container-retention-policy@v2
-        with:
-          image-names: teamspeakclaw
-          cut-off: 1s
-          untagged: true
-          # 预览将要删除的内容
-          dry-run: true
+      - name: Delete untagged images via GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: teamspeakclaw
+        run: |
+          # 获取当前仓库的所有者（用户名或组织名）
+          OWNER=$(gh repo view --json owner --jq '.owner.login')
+
+          echo "Fetching package versions for $PACKAGE_NAME..."
+
+          # 使用 GitHub API 获取所有镜像版本
+          # 这里使用 per_page=100，如果镜像超过100个，可以增加分页逻辑
+          gh api -H "Accept: application/vnd.github+json" \
+            "/users/$OWNER/packages/container/$PACKAGE_NAME/versions?per_page=100" \
+            --jq '.[] | {id: .id, tags: .metadata.container.tags}' > versions.json
+
+          # 如果仓库属于组织，请使用下面这行替代上面的 API 路径：
+          # "/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions?per_page=100"
+
+          # 遍历每个版本
+          jq -c '.' versions.json | while read -r version; do
+            id=$(echo "$version" | jq -r '.id')
+            tags=$(echo "$version" | jq -r '.tags | map(select(. != null)) | join(", ")')
+
+            # 如果 tags 为空，说明是 untagged 镜像
+            if [ -z "$tags" ] || [ "$tags" == "null" ]; then
+              echo "Deleting untagged image version ID: $id"
+              gh api --method DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/users/$OWNER/packages/container/$PACKAGE_NAME/versions/$id"
+              echo "Deleted successfully."
+            else
+              echo "Skipping version ID: $id (Tags: $tags)"
+            fi
+          done
+
+          echo "Cleanup finished."
