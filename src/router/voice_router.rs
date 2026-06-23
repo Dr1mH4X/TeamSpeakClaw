@@ -269,7 +269,11 @@ impl VoiceRouter {
             return Ok(());
         }
         let musicbot_name = &self.config.music_backend.musicbot_name;
-        if !musicbot_name.is_empty() && audio.from_client_name.to_ascii_lowercase().contains(&musicbot_name.to_ascii_lowercase())
+        if !musicbot_name.is_empty()
+            && audio
+                .from_client_name
+                .to_ascii_lowercase()
+                .contains(&musicbot_name.to_ascii_lowercase())
         {
             return Ok(());
         }
