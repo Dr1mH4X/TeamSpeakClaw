@@ -358,7 +358,7 @@ impl NcRouter {
                             val.to_string()
                         }
                         Err(e) => {
-                            let msg = format!("技能执行失败: {}", e);
+                            let msg = format!("Skill execution failed: {}", e);
                             error!(skill = %call.name, error = %e, "NC Skill failed");
                             msg
                         }
@@ -367,7 +367,7 @@ impl NcRouter {
             }
         } else {
             warn!(skill = %call.name, "NC Skill not found");
-            "未找到指定的技能".to_string()
+            "Skill not found".to_string()
         }
     }
 
@@ -380,7 +380,7 @@ impl NcRouter {
         group_id: Option<i64>,
         allowed_skills: &[String],
     ) -> String {
-        let error_msg = "AI 后端当前不可用。请稍后再试。".to_string();
+        let error_msg = "AI backend unavailable. Please try again later.".to_string();
 
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
