@@ -72,13 +72,7 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        dispatch_backend(
-            action,
-            &args,
-            &ctx.config.music_backend,
-            Some(ctx),
-        )
-        .await
+        dispatch_backend(action, &args, &ctx.config.music_backend, Some(ctx)).await
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {

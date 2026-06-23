@@ -18,14 +18,20 @@ pub(crate) async fn execute(
         action,
         "play" | "add" | "search" | "playlist" | "vol" | "mode"
     );
-    if needs_value && args["value"].as_str().unwrap_or("").is_empty() && args["keywords"].as_str().unwrap_or("").is_empty() {
+    if needs_value
+        && args["value"].as_str().unwrap_or("").is_empty()
+        && args["keywords"].as_str().unwrap_or("").is_empty()
+    {
         return Err(anyhow::anyhow!(
             "Action '{}' requires a 'value' or 'keywords' parameter",
             action
         ));
     }
 
-    let value = args["value"].as_str().or_else(|| args["keywords"].as_str()).unwrap_or("");
+    let value = args["value"]
+        .as_str()
+        .or_else(|| args["keywords"].as_str())
+        .unwrap_or("");
 
     let bot_cmd = match action {
         "play" => format!("!play {value}"),
@@ -54,7 +60,11 @@ pub(crate) async fn execute(
     let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
     let audiobot = clients
         .iter()
-        .find(|c| c.nickname.to_ascii_lowercase().contains(&target_name.to_ascii_lowercase()))
+        .find(|c| {
+            c.nickname
+                .to_ascii_lowercase()
+                .contains(&target_name.to_ascii_lowercase())
+        })
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
 
     let mut ts_rx;
@@ -71,7 +81,10 @@ pub(crate) async fn execute(
         loop {
             match ts_rx.recv().await {
                 Ok(TsEvent::TextMessage(msg))
-                    if msg.invoker_name.eq_ignore_ascii_case(target_name)
+                    if msg
+                        .invoker_name
+                        .to_ascii_lowercase()
+                        .contains(&target_name.to_ascii_lowercase())
                         && msg.target_mode == TextMessageTarget::Channel =>
                 {
                     return msg.message;

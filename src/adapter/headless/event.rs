@@ -260,9 +260,14 @@ impl TsAdapter {
     }
 
     pub async fn kick(&self, clid: u32, reason: &str) -> Result<()> {
-        tsclient_rs::clientKick(&self.client, clid as i32, tsclient_rs::KickReason::Server, reason)
-            .await
-            .map_err(|e| anyhow!("clientKick failed: {e}"))
+        tsclient_rs::clientKick(
+            &self.client,
+            clid as i32,
+            tsclient_rs::KickReason::Server,
+            reason,
+        )
+        .await
+        .map_err(|e| anyhow!("clientKick failed: {e}"))
     }
 
     pub async fn ban(&self, clid: u32, time_secs: u64, reason: &str) -> Result<()> {

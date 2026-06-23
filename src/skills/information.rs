@@ -98,7 +98,7 @@ impl Skill for GetClientInfo {
         "get_client_info"
     }
     fn description(&self) -> &'static str {
-        "Get detailed information about a specific online client by their client ID."
+        "Get detailed information about a specific online client by their client ID, including connection time, IP address, version, and more."
     }
     fn parameters(&self) -> Value {
         json!({

@@ -77,7 +77,11 @@ pub(crate) async fn execute(
     let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
     let audiobot = clients
         .iter()
-        .find(|c| c.nickname.to_ascii_lowercase().contains(&target_name.to_ascii_lowercase()))
+        .find(|c| {
+            c.nickname
+                .to_ascii_lowercase()
+                .contains(&target_name.to_ascii_lowercase())
+        })
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
 
     let _guard = TS3AUDIOBOT_LOCK.lock().await;
@@ -92,7 +96,10 @@ pub(crate) async fn execute(
         loop {
             match ts_rx.recv().await {
                 Ok(TsEvent::TextMessage(msg))
-                    if msg.invoker_name.eq_ignore_ascii_case(target_name)
+                    if msg
+                        .invoker_name
+                        .to_ascii_lowercase()
+                        .contains(&target_name.to_ascii_lowercase())
                         && msg.target_mode == TextMessageTarget::Private =>
                 {
                     return msg.message;
