@@ -27,7 +27,8 @@ impl Skill for PokeClient {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
+            as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
         ctx.adapter.poke(clid, msg).await?;
@@ -188,9 +189,9 @@ impl Skill for SendMessage {
 
                     match mode {
                         "private" => {
-                            let user_id = args["user_id"]
-                                .as_i64()
-                                .ok_or_else(|| anyhow::anyhow!("Missing required parameter: user_id"))?;
+                            let user_id = args["user_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!("Missing required parameter: user_id")
+                            })?;
                             nc_adapter.send_private(user_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
@@ -200,9 +201,9 @@ impl Skill for SendMessage {
                             }))
                         }
                         "group" => {
-                            let group_id = args["group_id"]
-                                .as_i64()
-                                .ok_or_else(|| anyhow::anyhow!("Missing required parameter: group_id"))?;
+                            let group_id = args["group_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!("Missing required parameter: group_id")
+                            })?;
                             nc_adapter.send_group(group_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
@@ -230,15 +231,16 @@ impl Skill for SendMessage {
 
                         let (targetmode, target_id) = match mode {
                             "private" => {
-                                let clid =
-                                    target.ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?;
+                                let clid = target.ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: clid")
+                                })?;
                                 (1, clid)
                             }
                             "channel" => (2, 0),
                             "server" => (3, 0),
                             _ => {
                                 return Err(anyhow::anyhow!(
-"Invalid mode, must be private, channel, server"
+                                    "Invalid mode, must be private, channel, server"
                                 ));
                             }
                         };
@@ -271,9 +273,13 @@ impl Skill for SendMessage {
                             let target = args["user_id"]
                                 .as_i64()
                                 .or_else(|| args["clid"].as_i64())
-                                .ok_or_else(|| anyhow::anyhow!("Missing required parameter: user_id"))?;
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: user_id")
+                                })?;
                             if ctx.caller_id_nc != 0 && target == ctx.caller_id_nc {
-                                return Err(anyhow::anyhow!("Cannot perform this action on yourself"));
+                                return Err(anyhow::anyhow!(
+                                    "Cannot perform this action on yourself"
+                                ));
                             }
                             nc_adapter.send_private(target, &segs).await?;
                             Ok(json!({
@@ -287,7 +293,9 @@ impl Skill for SendMessage {
                             let group_id = args["group_id"]
                                 .as_i64()
                                 .or(ctx.nc_group_id)
-                                .ok_or_else(|| anyhow::anyhow!("Missing required parameter: group_id"))?;
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: group_id")
+                                })?;
                             nc_adapter.send_group(group_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",

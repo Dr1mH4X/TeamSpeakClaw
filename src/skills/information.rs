@@ -74,7 +74,11 @@ impl Skill for GetClientList {
                             .iter()
                             .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
                             .collect();
-                        format!("TS server online users ({}): {}", names.len(), names.join(", "))
+                        format!(
+                            "TS server online users ({}): {}",
+                            names.len(),
+                            names.join(", ")
+                        )
                     };
 
                     return Ok(json!({
@@ -112,7 +116,8 @@ impl Skill for GetClientInfo {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
+            as u32;
 
         // 确认目标客户端在线
         if !ctx.clients.contains_key(&clid) {

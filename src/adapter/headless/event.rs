@@ -10,6 +10,11 @@ use tsclient_rs;
 
 use crate::config::AppConfig;
 
+/// 身份升级最大安全等级
+const IDENTITY_MAX_LEVEL: i32 = 29;
+/// 每次重试提升的等级步长
+const IDENTITY_UPGRADE_STEP: i32 = 5;
+
 /// 检查 TS 错误，如果是权限问题则额外提示用户。
 fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
     let is_perm = matches!(&err,
@@ -54,67 +59,7 @@ impl TsAdapter {
             ..Default::default()
         };
 
-        let register_handlers = |client: &tsclient_rs::Client, tx: broadcast::Sender<TsEvent>| {
-            {
-                let tx = tx.clone();
-                client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
-                    if let tsclient_rs::Event::TextMessage(ref msg) = event {
-                        let _ = tx.send(TsEvent::TextMessage(TextMessageEvent {
-                            target_mode: match msg.target_mode {
-                                1 => TextMessageTarget::Private,
-                                2 => TextMessageTarget::Channel,
-                                _ => TextMessageTarget::Server,
-                            },
-                            invoker_name: msg.invoker_name.clone(),
-                            invoker_uid: msg.invoker_uid.clone(),
-                            invoker_id: msg.invoker_id as u32,
-                            invoker_groups: msg.invoker_groups.clone(),
-                            message: msg.message.clone(),
-                        }));
-                    }
-                }));
-            }
-
-            {
-                let tx = tx.clone();
-                client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
-                    if let tsclient_rs::Event::ClientEnter(ref info) = event {
-                        let groups: Vec<u32> = info
-                            .server_groups
-                            .iter()
-                            .filter_map(|g| g.parse().ok())
-                            .collect();
-                        let _ = tx.send(TsEvent::ClientEnterView(ClientEnterEvent {
-                            clid: info.id as u32,
-                            cldbid: 0,
-                            client_nickname: info.nickname.clone(),
-                            client_server_groups: groups,
-                            client_channel_group_id: 0,
-                            channel_id: info.channel_id as u32,
-                        }));
-                        debug!(
-                            "Client entered view: clid={}, nickname={}, channel_id={}",
-                            info.id, info.nickname, info.channel_id
-                        );
-                    }
-                }));
-            }
-
-            {
-                let tx = tx.clone();
-                client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
-                    if let tsclient_rs::Event::ClientLeave(ref ev) = event {
-                        let _ = tx.send(TsEvent::ClientLeftView(ClientLeftEvent {
-                            clid: ev.id as u32,
-                        }));
-                    }
-                }));
-            }
-        };
-
         let mut current_level = identity.security_level();
-        const MAX_LEVEL: i32 = 29;
-        const STEP: i32 = 5;
         const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 
         loop {
@@ -123,7 +68,7 @@ impl TsAdapter {
                 tsclient_rs::Client::new(identity.clone(), addr.clone(), nickname.clone(), opts);
 
             let (event_tx, _) = broadcast::channel::<TsEvent>(256);
-            register_handlers(&client, event_tx.clone());
+            Self::register_event_handlers(&client, event_tx.clone());
 
             client
                 .connect()
@@ -184,32 +129,98 @@ impl TsAdapter {
                     return Err(anyhow!("wait_connected failed: {e:?}"));
                 }
                 Err(_) => {
-                    // handshake 超时，可能等级不够，升级后重试
                     let _ = client.disconnect().await;
-
-                    let next_level = current_level + STEP;
-                    if next_level > MAX_LEVEL {
-                        return Err(anyhow!(
-                            "Server rejected connection at identity level {current_level} (tried max {MAX_LEVEL})"
-                        ));
-                    }
-
-                    info!(
-                        "Handshake timed out at identity level {current_level}, upgrading to {next_level}..."
-                    );
-                    identity
-                        .upgrade_to_level(next_level, None)
-                        .await
-                        .map_err(|e| anyhow!("identity upgrade failed: {e}"))?;
-
-                    let s = identity.to_string();
-                    let _ = std::fs::write(&identity_file, &s);
-                    info!("Identity upgraded to level {next_level}");
-                    current_level = next_level;
-                    // 继续循环重试
+                    current_level = Self::upgrade_identity_and_save(
+                        &mut identity,
+                        current_level,
+                        &identity_file,
+                    )
+                    .await?;
                 }
             }
         }
+    }
+
+    fn register_event_handlers(client: &tsclient_rs::Client, tx: broadcast::Sender<TsEvent>) {
+        {
+            let tx = tx.clone();
+            client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::TextMessage(ref msg) = event {
+                    let _ = tx.send(TsEvent::TextMessage(TextMessageEvent {
+                        target_mode: match msg.target_mode {
+                            1 => TextMessageTarget::Private,
+                            2 => TextMessageTarget::Channel,
+                            _ => TextMessageTarget::Server,
+                        },
+                        invoker_name: msg.invoker_name.clone(),
+                        invoker_uid: msg.invoker_uid.clone(),
+                        invoker_id: msg.invoker_id as u32,
+                        invoker_groups: msg.invoker_groups.clone(),
+                        message: msg.message.clone(),
+                    }));
+                }
+            }));
+        }
+
+        {
+            let tx = tx.clone();
+            client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::ClientEnter(ref info) = event {
+                    let groups: Vec<u32> = info
+                        .server_groups
+                        .iter()
+                        .filter_map(|g| g.parse().ok())
+                        .collect();
+                    let _ = tx.send(TsEvent::ClientEnterView(ClientEnterEvent {
+                        clid: info.id as u32,
+                        cldbid: 0,
+                        client_nickname: info.nickname.clone(),
+                        client_server_groups: groups,
+                        client_channel_group_id: 0,
+                        channel_id: info.channel_id as u32,
+                    }));
+                    debug!(
+                        "Client entered view: clid={}, nickname={}, channel_id={}",
+                        info.id, info.nickname, info.channel_id
+                    );
+                }
+            }));
+        }
+
+        {
+            let tx = tx.clone();
+            client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::ClientLeave(ref ev) = event {
+                    let _ = tx.send(TsEvent::ClientLeftView(ClientLeftEvent {
+                        clid: ev.id as u32,
+                    }));
+                }
+            }));
+        }
+    }
+
+    async fn upgrade_identity_and_save(
+        identity: &mut tsclient_rs::Identity,
+        current_level: i32,
+        identity_file: &std::path::Path,
+    ) -> Result<i32> {
+        let next_level = current_level + IDENTITY_UPGRADE_STEP;
+        if next_level > IDENTITY_MAX_LEVEL {
+            return Err(anyhow!(
+                "Server rejected connection at identity level {current_level} (tried max {IDENTITY_MAX_LEVEL})"
+            ));
+        }
+
+        info!("Upgrading identity to level {next_level} (this may take a few minutes)...");
+        identity
+            .upgrade_to_level(next_level, None)
+            .await
+            .map_err(|e| anyhow!("identity upgrade failed: {e}"))?;
+
+        let s = identity.to_string();
+        let _ = std::fs::write(identity_file, &s);
+        info!("Identity upgraded to level {next_level}");
+        Ok(next_level)
     }
 
     /// 获取共享的 Client（voice 模块使用）

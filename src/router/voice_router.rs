@@ -379,8 +379,12 @@ impl VoiceRouter {
                         on_end("stop");
                     }
                 }
-                self.send_reply(client, &ctx, "AI backend unavailable. Please try again later.")
-                    .await?;
+                self.send_reply(
+                    client,
+                    &ctx,
+                    "AI backend unavailable. Please try again later.",
+                )
+                .await?;
                 return Err(e.into());
             }
         };
@@ -419,8 +423,12 @@ impl VoiceRouter {
                         on_end("stop");
                     }
                 }
-                self.send_reply(client, &ctx, "AI backend unavailable. Please try again later.")
-                    .await?;
+                self.send_reply(
+                    client,
+                    &ctx,
+                    "AI backend unavailable. Please try again later.",
+                )
+                .await?;
                 return Err(e.into());
             }
         };
