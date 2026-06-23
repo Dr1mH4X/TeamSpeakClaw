@@ -6,8 +6,6 @@ use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use tsclient_rs;
-
 use crate::config::AppConfig;
 
 /// 身份升级最大安全等级
