@@ -25,7 +25,7 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 - `acl.toml` — 权限控制规则
 - `prompts.toml` — 系统提示词与错误消息
 
-使用文本编辑器修改 `config/settings.toml`，填入您的 TeamSpeak ServerQuery 账号密码以及 LLM API Key 等信息。
+使用文本编辑器修改 `config/settings.toml`，填入您的 TeamSpeak 服务器连接信息以及 LLM API Key 等配置。
 
 **快速配置检查清单**：
 - `[headless]` — 填写 TeamSpeak 服务器地址（`server_address`）、端口（`server_port`）、密码等
@@ -120,3 +120,7 @@ docker run -d \
 ```
 
 如果配置正确，机器人将连接到您的 TeamSpeak 服务器并开始监听事件。
+
+## 6. 授予权限
+
+机器人连接服务器后，请在 TeamSpeak 客户端中 **右键点击机器人 → 编辑服务器组**，为其添加 **Serveradmin** 服务器组权限，否则机器人无法执行管理操作（如踢人、封禁、移动用户等）。

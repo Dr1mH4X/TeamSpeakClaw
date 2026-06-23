@@ -667,7 +667,7 @@ cargo run -- --log-level debug
 ## Related Resources
 
 - [Rust Official Documentation](https://doc.rust-lang.org/book/)
-- [TeamSpeak ServerQuery Manual](https://yat.qa/resources/)
+- [TeamSpeak 3 Related Resources](https://yat.qa/resources/)
 - [OpenAI API Documentation](https://platform.openai.com/docs/api-reference)
 - [OneBot 11 Standard](https://github.com/botuniverse/onebot-11)
 - [NapCat Documentation](https://napneko.github.io/)
