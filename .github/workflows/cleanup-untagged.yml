@@ -16,20 +16,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_NAME: teamspeakclaw
+          OWNER: ${{ github.repository_owner }}
         run: |
-          # 获取当前仓库的所有者（用户名或组织名）
-          OWNER=$(gh repo view --json owner --jq '.owner.login')
+          echo "Fetching package versions for $PACKAGE_NAME owned by $OWNER..."
 
-          echo "Fetching package versions for $PACKAGE_NAME..."
-
-          # 使用 GitHub API 获取所有镜像版本
-          # 这里使用 per_page=100，如果镜像超过100个，可以增加分页逻辑
+          # 自动判断是个人账号还是组织：
+          # 先尝试用 /users/ 路径，如果失败（非零退出码），则尝试用 /orgs/ 路径
           gh api -H "Accept: application/vnd.github+json" \
             "/users/$OWNER/packages/container/$PACKAGE_NAME/versions?per_page=100" \
+            --jq '.[] | {id: .id, tags: .metadata.container.tags}' > versions.json || \
+          gh api -H "Accept: application/vnd.github+json" \
+            "/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions?per_page=100" \
             --jq '.[] | {id: .id, tags: .metadata.container.tags}' > versions.json
-
-          # 如果仓库属于组织，请使用下面这行替代上面的 API 路径：
-          # "/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions?per_page=100"
 
           # 遍历每个版本
           jq -c '.' versions.json | while read -r version; do
@@ -39,9 +37,15 @@ jobs:
             # 如果 tags 为空，说明是 untagged 镜像
             if [ -z "$tags" ] || [ "$tags" == "null" ]; then
               echo "Deleting untagged image version ID: $id"
+
+              # 同样需要适配个人和组织的删除 API
               gh api --method DELETE \
                 -H "Accept: application/vnd.github+json" \
-                "/users/$OWNER/packages/container/$PACKAGE_NAME/versions/$id"
+                "/users/$OWNER/packages/container/$PACKAGE_NAME/versions/$id" || \
+              gh api --method DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions/$id"
+
               echo "Deleted successfully."
             else
               echo "Skipping version ID: $id (Tags: $tags)"
