@@ -7,8 +7,6 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use tsclient_rs;
-
 use super::tsbot::voice::v1 as voicev1;
 use super::types::now_unix_ms;
 
