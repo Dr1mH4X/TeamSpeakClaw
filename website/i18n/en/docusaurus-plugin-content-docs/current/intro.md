@@ -6,7 +6,7 @@ sidebar_position: 1
 
 TeamSpeakClaw is an LLM-based intelligent assistant for TeamSpeak servers.
 
-It connects to your TeamSpeak server via ServerQuery, allowing users to interact with the server using natural language. Whether it's playing music, managing members, or querying information, you simply "say" it in the channel, and TSClaw will understand your intent and automatically execute the corresponding operations. It not only manages the server directly but also coordinates with other music bot plugins to provide a seamless voice server experience.
+It connects to your TeamSpeak server via a headless client, allowing users to interact with the server using natural language. Whether it's playing music, managing members, or querying information, you simply "say" it in the channel, and TSClaw will understand your intent and automatically execute the corresponding operations. It not only manages the server directly but also coordinates with other music bot plugins to provide a seamless voice server experience.
 
 ## ✨ Features
 
