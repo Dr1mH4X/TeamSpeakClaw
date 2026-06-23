@@ -10,7 +10,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -47,7 +46,6 @@ pub struct EventRouter {
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
-    semaphore: Arc<Semaphore>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
 }
 
@@ -62,7 +60,6 @@ impl EventRouter {
         clients: Arc<DashMap<u32, ClientInfo>>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> Self {
-        let max_concurrent = config.llm.max_concurrent_requests;
         Self {
             config,
             prompts,
@@ -71,7 +68,6 @@ impl EventRouter {
             gate,
             llm,
             registry,
-            semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             nc_adapter,
         }
     }
@@ -117,17 +113,9 @@ impl EventRouter {
                     let gate = self.gate.clone();
                     let llm = self.llm.clone();
                     let registry = self.registry.clone();
-                    let semaphore = self.semaphore.clone();
                     let nc_adapter = self.nc_adapter.clone();
 
                     tokio::spawn(async move {
-                        let _permit = match semaphore.acquire().await {
-                            Ok(p) => p,
-                            Err(e) => {
-                                error!("Failed to acquire semaphore: {}", e);
-                                return;
-                            }
-                        };
                         let router = Self::new_with_clients(
                             config, prompts, adapter, gate, llm, registry, clients, nc_adapter,
                         );
@@ -228,7 +216,16 @@ impl EventRouter {
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
-        if event.invoker_id == self.adapter.get_bot_clid() || event.invoker_name == "TS3AudioBot" {
+        if event.invoker_id == self.adapter.get_bot_clid() {
+            return;
+        }
+        let musicbot_name = &self.config.music_backend.musicbot_name;
+        if !musicbot_name.is_empty()
+            && event
+                .invoker_name
+                .to_ascii_lowercase()
+                .contains(&musicbot_name.to_ascii_lowercase())
+        {
             return;
         }
 
