@@ -36,7 +36,7 @@ impl PermissionGate {
         let mut skills = Vec::new();
         for rule in &self.config.rules {
             if self.matches_rule(rule, caller_groups, caller_channel_group_id) {
-                if rule.allowed_skills.contains(&"*".to_string()) {
+                if rule.allowed_skills.iter().any(|s| s == "*") {
                     return vec!["*".to_string()];
                 }
                 skills.extend(rule.allowed_skills.clone());
