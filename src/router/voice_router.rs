@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
@@ -55,6 +55,7 @@ pub struct VoiceRouter {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     ts_clients: Arc<DashMap<u32, ClientInfo>>,
+    semaphore: Arc<Semaphore>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
 }
@@ -78,8 +79,10 @@ impl VoiceRouter {
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
                 .ok()
                 .map(Arc::new);
+        let max_concurrent = config.llm.max_concurrent_requests;
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
+            semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
             prompts,
@@ -256,6 +259,13 @@ impl VoiceRouter {
         let Some(clean_text) = preprocess_text_message(&chat.message) else {
             return Ok(());
         };
+        let _permit = match self.semaphore.acquire().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("VoiceRouter semaphore error: {e}");
+                return Ok(());
+            }
+        };
         self.handle_user_input(client, ctx, clean_text).await
     }
 
@@ -264,6 +274,13 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         audio: voicev1::AudioFrameEvent,
     ) -> Result<()> {
+        let _permit = match self.semaphore.acquire().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("VoiceRouter semaphore error: {e}");
+                return Ok(());
+            }
+        };
         let bot_clid = self.ts_adapter.get_bot_clid();
         if bot_clid != 0 && audio.from_client_id == bot_clid {
             return Ok(());
@@ -337,7 +354,7 @@ impl VoiceRouter {
         ctx.caller_name = chunk.speaker_name;
         ctx.caller_id = chunk.speaker_client_id;
 
-        let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
+        let (mut messages, tools, session_source) = self.build_omni_llm_request(&ctx, audio_data);
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -357,6 +374,8 @@ impl VoiceRouter {
                 if !result.content.is_empty() {
                     info!("[TS&TTS] LLM final reply: {}", &result.content);
                     self.send_reply(client, &ctx, &result.content).await?;
+                    self.llm
+                        .save_turn(&session_source, "[音频消息]".into(), result.content);
                 }
             }
             Err(e) => return Err(e.into()),
@@ -569,14 +588,20 @@ impl VoiceRouter {
         &self,
         ctx: &CallerContext,
         audio_data: String,
-    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    ) -> (
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        SessionSource,
+    ) {
         let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
+        let source = SessionSource::Headless {
+            caller_id: ctx.caller_id,
+        };
         let content = vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
-        let messages = vec![
-            json!({"role": "system", "content": format!("{system_prompt}\n\n{user_ctx}")}),
-            json!({"role": "user", "content": content}),
-        ];
-        (messages, tools)
+        let messages = self
+            .llm
+            .build_omni_messages(&source, &system_prompt, &user_ctx, content);
+        (messages, tools, source)
     }
 
     async fn send_reply(
