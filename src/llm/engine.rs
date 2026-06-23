@@ -31,13 +31,12 @@ impl LlmEngine {
         run_tool_loop(messages, tools, self.provider.as_ref(), executor, callbacks).await
     }
 
-    /// 构建带历史上下文的 messages
-    pub fn build_messages(
+    /// 构建系统提示 + 可选的上下文历史（不含最后一条用户消息）
+    fn build_context_base(
         &self,
         source: &SessionSource,
         system_prompt: &str,
         user_ctx: &str,
-        user_msg: &str,
     ) -> Vec<Value> {
         let system_content = format!("{system_prompt}\n\n{user_ctx}");
         let mut messages = vec![json!({"role": "system", "content": system_content})];
@@ -50,8 +49,32 @@ impl LlmEngine {
             }
         }
 
-        messages.push(json!({"role": "user", "content": user_msg}));
+        messages
+    }
 
+    /// 构建带历史上下文的 messages
+    pub fn build_messages(
+        &self,
+        source: &SessionSource,
+        system_prompt: &str,
+        user_ctx: &str,
+        user_msg: &str,
+    ) -> Vec<Value> {
+        let mut messages = self.build_context_base(source, system_prompt, user_ctx);
+        messages.push(json!({"role": "user", "content": user_msg}));
+        messages
+    }
+
+    /// 构建带历史上下文的 omni messages（用户消息为 audio content）
+    pub fn build_omni_messages(
+        &self,
+        source: &SessionSource,
+        system_prompt: &str,
+        user_ctx: &str,
+        user_content: Vec<Value>,
+    ) -> Vec<Value> {
+        let mut messages = self.build_context_base(source, system_prompt, user_ctx);
+        messages.push(json!({"role": "user", "content": user_content}));
         messages
     }
 
