@@ -25,13 +25,11 @@ pub enum ToolLoopError {
 
 pub struct ToolLoopResult {
     pub content: String,
-    pub reasoning: Option<String>,
     pub finish_reason: String,
 }
 
 struct AccumulatedResult {
     text: String,
-    reasoning: Option<String>,
     tool_calls: Vec<ToolCall>,
     finish_reason: String,
 }
@@ -46,7 +44,6 @@ async fn accumulate_stream(
         .chat_completion_stream(messages.to_vec(), tools.to_vec())
         .await?;
     let mut text = String::new();
-    let reasoning = None;
     let mut tool_calls = Vec::new();
     let mut finish_reason = String::new();
 
@@ -78,7 +75,6 @@ async fn accumulate_stream(
 
     Ok(AccumulatedResult {
         text,
-        reasoning,
         tool_calls,
         finish_reason,
     })
@@ -99,13 +95,11 @@ pub async fn run_tool_loop(
         if acc.tool_calls.is_empty() {
             let result = ToolLoopResult {
                 content: acc.text,
-                reasoning: acc.reasoning,
                 finish_reason: acc.finish_reason,
             };
             debug!(
                 event = "tool_loop.completed",
                 finish_reason = %result.finish_reason,
-                reasoning = ?result.reasoning,
                 "tool loop finished with no tool calls"
             );
             return Ok(result);

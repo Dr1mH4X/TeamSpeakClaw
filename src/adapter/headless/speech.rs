@@ -8,7 +8,6 @@ use audiopus::{Channels, SampleRate};
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
-use std::convert::TryInto;
 use tracing::{debug, error};
 
 use crate::config::AppConfig;
