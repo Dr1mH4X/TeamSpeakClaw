@@ -679,7 +679,7 @@ cargo run -- --log-level debug
 ## 相关资源
 
 - [Rust 官方文档](https://doc.rust-lang.org/book/)
-- [TeamSpeak ServerQuery 手册](https://yat.qa/resources/)
+- [TeamSpeak 3 相关资源](https://yat.qa/resources/)
 - [OpenAI API 文档](https://platform.openai.com/docs/api-reference)
 - [OneBot 11 标准](https://github.com/botuniverse/onebot-11)
 - [NapCat 文档](https://napneko.github.io/)

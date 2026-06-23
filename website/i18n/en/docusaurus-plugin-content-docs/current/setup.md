@@ -25,7 +25,7 @@ The extracted archive contains a `config/` directory with the following configur
 - `acl.toml` — Permission control rules
 - `prompts.toml` — System prompts and error messages
 
-Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak ServerQuery account credentials, LLM API Key, and other information.
+Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
 
 **Quick Configuration Checklist**:
 - `[headless]` — Fill in TeamSpeak server address (`server_address`), port (`server_port`), password, etc.
@@ -120,3 +120,7 @@ Once the configuration is complete, simply run the program:
 ```
 
 If configured correctly, the bot will connect to your TeamSpeak server and begin listening for events.
+
+## 6. Grant Permissions
+
+After the bot connects, **right-click the bot in the TeamSpeak client → Edit Server Groups** and assign it the **Serveradmin** server group. Otherwise, the bot will not be able to perform administrative actions (such as kick, ban, move users, etc.).

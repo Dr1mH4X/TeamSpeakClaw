@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// 会话来源
 #[derive(Debug, Clone)]
 pub enum SessionSource {
-    /// TeamSpeak ServerQuery
+    /// TeamSpeak 客户端
     TeamSpeak { clid: u32 },
     /// NapCat 私聊
     NapCatPrivate { user_id: i64 },

@@ -18,7 +18,7 @@ src/
 ├── cli.rs                   # --log-level
 ├── config/                  # settings.toml, acl.toml, prompts.toml
 ├── router/                  # Event routing
-│   ├── ts_router.rs         # TeamSpeak ServerQuery events (via tsclient-rs)
+│   ├── ts_router.rs         # TeamSpeak client events (via tsclient-rs)
 │   ├── nc_router.rs         # NapCat/QQ (OneBot 11 WebSocket)
 │   ├── voice_router.rs      # Headless gRPC events (STT/TTS/chat)
 │   └── unified.rs           # Cross-platform event normalization
