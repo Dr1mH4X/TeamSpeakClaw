@@ -3,12 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use tsclient_rs;
 
-use crate::config::{config_dir, AppConfig};
+use crate::config::AppConfig;
+
+/// 身份升级最大安全等级
+const IDENTITY_MAX_LEVEL: i32 = 29;
+/// 每次重试提升的等级步长
+const IDENTITY_UPGRADE_STEP: i32 = 5;
 
 /// 检查 TS 错误，如果是权限问题则额外提示用户。
 fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
@@ -18,7 +23,7 @@ fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
     );
     if is_perm {
         error!(
-            "{op} 失败：权限不足。请给机器人 Server Admin 权限（将机器人的服务器组加入 Admin 组）"
+            "{op} failed: insufficient permissions. Grant the bot Server Admin permissions"
         );
     }
     anyhow!("{op} failed: {err}")
@@ -30,28 +35,22 @@ pub struct TsAdapter {
     client: Arc<tsclient_rs::Client>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: std::sync::atomic::AtomicU32,
-    #[allow(dead_code)]
-    identity: Mutex<Option<tsclient_rs::Identity>>,
-    #[allow(dead_code)]
-    identity_file: PathBuf,
-    #[allow(dead_code)]
-    identity_level: u32,
 }
 
 impl TsAdapter {
-    pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
+    pub async fn connect(
+        config: Arc<AppConfig>,
+        identity_file: PathBuf,
+    ) -> Result<Arc<Self>> {
         let hc = &config.headless;
         let host = &hc.server_address;
         let port = hc.server_port;
         let nickname = &config.bot.nickname;
-        let identity_level: u32 = 8;
-        let identity_file = config_dir().join("identity.json");
 
-        let identity = Self::load_or_create_identity(&identity_file, identity_level)?;
-
+        let mut identity = Self::load_or_create_identity(&identity_file, 8)?;
         let addr = format!("{host}:{port}");
 
-        let opts = tsclient_rs::ClientOptions {
+        let make_opts = || tsclient_rs::ClientOptions {
             server_password: if hc.server_password.is_empty() {
                 None
             } else {
@@ -60,13 +59,91 @@ impl TsAdapter {
             ..Default::default()
         };
 
-        let mut client = tsclient_rs::Client::new(identity.clone(), addr, nickname.clone(), opts);
+        let mut current_level = identity.security_level();
+        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 
-        let (event_tx, _) = broadcast::channel::<TsEvent>(256);
+        loop {
+            let opts = make_opts();
+            let mut client =
+                tsclient_rs::Client::new(identity.clone(), addr.clone(), nickname.clone(), opts);
 
-        // 注册事件处理器 —— 直接用 event_tx clone，无需 Weak
+            let (event_tx, _) = broadcast::channel::<TsEvent>(256);
+            Self::register_event_handlers(&client, event_tx.clone());
+
+            client
+                .connect()
+                .await
+                .map_err(|e| anyhow!("tsclient connect failed: {e}"))?;
+
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, client.wait_connected(None)).await {
+                Ok(Ok(())) => {
+                    // 根据 STT/TTS/omni 配置设置 mute/硬件状态
+                    {
+                        let omni = config.llm.omni_model;
+                        let stt = hc.stt.enabled;
+                        let tts = hc.tts.enabled;
+                        let speaker_on = tts || stt || omni;
+                        let mic_on = tts;
+                        let cmd = format!(
+                            "clientupdate client_input_muted={} client_input_hardware={} client_output_muted={} client_output_hardware={}",
+                            if mic_on { 0 } else { 1 },
+                            if mic_on { 1 } else { 0 },
+                            if speaker_on { 0 } else { 1 },
+                            if speaker_on { 1 } else { 0 },
+                        );
+                        if let Err(e) = client.send_command_no_wait(&cmd).await {
+                            warn!("set mute/hardware state failed: {e}");
+                        }
+                    }
+
+                    // 加入指定频道
+                    if !hc.channel_id.is_empty() {
+                        let cid = hc.channel_id.trim();
+                        if let Ok(cid_u64) = cid.parse::<u64>() {
+                            let pw = &hc.channel_password;
+                            let clid = client.client_id();
+                            info!(cid = cid_u64, "joining channel on startup");
+                            if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
+                            {
+                                warn!("join channel failed: {e}");
+                            }
+                        } else {
+                            warn!(
+                                channel_id = %hc.channel_id,
+                                "invalid channel_id, must be a numeric ID"
+                            );
+                        }
+                    }
+
+                    let clid = client.client_id();
+                    let client = Arc::new(client);
+
+                    return Ok(Arc::new(Self {
+                        client,
+                        event_tx,
+                        bot_clid: std::sync::atomic::AtomicU32::new(clid as u32),
+                    }));
+                }
+                Ok(Err(e)) => {
+                    let _ = client.disconnect().await;
+                    return Err(anyhow!("wait_connected failed: {e:?}"));
+                }
+                Err(_) => {
+                    let _ = client.disconnect().await;
+                    current_level = Self::upgrade_identity_and_save(
+                        &mut identity,
+                        current_level,
+                        &identity_file,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    fn register_event_handlers(client: &tsclient_rs::Client, tx: broadcast::Sender<TsEvent>) {
         {
-            let tx = event_tx.clone();
+            let tx = tx.clone();
             client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
                 if let tsclient_rs::Event::TextMessage(ref msg) = event {
                     let _ = tx.send(TsEvent::TextMessage(TextMessageEvent {
@@ -86,7 +163,7 @@ impl TsAdapter {
         }
 
         {
-            let tx = event_tx.clone();
+            let tx = tx.clone();
             client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
                 if let tsclient_rs::Event::ClientEnter(ref info) = event {
                     let groups: Vec<u32> = info
@@ -111,7 +188,7 @@ impl TsAdapter {
         }
 
         {
-            let tx = event_tx.clone();
+            let tx = tx.clone();
             client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
                 if let tsclient_rs::Event::ClientLeave(ref ev) = event {
                     let _ = tx.send(TsEvent::ClientLeftView(ClientLeftEvent {
@@ -120,68 +197,30 @@ impl TsAdapter {
                 }
             }));
         }
+    }
 
-        // 连接
-        client
-            .connect()
-            .await
-            .map_err(|e| anyhow!("tsclient connect failed: {e}"))?;
-        client
-            .wait_connected(None)
-            .await
-            .map_err(|e| anyhow!("wait_connected failed: {e}"))?;
-
-        // 根据 STT/TTS/omni 配置设置 mute/硬件状态
-        {
-            let omni = config.llm.omni_model;
-            let stt = hc.stt.enabled;
-            let tts = hc.tts.enabled;
-
-            // TTS 启用 → 全开（需要听 + 说）；否则仅按 STT/omni 决定扬声器
-            let speaker_on = tts || stt || omni;
-            let mic_on = tts;
-
-            let cmd = format!(
-                "clientupdate client_input_muted={} client_input_hardware={} client_output_muted={} client_output_hardware={}",
-                if mic_on { 0 } else { 1 },
-                if mic_on { 1 } else { 0 },
-                if speaker_on { 0 } else { 1 },
-                if speaker_on { 1 } else { 0 },
-            );
-            if let Err(e) = client.send_command_no_wait(&cmd).await {
-                warn!("set mute/hardware state failed: {e}");
-            }
+    async fn upgrade_identity_and_save(
+        identity: &mut tsclient_rs::Identity,
+        current_level: i32,
+        identity_file: &std::path::Path,
+    ) -> Result<i32> {
+        let next_level = current_level + IDENTITY_UPGRADE_STEP;
+        if next_level > IDENTITY_MAX_LEVEL {
+            return Err(anyhow!(
+                "Server rejected connection at identity level {current_level} (tried max {IDENTITY_MAX_LEVEL})"
+            ));
         }
 
-        // 加入指定频道
-        if !hc.channel_id.is_empty() {
-            let cid = hc.channel_id.trim();
-            if let Ok(cid_u64) = cid.parse::<u64>() {
-                let pw = &hc.channel_password;
-                let clid = client.client_id();
-                info!(cid = cid_u64, "joining channel on startup");
-                if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await {
-                    warn!("join channel failed: {e}");
-                }
-            } else {
-                warn!(channel_id = %hc.channel_id, "invalid channel_id, must be a numeric ID");
-            }
-        }
+        info!("Upgrading identity to level {next_level} (this may take a few minutes)...");
+        identity
+            .upgrade_to_level(next_level, None)
+            .await
+            .map_err(|e| anyhow!("identity upgrade failed: {e}"))?;
 
-        let clid = client.client_id();
-
-        let client = Arc::new(client);
-
-        let adapter = Arc::new(Self {
-            client,
-            event_tx,
-            bot_clid: std::sync::atomic::AtomicU32::new(clid as u32),
-            identity: Mutex::new(Some(identity)),
-            identity_file,
-            identity_level,
-        });
-
-        Ok(adapter)
+        let s = identity.to_string();
+        let _ = std::fs::write(identity_file, &s);
+        info!("Identity upgraded to level {next_level}");
+        Ok(next_level)
     }
 
     /// 获取共享的 Client（voice 模块使用）
@@ -214,29 +253,6 @@ impl TsAdapter {
         }
         info!("Generated new identity at level {level}");
         Ok(identity)
-    }
-
-    #[allow(dead_code)]
-    async fn maybe_upgrade_identity(&self) -> Result<()> {
-        let mut ident = self.identity.lock().await;
-        if let Some(ref mut identity) = *ident {
-            let current = identity.security_level();
-            let target = self.identity_level as i32;
-            if current < target {
-                info!("Upgrading identity from level {current} to {target}...");
-                let upgrade = identity.upgrade_to_level(target, None);
-                match tokio::time::timeout(Duration::from_secs(120), upgrade).await {
-                    Ok(Ok(())) => {
-                        info!("Identity upgraded to level {target}");
-                        let s = identity.to_string();
-                        let _ = std::fs::write(&self.identity_file, &s);
-                    }
-                    Ok(Err(e)) => warn!("Identity upgrade failed: {e}"),
-                    Err(_) => warn!("Identity upgrade timed out after 120s"),
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn get_bot_clid(&self) -> u32 {

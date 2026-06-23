@@ -27,7 +27,8 @@ impl Skill for PokeClient {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let clid = args["clid"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))? as u32;
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
+            as u32;
         let msg = args["msg"].as_str().unwrap_or("Poke!");
 
         ctx.adapter.poke(clid, msg).await?;
@@ -52,14 +53,14 @@ impl Skill for PokeClient {
 
                 let clid = args["clid"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
                     as u32;
 
                 ts_adapter.poke(clid, msg).await?;
 
                 Ok(json!({
                     "status": "ok",
-                    "message": format!("已在TS戳了用户 {}", clid),
+                    "message": format!("Poked user {} in TS", clid),
                     "platform": "teamspeak",
                     "routed_by": "unified"
                 }))
@@ -121,7 +122,7 @@ impl Skill for SendMessage {
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
         let msg = args["msg"].as_str().unwrap_or("");
         if msg.is_empty() {
-            return Err(anyhow::anyhow!("消息内容不能为空"));
+            return Err(anyhow::anyhow!("Message content cannot be empty"));
         }
 
         let mode = args["mode"].as_str().unwrap_or("");
@@ -130,7 +131,7 @@ impl Skill for SendMessage {
             "private" => {
                 let clid = args["clid"]
                     .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
                     as u32;
 
                 (1, clid)
@@ -139,7 +140,7 @@ impl Skill for SendMessage {
             "server" => (3, 0),
             _ => {
                 return Err(anyhow::anyhow!(
-                    "无效的模式，必须是 private, channel, server"
+                    "Invalid mode, must be private, channel, server"
                 ))
             }
         };
@@ -162,7 +163,7 @@ impl Skill for SendMessage {
 
         let msg = args["msg"].as_str().unwrap_or("");
         if msg.is_empty() {
-            return Err(anyhow::anyhow!("消息内容不能为空"));
+            return Err(anyhow::anyhow!("Message content cannot be empty"));
         }
 
         let mode = args["mode"].as_str().unwrap_or("");
@@ -188,30 +189,30 @@ impl Skill for SendMessage {
 
                     match mode {
                         "private" => {
-                            let user_id = args["user_id"]
-                                .as_i64()
-                                .ok_or_else(|| anyhow::anyhow!("缺少必要参数: user_id"))?;
+                            let user_id = args["user_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!("Missing required parameter: user_id")
+                            })?;
                             nc_adapter.send_private(user_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
-                                "message": format!("已在QQ发送私聊消息: {}", prefixed_msg),
+                                "message": format!("Sent private message in QQ: {}", prefixed_msg),
                                 "platform": "napcat",
                                 "routed_by": "nc_route"
                             }))
                         }
                         "group" => {
-                            let group_id = args["group_id"]
-                                .as_i64()
-                                .ok_or_else(|| anyhow::anyhow!("缺少必要参数: group_id"))?;
+                            let group_id = args["group_id"].as_i64().ok_or_else(|| {
+                                anyhow::anyhow!("Missing required parameter: group_id")
+                            })?;
                             nc_adapter.send_group(group_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
-                                "message": format!("已在QQ群发送消息: {}", prefixed_msg),
+                                "message": format!("Sent message in QQ group: {}", prefixed_msg),
                                 "platform": "napcat",
                                 "routed_by": "nc_route"
                             }))
                         }
-                        _ => Err(anyhow::anyhow!("无效的模式，必须是 private, group")),
+                        _ => Err(anyhow::anyhow!("Invalid mode, must be private, group")),
                     }
                 } else {
                     // 默认：TS 原生发送
@@ -230,15 +231,16 @@ impl Skill for SendMessage {
 
                         let (targetmode, target_id) = match mode {
                             "private" => {
-                                let clid =
-                                    target.ok_or_else(|| anyhow::anyhow!("缺少必要参数: clid"))?;
+                                let clid = target.ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: clid")
+                                })?;
                                 (1, clid)
                             }
                             "channel" => (2, 0),
                             "server" => (3, 0),
                             _ => {
                                 return Err(anyhow::anyhow!(
-                                    "无效的模式，必须是 private, channel, server"
+                                    "Invalid mode, must be private, channel, server"
                                 ));
                             }
                         };
@@ -255,7 +257,7 @@ impl Skill for SendMessage {
                             .await?;
 
                         // 结果返回给 NC
-                        let reply = format!("已在TS发送消息: {} -> {}", mode, prefixed_msg);
+                        let reply = format!("Sent message in TS: {} -> {}", mode, prefixed_msg);
                         return Ok(json!({
                             "status": "ok",
                             "message": reply,
@@ -271,9 +273,13 @@ impl Skill for SendMessage {
                             let target = args["user_id"]
                                 .as_i64()
                                 .or_else(|| args["clid"].as_i64())
-                                .ok_or_else(|| anyhow::anyhow!("缺少必要参数: user_id"))?;
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: user_id")
+                                })?;
                             if ctx.caller_id_nc != 0 && target == ctx.caller_id_nc {
-                                return Err(anyhow::anyhow!("不能对自己执行此操作"));
+                                return Err(anyhow::anyhow!(
+                                    "Cannot perform this action on yourself"
+                                ));
                             }
                             nc_adapter.send_private(target, &segs).await?;
                             Ok(json!({
@@ -287,7 +293,9 @@ impl Skill for SendMessage {
                             let group_id = args["group_id"]
                                 .as_i64()
                                 .or(ctx.nc_group_id)
-                                .ok_or_else(|| anyhow::anyhow!("缺少必要参数: group_id"))?;
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("Missing required parameter: group_id")
+                                })?;
                             nc_adapter.send_group(group_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
@@ -296,7 +304,7 @@ impl Skill for SendMessage {
                                 "routed_by": "default"
                             }))
                         }
-                        _ => Err(anyhow::anyhow!("无效的模式，必须是 private, group")),
+                        _ => Err(anyhow::anyhow!("Invalid mode, must be private, group")),
                     }
                 } else {
                     Err(anyhow::anyhow!("NapCat adapter not available"))
