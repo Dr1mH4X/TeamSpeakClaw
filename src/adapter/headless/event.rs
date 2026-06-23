@@ -18,7 +18,7 @@ fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
     );
     if is_perm {
         error!(
-            "{op} 失败：权限不足。请给机器人 Server Admin 权限（将机器人的服务器组加入 Admin 组）"
+            "{op} failed: insufficient permissions. Grant the bot Server Admin permissions"
         );
     }
     anyhow!("{op} failed: {err}")

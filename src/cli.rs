@@ -20,7 +20,7 @@ pub fn print_banner() {
                                                                                           "#;
 
     println!("{}", banner);
-    println!(" 版本: v{}", env!("CARGO_PKG_VERSION"));
+    println!(" Version: v{}", env!("CARGO_PKG_VERSION"));
     println!(" GitHub: https://github.com/Dr1mH4X/TeamSpeakClaw");
     println!("{:-<86}", "");
 }
