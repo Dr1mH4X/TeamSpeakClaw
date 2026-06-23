@@ -154,7 +154,7 @@ impl VoiceRouter {
                 return CallerContext {
                     caller_id: c.clid,
                     caller_name: chat.invoker_name.clone(),
-                    caller_uid: chat.invoker_unique_id.clone(),
+                    caller_uid: c.clid.to_string(),
                     groups: c.server_groups.clone(),
                     channel_group_id: c.channel_group_id,
                     reply_target_mode: chat.reply_target_mode,
@@ -165,7 +165,7 @@ impl VoiceRouter {
         CallerContext {
             caller_id: 0,
             caller_name: chat.invoker_name.clone(),
-            caller_uid: chat.invoker_unique_id.clone(),
+            caller_uid: 0.to_string(),
             groups: vec![],
             channel_group_id: 0,
             reply_target_mode: chat.reply_target_mode,
@@ -189,7 +189,7 @@ impl VoiceRouter {
             return CallerContext {
                 caller_id: c.clid,
                 caller_name: c.nickname.clone(),
-                caller_uid: c.cldbid.to_string(),
+                caller_uid: c.clid.to_string(),
                 groups: c.server_groups.clone(),
                 channel_group_id: c.channel_group_id,
                 reply_target_mode,
@@ -233,13 +233,25 @@ impl VoiceRouter {
                 None,
             );
             let args = call.arguments.clone();
-            match skill.execute_unified(args.clone(), &unified_ctx).await {
-                Ok(v) => Ok(v),
-                Err(_) => skill.execute(args, &exec_ctx).await,
+            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
+                Ok(val) => {
+                    info!(skill = %call.name, caller = %ctx.caller_name, "Voice unified skill executed successfully");
+                    Ok(val)
+                }
+                Err(unified_err) => {
+                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
+                    skill.execute(args, &exec_ctx).await
+                }
+            };
+            match result {
+                Ok(val) => val.to_string(),
+                Err(e) => {
+                    error!(skill = %call.name, error = %e, "Skill execution failed");
+                    format!("技能执行失败: {}", e)
+                }
             }
-            .map(|v| v.to_string())
-            .unwrap_or_else(|e| format!("技能执行失败: {}", e))
         } else {
+            warn!(caller = %ctx.caller_name, skill = %call.name, "Skill not found");
             "未找到指定的技能".to_string()
         }
     }
@@ -337,7 +349,7 @@ impl VoiceRouter {
         ctx.caller_name = chunk.speaker_name;
         ctx.caller_id = chunk.speaker_client_id;
 
-        let (mut messages, tools) = self.build_omni_llm_request(&ctx, audio_data);
+        let (mut messages, tools, session_source) = self.build_omni_llm_request(&ctx, audio_data);
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -357,9 +369,20 @@ impl VoiceRouter {
                 if !result.content.is_empty() {
                     info!("[TS&TTS] LLM final reply: {}", &result.content);
                     self.send_reply(client, &ctx, &result.content).await?;
+                    self.llm
+                        .save_turn(&session_source, "[音频消息]".into(), result.content);
                 }
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if let Some(ref cb) = callbacks {
+                    if let Some(ref on_end) = cb.on_turn_end {
+                        on_end("stop");
+                    }
+                }
+                self.send_reply(client, &ctx, "AI 后端当前不可用。请稍后再试。")
+                    .await?;
+                return Err(e.into());
+            }
         };
         Ok(())
     }
@@ -569,14 +592,20 @@ impl VoiceRouter {
         &self,
         ctx: &CallerContext,
         audio_data: String,
-    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    ) -> (
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        SessionSource,
+    ) {
         let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
+        let source = SessionSource::Headless {
+            caller_id: ctx.caller_id,
+        };
         let content = vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
-        let messages = vec![
-            json!({"role": "system", "content": format!("{system_prompt}\n\n{user_ctx}")}),
-            json!({"role": "user", "content": content}),
-        ];
-        (messages, tools)
+        let messages = self
+            .llm
+            .build_omni_messages(&source, &system_prompt, &user_ctx, content);
+        (messages, tools, source)
     }
 
     async fn send_reply(
