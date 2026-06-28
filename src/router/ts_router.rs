@@ -63,24 +63,11 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
-        while let Ok(event) = rx.recv().await {
-            match event {
-                TsEvent::TextMessage(msg) => {
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        this.handle_message(msg).await;
-                    });
-                }
-                TsEvent::ClientEnterView(e) => {
-                    debug!(
-                        "Client entered view: clid={}, nickname={}",
-                        e.clid, e.client_nickname
-                    );
-                }
-                TsEvent::ClientLeftView(e) => {
-                    debug!("Client left view: clid={}", e.clid);
-                }
-            }
+        while let Ok(TsEvent::TextMessage(msg)) = rx.recv().await {
+            let this = self.clone();
+            tokio::spawn(async move {
+                this.handle_message(msg).await;
+            });
         }
         Ok(())
     }
@@ -184,27 +171,32 @@ impl EventRouter {
         };
         let system_prompt = &self.prompts.system.content;
 
-        let online_clients = match self.adapter.list_clients().await {
+        let (online_clients, invoker_channel) = match self.adapter.list_clients().await {
             Ok(clients) => {
-                let arr: Vec<_> = clients
+                let arr: Vec<serde_json::Value> = clients
                     .iter()
                     .map(|c| {
-                        let g: Vec<u32> =
-                            c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
-                        json!({ "clid": c.id, "nickname": c.nickname, "uid": c.uid, "groups": g, "channel_id": c.channel_id })
+                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
                     })
                     .collect();
-                serde_json::to_string(&arr).unwrap_or_default()
+                let invoker_chan = clients
+                    .iter()
+                    .find(|c| c.id as u32 == event.invoker_id)
+                    .map(|c| c.channel_id)
+                    .unwrap_or(0);
+                info!("Fetched {} online clients for LLM context", clients.len());
+                (serde_json::to_string(&arr).unwrap_or_default(), invoker_chan)
             }
             Err(e) => {
                 warn!("Failed to fetch online clients: {e}");
-                String::new()
+                (String::new(), 0)
             }
         };
 
         let user_ctx = format!(
-            "User: {} (clid: {}, groups: {:?})\nOnline clients: {}",
-            event.invoker_name, event.invoker_id, groups, online_clients
+            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
+Online: {}"#,
+            event.invoker_name, event.invoker_id, invoker_channel, online_clients
         );
 
         let mut messages = self

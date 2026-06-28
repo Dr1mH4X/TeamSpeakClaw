@@ -172,7 +172,7 @@ pub struct SkillRegistry {
 impl SkillRegistry {
     pub fn with_defaults(music_backend: &str) -> Self {
         use communication::{PokeClient, SendMessage};
-        use information::{GetClientInfo, GetClientList};
+        use information::GetClientInfo;
         use moderation::{BanClient, KickClient, MoveClient};
         use music::MusicControl;
         use tracing::info;
@@ -183,7 +183,6 @@ impl SkillRegistry {
         registry.register(Box::new(KickClient));
         registry.register(Box::new(BanClient));
         registry.register(Box::new(MoveClient));
-        registry.register(Box::new(GetClientList));
         registry.register(Box::new(GetClientInfo));
         registry.register(Box::new(MusicControl::new(music_backend)));
         info!("Skills registered: {:?}", registry.list_skills());

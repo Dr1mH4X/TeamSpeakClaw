@@ -13,6 +13,7 @@ use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -376,9 +377,28 @@ impl NcRouter {
         };
 
         let system_prompt = &self.prompts.system.content;
+
+        let online_suffix = if let Some(ref adapter) = self.ts_adapter {
+            match adapter.list_clients().await {
+                Ok(clients) => {
+                    let arr: Vec<serde_json::Value> = clients
+                        .iter()
+                        .map(|c| {
+                            json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
+                        })
+                        .collect();
+                    info!("Fetched {} online clients for LLM context", clients.len());
+                    format!("\nOnline: {}", serde_json::to_string(&arr).unwrap_or_default())
+                }
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
         let user_ctx = match group_id {
-            Some(gid) => format!("User: {} (QQ: {}, Group: {})", sender_name, user_id, gid),
-            None => format!("User: {} (QQ: {}, Private Chat)", sender_name, user_id),
+            Some(gid) => format!("User: {} (QQ: {}, Group: {}){}", sender_name, user_id, gid, online_suffix),
+            None => format!("User: {} (QQ: {}, Private Chat){}", sender_name, user_id, online_suffix),
         };
 
         let mut messages = self

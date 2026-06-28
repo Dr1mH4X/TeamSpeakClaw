@@ -26,9 +26,9 @@ use voicev1::voice_service_client::VoiceServiceClient;
 struct CallerContext {
     caller_id: u32,
     caller_name: String,
-    caller_uid: String,
     groups: Vec<u32>,
     channel_group_id: u32,
+    channel_id: u64,
     reply_target_mode: i32,
     reply_target_client_id: u32,
 }
@@ -148,25 +148,33 @@ impl VoiceRouter {
                 if let Some(c) = clients.iter().find(|c| c.nickname == chat.invoker_name) {
                     let groups: Vec<u32> =
                         c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    debug!(
+                        "Resolved chat caller '{}' from online list: clid={}",
+                        chat.invoker_name, c.id
+                    );
                     return CallerContext {
                         caller_id: c.id as u32,
                         caller_name: chat.invoker_name.clone(),
-                        caller_uid: c.id.to_string(),
                         groups,
                         channel_group_id: 0,
+                        channel_id: c.channel_id,
                         reply_target_mode: chat.reply_target_mode,
                         reply_target_client_id: chat.reply_target_client_id,
                     };
                 }
+                debug!(
+                    "Chat caller '{}' not found in online list, using fallback",
+                    chat.invoker_name
+                );
             }
             Err(e) => warn!("Failed to list clients for chat caller resolution: {e}"),
         }
         CallerContext {
             caller_id: 0,
             caller_name: chat.invoker_name.clone(),
-            caller_uid: 0.to_string(),
             groups: vec![],
             channel_group_id: 0,
+            channel_id: 0,
             reply_target_mode: chat.reply_target_mode,
             reply_target_client_id: chat.reply_target_client_id,
         }
@@ -188,25 +196,33 @@ impl VoiceRouter {
                 if let Some(c) = clients.iter().find(|c| c.id as u32 == audio.from_client_id) {
                     let groups: Vec<u32> =
                         c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    debug!(
+                        "Resolved audio caller '{}' from online list: clid={}",
+                        audio.from_client_name, c.id
+                    );
                     return CallerContext {
                         caller_id: c.id as u32,
                         caller_name: c.nickname.clone(),
-                        caller_uid: c.id.to_string(),
                         groups,
                         channel_group_id: 0,
+                        channel_id: c.channel_id,
                         reply_target_mode,
                         reply_target_client_id,
                     };
                 }
+                debug!(
+                    "Audio caller '{}' not found in online list, using fallback",
+                    audio.from_client_name
+                );
             }
             Err(e) => warn!("Failed to list clients for audio caller resolution: {e}"),
         }
         CallerContext {
             caller_id: audio.from_client_id,
             caller_name: audio.from_client_name.clone(),
-            caller_uid: audio.from_client_id.to_string(),
             groups: vec![],
             channel_group_id: 0,
+            channel_id: 0,
             reply_target_mode,
             reply_target_client_id,
         }
@@ -563,14 +579,13 @@ impl VoiceRouter {
 
         let online_clients = match self.ts_adapter.list_clients().await {
             Ok(clients) => {
-                let arr: Vec<_> = clients
+                let arr: Vec<serde_json::Value> = clients
                     .iter()
                     .map(|c| {
-                        let g: Vec<u32> =
-                            c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
-                        json!({ "clid": c.id, "nickname": c.nickname, "uid": c.uid, "groups": g, "channel_id": c.channel_id })
+                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
                     })
                     .collect();
+                info!("Fetched {} online clients for LLM context", clients.len());
                 serde_json::to_string(&arr).unwrap_or_default()
             }
             Err(e) => {
@@ -580,13 +595,9 @@ impl VoiceRouter {
         };
 
         let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})\nOnline clients: {}",
-            ctx.caller_name,
-            ctx.caller_uid,
-            ctx.caller_id,
-            ctx.groups,
-            ctx.channel_group_id,
-            online_clients
+            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
+Online: {}"#,
+            ctx.caller_name, ctx.caller_id, ctx.channel_id, online_clients
         );
         let allowed_skills = self
             .gate
