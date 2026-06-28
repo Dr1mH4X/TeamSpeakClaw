@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
@@ -21,16 +20,15 @@ use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::router::ClientInfo;
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use voicev1::voice_service_client::VoiceServiceClient;
 
 struct CallerContext {
     caller_id: u32,
     caller_name: String,
-    caller_uid: String,
     groups: Vec<u32>,
     channel_group_id: u32,
+    channel_id: u64,
     reply_target_mode: i32,
     reply_target_client_id: u32,
 }
@@ -54,7 +52,6 @@ pub struct VoiceRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
-    ts_clients: Arc<DashMap<u32, ClientInfo>>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
 }
@@ -72,7 +69,6 @@ impl VoiceRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
         ts_adapter: Arc<TsAdapter>,
-        ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
         let speech_provider =
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
@@ -87,7 +83,6 @@ impl VoiceRouter {
             llm,
             registry,
             ts_adapter,
-            ts_clients,
             speech_provider,
         }
     }
@@ -147,33 +142,45 @@ impl VoiceRouter {
         s
     }
 
-    fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> CallerContext {
-        for item in self.ts_clients.iter() {
-            let c = item.value();
-            if c.nickname == chat.invoker_name {
-                return CallerContext {
-                    caller_id: c.clid,
-                    caller_name: chat.invoker_name.clone(),
-                    caller_uid: c.clid.to_string(),
-                    groups: c.server_groups.clone(),
-                    channel_group_id: c.channel_group_id,
-                    reply_target_mode: chat.reply_target_mode,
-                    reply_target_client_id: chat.reply_target_client_id,
-                };
+    async fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> CallerContext {
+        match self.ts_adapter.list_clients().await {
+            Ok(clients) => {
+                if let Some(c) = clients.iter().find(|c| c.nickname == chat.invoker_name) {
+                    let groups: Vec<u32> =
+                        c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    debug!(
+                        "Resolved chat caller '{}' from online list: clid={}",
+                        chat.invoker_name, c.id
+                    );
+                    return CallerContext {
+                        caller_id: c.id as u32,
+                        caller_name: chat.invoker_name.clone(),
+                        groups,
+                        channel_group_id: 0,
+                        channel_id: c.channel_id,
+                        reply_target_mode: chat.reply_target_mode,
+                        reply_target_client_id: chat.reply_target_client_id,
+                    };
+                }
+                debug!(
+                    "Chat caller '{}' not found in online list, using fallback",
+                    chat.invoker_name
+                );
             }
+            Err(e) => warn!("Failed to list clients for chat caller resolution: {e}"),
         }
         CallerContext {
             caller_id: 0,
             caller_name: chat.invoker_name.clone(),
-            caller_uid: 0.to_string(),
             groups: vec![],
             channel_group_id: 0,
+            channel_id: 0,
             reply_target_mode: chat.reply_target_mode,
             reply_target_client_id: chat.reply_target_client_id,
         }
     }
 
-    fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
+    async fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
         let reply_target_mode = match self.config.bot.default_reply_mode.as_str() {
             "channel" => 2,
             "server" => 3,
@@ -184,24 +191,38 @@ impl VoiceRouter {
         } else {
             0
         };
-        if let Some(item) = self.ts_clients.get(&audio.from_client_id) {
-            let c = item.value();
-            return CallerContext {
-                caller_id: c.clid,
-                caller_name: c.nickname.clone(),
-                caller_uid: c.clid.to_string(),
-                groups: c.server_groups.clone(),
-                channel_group_id: c.channel_group_id,
-                reply_target_mode,
-                reply_target_client_id,
-            };
+        match self.ts_adapter.list_clients().await {
+            Ok(clients) => {
+                if let Some(c) = clients.iter().find(|c| c.id as u32 == audio.from_client_id) {
+                    let groups: Vec<u32> =
+                        c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    debug!(
+                        "Resolved audio caller '{}' from online list: clid={}",
+                        audio.from_client_name, c.id
+                    );
+                    return CallerContext {
+                        caller_id: c.id as u32,
+                        caller_name: c.nickname.clone(),
+                        groups,
+                        channel_group_id: 0,
+                        channel_id: c.channel_id,
+                        reply_target_mode,
+                        reply_target_client_id,
+                    };
+                }
+                debug!(
+                    "Audio caller '{}' not found in online list, using fallback",
+                    audio.from_client_name
+                );
+            }
+            Err(e) => warn!("Failed to list clients for audio caller resolution: {e}"),
         }
         CallerContext {
             caller_id: audio.from_client_id,
             caller_name: audio.from_client_name.clone(),
-            caller_uid: audio.from_client_id.to_string(),
             groups: vec![],
             channel_group_id: 0,
+            channel_id: 0,
             reply_target_mode,
             reply_target_client_id,
         }
@@ -219,7 +240,6 @@ impl VoiceRouter {
         if let Some(skill) = self.registry.get(&call.name) {
             let exec_ctx = ExecutionContext {
                 adapter: self.ts_adapter.clone(),
-                clients: self.ts_clients.as_ref(),
                 caller_id: ctx.caller_id,
                 caller_name: ctx.caller_name.clone(),
                 caller_groups: ctx.groups.clone(),
@@ -229,7 +249,6 @@ impl VoiceRouter {
             };
             let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx).with_cross_adapters(
                 Some(self.ts_adapter.clone()),
-                Some(self.ts_clients.as_ref()),
                 None,
             );
             let args = call.arguments.clone();
@@ -261,7 +280,7 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
-        let ctx = self.resolve_caller_from_chat(&chat);
+        let ctx = self.resolve_caller_from_chat(&chat).await;
         if self.should_ignore_chat(&chat, ctx.caller_id) || !chat.should_trigger_llm {
             return Ok(());
         }
@@ -320,7 +339,7 @@ impl VoiceRouter {
             return Ok(());
         };
 
-        let mut ctx = self.resolve_caller_from_audio(&audio);
+        let mut ctx = self.resolve_caller_from_audio(&audio).await;
         ctx.caller_name = chunk.speaker_name;
         ctx.caller_id = chunk.speaker_client_id;
         self.handle_user_input(client, ctx, text).await
@@ -345,11 +364,11 @@ impl VoiceRouter {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
         let audio_base64 = BASE64.encode(&wav_bytes);
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
-        let mut ctx = self.resolve_caller_from_audio(&audio);
+        let mut ctx = self.resolve_caller_from_audio(&audio).await;
         ctx.caller_name = chunk.speaker_name;
         ctx.caller_id = chunk.speaker_client_id;
 
-        let (mut messages, tools, session_source) = self.build_omni_llm_request(&ctx, audio_data);
+        let (mut messages, tools, session_source) = self.build_omni_llm_request(&ctx, audio_data).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -399,7 +418,7 @@ impl VoiceRouter {
     ) -> Result<()> {
         info!(event = "voice.chat.user_message", invoker = %ctx.caller_name, clid = ctx.caller_id, message = %self.truncate_for_log(&user_msg));
 
-        let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone());
+        let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone()).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -552,23 +571,33 @@ impl VoiceRouter {
         })
     }
 
-    fn build_llm_base_context(
+    async fn build_llm_base_context(
         &self,
         ctx: &CallerContext,
     ) -> (String, String, Vec<serde_json::Value>) {
         let system_prompt = self.prompts.system.content.clone();
-        let online_clients: Vec<_> = self.ts_clients.iter().map(|item| {
-            let c = item.value();
-            json!({ "clid": c.clid, "nickname": c.nickname, "uid": c.cldbid, "groups": c.server_groups, "channel_id": c.channel_id })
-        }).collect();
+
+        let online_clients = match self.ts_adapter.list_clients().await {
+            Ok(clients) => {
+                let arr: Vec<serde_json::Value> = clients
+                    .iter()
+                    .map(|c| {
+                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
+                    })
+                    .collect();
+                info!("Fetched {} online clients for LLM context", clients.len());
+                serde_json::to_string(&arr).unwrap_or_default()
+            }
+            Err(e) => {
+                warn!("Failed to fetch online clients: {e}");
+                String::new()
+            }
+        };
+
         let user_ctx = format!(
-            "User: {} (uid: {}, clid: {}, groups: {:?}, channel_group: {})\nOnline clients: {}",
-            ctx.caller_name,
-            ctx.caller_uid,
-            ctx.caller_id,
-            ctx.groups,
-            ctx.channel_group_id,
-            serde_json::to_string(&online_clients).unwrap_or_default()
+            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
+Online: {}"#,
+            ctx.caller_name, ctx.caller_id, ctx.channel_id, online_clients
         );
         let allowed_skills = self
             .gate
@@ -577,7 +606,7 @@ impl VoiceRouter {
         (system_prompt, user_ctx, tools)
     }
 
-    fn build_llm_request(
+    async fn build_llm_request(
         &self,
         ctx: &CallerContext,
         user_msg: String,
@@ -586,7 +615,7 @@ impl VoiceRouter {
         Vec<serde_json::Value>,
         SessionSource,
     ) {
-        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx).await;
         let source = SessionSource::Headless {
             caller_id: ctx.caller_id,
         };
@@ -596,7 +625,7 @@ impl VoiceRouter {
         (messages, tools, source)
     }
 
-    fn build_omni_llm_request(
+    async fn build_omni_llm_request(
         &self,
         ctx: &CallerContext,
         audio_data: String,
@@ -605,7 +634,7 @@ impl VoiceRouter {
         Vec<serde_json::Value>,
         SessionSource,
     ) {
-        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx);
+        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx).await;
         let source = SessionSource::Headless {
             caller_id: ctx.caller_id,
         };

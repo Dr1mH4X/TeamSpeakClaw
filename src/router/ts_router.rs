@@ -8,19 +8,9 @@ use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
-use dashmap::DashMap;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-
-#[derive(Debug, Clone)]
-pub struct ClientInfo {
-    pub clid: u32,
-    pub cldbid: u32,
-    pub nickname: String,
-    pub server_groups: Vec<u32>,
-    pub channel_group_id: u32,
-    pub channel_id: u32,
-}
 
 struct SqExecutor<'a> {
     router: &'a EventRouter,
@@ -38,11 +28,11 @@ impl ToolExecutor for SqExecutor<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct EventRouter {
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
     adapter: Arc<TsAdapter>,
-    pub clients: Arc<DashMap<u32, ClientInfo>>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
@@ -57,14 +47,12 @@ impl EventRouter {
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
-        clients: Arc<DashMap<u32, ClientInfo>>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> Self {
         Self {
             config,
             prompts,
             adapter,
-            clients,
             gate,
             llm,
             registry,
@@ -75,95 +63,13 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
-        let snapshot_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.adapter.fetch_client_snapshot(),
-        )
-        .await;
-
-        match snapshot_result {
-            Ok(Ok(snapshot)) => {
-                let snapshot_count = snapshot.len();
-                for client in snapshot {
-                    self.cache_client(
-                        client.clid,
-                        client.cldbid,
-                        client.client_nickname,
-                        client.client_server_groups,
-                        client.client_channel_group_id,
-                        client.channel_id,
-                    );
-                }
-                info!(
-                    "Prewarmed client cache with {} online clients",
-                    snapshot_count
-                );
-            }
-            Ok(Err(err)) => warn!("Failed to prewarm client cache: {err}"),
-            Err(_) => warn!("Timed out while prewarming client cache"),
-        }
-
-        while let Ok(event) = rx.recv().await {
-            match event {
-                TsEvent::TextMessage(msg) => {
-                    let config = self.config.clone();
-                    let prompts = self.prompts.clone();
-                    let adapter = self.adapter.clone();
-                    let clients = self.clients.clone();
-                    let gate = self.gate.clone();
-                    let llm = self.llm.clone();
-                    let registry = self.registry.clone();
-                    let nc_adapter = self.nc_adapter.clone();
-
-                    tokio::spawn(async move {
-                        let router = Self::new_with_clients(
-                            config, prompts, adapter, gate, llm, registry, clients, nc_adapter,
-                        );
-                        router.handle_message(msg).await;
-                    });
-                }
-                TsEvent::ClientEnterView(e) => {
-                    debug!(
-                        "Client entered view: clid={}, nickname={}",
-                        e.clid, e.client_nickname
-                    );
-                    self.cache_client(
-                        e.clid,
-                        e.cldbid,
-                        e.client_nickname,
-                        e.client_server_groups,
-                        e.client_channel_group_id,
-                        e.channel_id,
-                    );
-                }
-                TsEvent::ClientLeftView(e) => {
-                    self.clients.remove(&e.clid);
-                }
-            }
+        while let Ok(TsEvent::TextMessage(msg)) = rx.recv().await {
+            let this = self.clone();
+            tokio::spawn(async move {
+                this.handle_message(msg).await;
+            });
         }
         Ok(())
-    }
-
-    fn cache_client(
-        &self,
-        clid: u32,
-        cldbid: u32,
-        nickname: String,
-        server_groups: Vec<u32>,
-        channel_group_id: u32,
-        channel_id: u32,
-    ) {
-        self.clients.insert(
-            clid,
-            ClientInfo {
-                clid,
-                cldbid,
-                nickname,
-                server_groups,
-                channel_group_id,
-                channel_id,
-            },
-        );
     }
 
     async fn execute_skill(
@@ -176,7 +82,6 @@ impl EventRouter {
         if let Some(skill) = self.registry.get(&call.name) {
             let ctx = ExecutionContext {
                 adapter: self.adapter.clone(),
-                clients: self.clients.as_ref(),
                 caller_id: event.invoker_id,
                 caller_name: event.invoker_name.clone(),
                 caller_groups: groups.to_vec(),
@@ -186,7 +91,6 @@ impl EventRouter {
             };
             let unified_ctx = UnifiedExecutionContext::from_ts(&ctx).with_cross_adapters(
                 Some(self.adapter.clone()),
-                Some(self.clients.as_ref()),
                 self.nc_adapter.clone(),
             );
 
@@ -255,24 +159,44 @@ impl EventRouter {
             event.invoker_name, event.invoker_id, msg_content
         );
 
-        let (groups, channel_group_id) = if let Some(client) = self.clients.get(&event.invoker_id) {
-            (client.server_groups.clone(), client.channel_group_id)
-        } else {
-            let groups: Vec<u32> = event
-                .invoker_groups
-                .iter()
-                .filter_map(|g| g.parse().ok())
-                .collect();
-            (groups, 0)
-        };
+        let groups: Vec<u32> = event
+            .invoker_groups
+            .iter()
+            .filter_map(|g| g.parse().ok())
+            .collect();
+        let channel_group_id = 0;
 
         let source = SessionSource::TeamSpeak {
             clid: event.invoker_id,
         };
         let system_prompt = &self.prompts.system.content;
+
+        let (online_clients, invoker_channel) = match self.adapter.list_clients().await {
+            Ok(clients) => {
+                let arr: Vec<serde_json::Value> = clients
+                    .iter()
+                    .map(|c| {
+                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
+                    })
+                    .collect();
+                let invoker_chan = clients
+                    .iter()
+                    .find(|c| c.id as u32 == event.invoker_id)
+                    .map(|c| c.channel_id)
+                    .unwrap_or(0);
+                info!("Fetched {} online clients for LLM context", clients.len());
+                (serde_json::to_string(&arr).unwrap_or_default(), invoker_chan)
+            }
+            Err(e) => {
+                warn!("Failed to fetch online clients: {e}");
+                (String::new(), 0)
+            }
+        };
+
         let user_ctx = format!(
-            "User: {} (clid: {}, groups: {:?}, channel_group: {})",
-            event.invoker_name, event.invoker_id, groups, channel_group_id
+            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
+Online: {}"#,
+            event.invoker_name, event.invoker_id, invoker_channel, online_clients
         );
 
         let mut messages = self

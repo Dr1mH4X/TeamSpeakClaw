@@ -6,17 +6,18 @@ use tracing::info;
 
 /// 检查是否可以对目标执行操作
 /// 返回目标的组信息（如果存在）和权限检查结果
-fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
+async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     // 自操作防护
     if clid == ctx.caller_id {
         return Err(anyhow::anyhow!("Cannot perform this action on yourself"));
     }
 
-    // 获取目标的组信息
-    let target_groups = ctx
-        .clients
-        .get(&clid)
-        .map(|c| c.server_groups.clone())
+    // 获取目标的组信息（实时查询）
+    let clients = ctx.adapter.list_clients().await?;
+    let target_groups: Vec<u32> = clients
+        .iter()
+        .find(|c| c.id as u32 == clid)
+        .map(|c| c.server_groups.iter().filter_map(|g| g.parse().ok()).collect())
         .unwrap_or_default();
 
     // 检查是否可以对目标执行操作
@@ -33,7 +34,7 @@ fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
     Ok(target_groups)
 }
 
-async fn validate_channel_exists(ctx: &ExecutionContext<'_>, channel_id: u32) -> Result<()> {
+async fn validate_channel_exists(ctx: &ExecutionContext, channel_id: u32) -> Result<()> {
     if channel_id == 0 {
         return Err(anyhow::anyhow!("Target channel ID must be greater than 0"));
     }
@@ -76,7 +77,7 @@ impl Skill for KickClient {
         let reason = args["reason"].as_str().unwrap_or("Kicked by bot");
 
         // 权限和自操作检查
-        validate_target(ctx, clid)?;
+        validate_target(ctx, clid).await?;
 
         ctx.adapter.kick(clid, reason).await?;
         Ok(json!({"status": "ok", "message": "Client kicked"}))
@@ -120,7 +121,7 @@ impl Skill for BanClient {
         let reason = args["reason"].as_str().unwrap_or("Banned by bot");
 
         // 权限和自操作检查
-        validate_target(ctx, clid)?;
+        validate_target(ctx, clid).await?;
 
         ctx.adapter.ban(clid, time, reason).await?;
         Ok(json!({"status": "ok", "message": "Client banned"}))
@@ -166,14 +167,7 @@ impl Skill for MoveClient {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: channel_id"))?
             as u32;
 
-        validate_target(ctx, clid)?;
-
-        if !ctx.clients.contains_key(&clid) {
-            return Err(anyhow::anyhow!(
-                "Client {} is not online or does not exist",
-                clid
-            ));
-        }
+        validate_target(ctx, clid).await?;
 
         validate_channel_exists(ctx, channel_id).await?;
 

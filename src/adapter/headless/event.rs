@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 
@@ -100,7 +100,6 @@ impl TsAdapter {
                         if let Ok(cid_u64) = cid.parse::<u64>() {
                             let pw = &hc.channel_password;
                             let clid = client.client_id();
-                            info!(cid = cid_u64, "joining channel on startup");
                             if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
                             {
                                 warn!("join channel failed: {e}");
@@ -160,41 +159,7 @@ impl TsAdapter {
             }));
         }
 
-        {
-            let tx = tx.clone();
-            client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::ClientEnter(ref info) = event {
-                    let groups: Vec<u32> = info
-                        .server_groups
-                        .iter()
-                        .filter_map(|g| g.parse().ok())
-                        .collect();
-                    let _ = tx.send(TsEvent::ClientEnterView(ClientEnterEvent {
-                        clid: info.id as u32,
-                        cldbid: 0,
-                        client_nickname: info.nickname.clone(),
-                        client_server_groups: groups,
-                        client_channel_group_id: 0,
-                        channel_id: info.channel_id as u32,
-                    }));
-                    debug!(
-                        "Client entered view: clid={}, nickname={}, channel_id={}",
-                        info.id, info.nickname, info.channel_id
-                    );
-                }
-            }));
-        }
 
-        {
-            let tx = tx.clone();
-            client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::ClientLeave(ref ev) = event {
-                    let _ = tx.send(TsEvent::ClientLeftView(ClientLeftEvent {
-                        clid: ev.id as u32,
-                    }));
-                }
-            }));
-        }
     }
 
     async fn upgrade_identity_and_save(
@@ -317,28 +282,6 @@ impl TsAdapter {
             .map_err(|e| anyhow!("getClientInfo failed: {e}"))
     }
 
-    pub async fn fetch_client_snapshot(&self) -> Result<Vec<ClientEnterEvent>> {
-        let clients = self.list_clients().await?;
-        Ok(clients
-            .into_iter()
-            .map(|c| {
-                let groups: Vec<u32> = c
-                    .server_groups
-                    .iter()
-                    .filter_map(|g| g.parse().ok())
-                    .collect();
-                ClientEnterEvent {
-                    clid: c.id as u32,
-                    cldbid: 0,
-                    client_nickname: c.nickname,
-                    client_server_groups: groups,
-                    client_channel_group_id: 0,
-                    channel_id: c.channel_id as u32,
-                }
-            })
-            .collect())
-    }
-
     pub async fn quit(&self) -> Result<()> {
         self.client
             .disconnect()
@@ -350,8 +293,6 @@ impl TsAdapter {
 #[derive(Debug, Clone)]
 pub enum TsEvent {
     TextMessage(TextMessageEvent),
-    ClientEnterView(ClientEnterEvent),
-    ClientLeftView(ClientLeftEvent),
 }
 
 #[derive(Debug, Clone)]
@@ -371,17 +312,4 @@ pub enum TextMessageTarget {
     Server,
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientEnterEvent {
-    pub clid: u32,
-    pub cldbid: u32,
-    pub client_nickname: String,
-    pub client_server_groups: Vec<u32>,
-    pub client_channel_group_id: u32,
-    pub channel_id: u32,
-}
 
-#[derive(Debug, Clone)]
-pub struct ClientLeftEvent {
-    pub clid: u32,
-}

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -11,7 +10,6 @@ use tracing::{error, info};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::router::ClientInfo;
 use crate::skills::SkillRegistry;
 
 pub mod tsbot {
@@ -133,7 +131,6 @@ impl Runtime {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
         ts_adapter: Arc<crate::adapter::TsAdapter>,
-        ts_clients: Arc<DashMap<u32, ClientInfo>>,
     ) -> Self {
         let voice_enabled = config.headless.stt.enabled || config.headless.tts.enabled;
         if !voice_enabled {
@@ -166,7 +163,6 @@ impl Runtime {
         let bridge_llm = llm.clone();
         let bridge_registry = registry.clone();
         let bridge_ts_adapter = ts_adapter.clone();
-        let bridge_ts_clients = ts_clients.clone();
         let shutdown_for_bridge = shutdown.clone();
         let bridge_handle = Some(tokio::spawn(async move {
             loop {
@@ -181,7 +177,6 @@ impl Runtime {
                         bridge_llm.clone(),
                         bridge_registry.clone(),
                         bridge_ts_adapter.clone(),
-                        bridge_ts_clients.clone(),
                     ).run() => {
                         if let Err(e) = run_result {
                             error!("voice router failed: {}", e);
