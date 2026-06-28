@@ -18,7 +18,6 @@ use crate::{
     adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
     router::EventRouter,
 };
-use dashmap::DashMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,7 +46,6 @@ async fn main() -> Result<()> {
     let adapter = TsAdapter::connect(config.clone(), identity_file).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
-    let clients = Arc::new(DashMap::new());
 
     let ts_router = EventRouter::new_with_clients(
         config.clone(),
@@ -56,7 +54,6 @@ async fn main() -> Result<()> {
         gate.clone(),
         llm.clone(),
         registry.clone(),
-        clients.clone(),
         nc_adapter.clone(),
     );
 
@@ -67,7 +64,6 @@ async fn main() -> Result<()> {
         llm.clone(),
         registry.clone(),
         adapter.clone(),
-        clients,
     );
 
     let result = router::run_routers(
