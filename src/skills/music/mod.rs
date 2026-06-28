@@ -13,7 +13,7 @@ async fn dispatch_backend(
     action: &str,
     args: &Value,
     cfg: &MusicBackendConfig,
-    ts_ctx: Option<&ExecutionContext<'_>>,
+    ts_ctx: Option<&ExecutionContext>,
 ) -> Result<Value> {
     let ctx = ts_ctx
         .ok_or_else(|| anyhow::anyhow!("{} backend requires TeamSpeak context", cfg.backend))?;
