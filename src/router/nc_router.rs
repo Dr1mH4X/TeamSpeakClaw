@@ -10,10 +10,10 @@ use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::router::{ClientInfo, ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
-use dashmap::DashMap;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -41,7 +41,6 @@ pub struct NcRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     ts_adapter: Option<Arc<TsAdapter>>,
-    ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
 }
 
 impl NcRouter {
@@ -83,7 +82,6 @@ impl NcRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
         ts_adapter: Option<Arc<TsAdapter>>,
-        ts_clients: Option<Arc<DashMap<u32, ClientInfo>>>,
     ) -> Self {
         Self {
             config,
@@ -93,7 +91,6 @@ impl NcRouter {
             llm,
             registry,
             ts_adapter,
-            ts_clients,
         }
     }
 
@@ -146,7 +143,6 @@ impl NcRouter {
         let llm = self.llm.clone();
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
-        let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
             let router = NcRouter {
@@ -157,7 +153,6 @@ impl NcRouter {
                 llm,
                 registry,
                 ts_adapter,
-                ts_clients,
             };
             router.handle_private(msg).await;
         });
@@ -171,7 +166,6 @@ impl NcRouter {
         let llm = self.llm.clone();
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
-        let ts_clients = self.ts_clients.clone();
 
         tokio::spawn(async move {
             let router = NcRouter {
@@ -182,7 +176,6 @@ impl NcRouter {
                 llm,
                 registry,
                 ts_adapter,
-                ts_clients,
             };
             router.handle_group(msg).await;
         });
@@ -317,14 +310,10 @@ impl NcRouter {
                 gate: self.gate.clone(),
                 config: self.config.clone(),
             };
-            let mut unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx).with_cross_adapters(
+            let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx).with_cross_adapters(
                 self.ts_adapter.clone(),
-                self.ts_clients.as_ref().map(|c| c.as_ref()),
                 Some(self.adapter.clone()),
             );
-            if let Some(ref ts_clients) = self.ts_clients {
-                unified_ctx.ts_clients = Some(ts_clients.as_ref());
-            }
 
             let args = call.arguments.clone();
             match skill.execute_unified(args.clone(), &unified_ctx).await {
@@ -388,9 +377,28 @@ impl NcRouter {
         };
 
         let system_prompt = &self.prompts.system.content;
+
+        let online_suffix = if let Some(ref adapter) = self.ts_adapter {
+            match adapter.list_clients().await {
+                Ok(clients) => {
+                    let arr: Vec<serde_json::Value> = clients
+                        .iter()
+                        .map(|c| {
+                            json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
+                        })
+                        .collect();
+                    info!("Fetched {} online clients for LLM context", clients.len());
+                    format!("\nOnline: {}", serde_json::to_string(&arr).unwrap_or_default())
+                }
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
         let user_ctx = match group_id {
-            Some(gid) => format!("User: {} (QQ: {}, Group: {})", sender_name, user_id, gid),
-            None => format!("User: {} (QQ: {}, Private Chat)", sender_name, user_id),
+            Some(gid) => format!("User: {} (QQ: {}, Group: {}){}", sender_name, user_id, gid, online_suffix),
+            None => format!("User: {} (QQ: {}, Private Chat){}", sender_name, user_id, online_suffix),
         };
 
         let mut messages = self
