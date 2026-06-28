@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 
@@ -100,7 +100,6 @@ impl TsAdapter {
                         if let Ok(cid_u64) = cid.parse::<u64>() {
                             let pw = &hc.channel_password;
                             let clid = client.client_id();
-                            info!(cid = cid_u64, "joining channel on startup");
                             if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
                             {
                                 warn!("join channel failed: {e}");
@@ -160,32 +159,7 @@ impl TsAdapter {
             }));
         }
 
-        {
-            let tx = tx.clone();
-            client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::ClientEnter(ref info) = event {
-                    let _ = tx.send(TsEvent::ClientEnterView(ClientEnterEvent {
-                        clid: info.id as u32,
-                        client_nickname: info.nickname.clone(),
-                    }));
-                    debug!(
-                        "Client entered view: clid={}, nickname={}",
-                        info.id, info.nickname
-                    );
-                }
-            }));
-        }
 
-        {
-            let tx = tx.clone();
-            client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::ClientLeave(ref ev) = event {
-                    let _ = tx.send(TsEvent::ClientLeftView(ClientLeftEvent {
-                        clid: ev.id as u32,
-                    }));
-                }
-            }));
-        }
     }
 
     async fn upgrade_identity_and_save(
@@ -319,8 +293,6 @@ impl TsAdapter {
 #[derive(Debug, Clone)]
 pub enum TsEvent {
     TextMessage(TextMessageEvent),
-    ClientEnterView(ClientEnterEvent),
-    ClientLeftView(ClientLeftEvent),
 }
 
 #[derive(Debug, Clone)]
@@ -340,13 +312,4 @@ pub enum TextMessageTarget {
     Server,
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientEnterEvent {
-    pub clid: u32,
-    pub client_nickname: String,
-}
 
-#[derive(Debug, Clone)]
-pub struct ClientLeftEvent {
-    pub clid: u32,
-}
