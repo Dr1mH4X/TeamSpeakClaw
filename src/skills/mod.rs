@@ -7,7 +7,6 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::TsAdapter;
 use crate::config::AppConfig;
 use crate::permission::PermissionGate;
-use crate::router::ClientInfo;
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -28,9 +27,8 @@ pub enum Platform {
 // TeamSpeak 执行上下文（原有）
 // ─────────────────────────────────────────────
 
-pub struct ExecutionContext<'a> {
+pub struct ExecutionContext {
     pub adapter: Arc<TsAdapter>,
-    pub clients: &'a DashMap<u32, ClientInfo>,
     pub caller_id: u32,
     pub caller_name: String,
     pub caller_groups: Vec<u32>,
@@ -56,10 +54,9 @@ pub struct NcExecutionContext {
 // 统一执行上下文（跨平台）
 // ─────────────────────────────────────────────
 
-pub struct UnifiedExecutionContext<'a> {
+pub struct UnifiedExecutionContext {
     pub platform: Platform,
     pub ts_adapter: Option<Arc<TsAdapter>>,
-    pub ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
     pub nc_adapter: Option<Arc<NapCatAdapter>>,
     pub caller_id: u32,
     pub caller_id_nc: i64,
@@ -71,12 +68,11 @@ pub struct UnifiedExecutionContext<'a> {
     pub config: Arc<AppConfig>,
 }
 
-impl<'a> UnifiedExecutionContext<'a> {
-    pub fn from_ts(ctx: &ExecutionContext<'a>) -> Self {
+impl UnifiedExecutionContext {
+    pub fn from_ts(ctx: &ExecutionContext) -> Self {
         Self {
             platform: Platform::TeamSpeak,
             ts_adapter: Some(ctx.adapter.clone()),
-            ts_clients: Some(ctx.clients),
             nc_adapter: None,
             caller_id: ctx.caller_id,
             caller_id_nc: 0,
@@ -93,7 +89,6 @@ impl<'a> UnifiedExecutionContext<'a> {
         Self {
             platform: Platform::NapCat,
             ts_adapter: None,
-            ts_clients: None,
             nc_adapter: Some(ctx.adapter.clone()),
             caller_id: 0,
             caller_id_nc: ctx.caller_id,
@@ -109,25 +104,20 @@ impl<'a> UnifiedExecutionContext<'a> {
     pub fn with_cross_adapters(
         mut self,
         ts_adapter: Option<Arc<TsAdapter>>,
-        ts_clients: Option<&'a DashMap<u32, ClientInfo>>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> Self {
         self.ts_adapter = ts_adapter;
-        self.ts_clients = ts_clients;
         self.nc_adapter = nc_adapter;
         self
     }
 
     /// 从统一上下文还原 TeamSpeak 执行上下文
-    pub fn to_ts_ctx(&self) -> Result<ExecutionContext<'a>> {
+    pub fn to_ts_ctx(&self) -> Result<ExecutionContext> {
         Ok(ExecutionContext {
             adapter: self
                 .ts_adapter
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?,
-            clients: self
-                .ts_clients
-                .ok_or_else(|| anyhow::anyhow!("TeamSpeak clients list not available"))?,
             caller_id: self.caller_id,
             caller_name: self.caller_name.clone(),
             caller_groups: self.caller_groups.clone(),

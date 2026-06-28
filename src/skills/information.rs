@@ -4,6 +4,22 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
 
+fn ts_client_to_json(clients: &[tsclient_rs::ClientInfo]) -> Vec<Value> {
+    clients
+        .iter()
+        .map(|c| {
+            let groups: Vec<u32> = c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+            json!({
+                "clid": c.id,
+                "nickname": c.nickname,
+                "dbid": 0,
+                "groups": groups,
+                "channel_id": c.channel_id
+            })
+        })
+        .collect()
+}
+
 pub struct GetClientList;
 
 #[async_trait]
@@ -22,20 +38,8 @@ impl Skill for GetClientList {
         })
     }
     async fn execute(&self, _args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
-        let json_clients: Vec<_> = clients
-            .iter()
-            .map(|c| {
-                json!({
-                    "clid": c.clid,
-                    "nickname": c.nickname,
-                    "dbid": c.cldbid,
-                    "groups": c.server_groups,
-                    "channel_id": c.channel_id
-                })
-            })
-            .collect();
-
+        let clients = ctx.adapter.list_clients().await?;
+        let json_clients = ts_client_to_json(&clients);
         Ok(json!({"status": "ok", "clients": json_clients}))
     }
 
@@ -51,44 +55,33 @@ impl Skill for GetClientList {
                 return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
-                // NC 请求查询 TS 在线列表
-                if let Some(ref ts_clients) = ctx.ts_clients {
-                    let clients: Vec<_> = ts_clients.iter().map(|r| r.value().clone()).collect();
-                    let json_clients: Vec<_> = clients
+                let ts_adapter = ctx
+                    .ts_adapter
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
+                let clients = ts_adapter.list_clients().await?;
+                let json_clients = ts_client_to_json(&clients);
+
+                let reply = if json_clients.is_empty() {
+                    "No online users on TS server".to_string()
+                } else {
+                    let names: Vec<_> = json_clients
                         .iter()
-                        .map(|c| {
-                            json!({
-                                "clid": c.clid,
-                                "nickname": c.nickname,
-                                "dbid": c.cldbid,
-                                "groups": c.server_groups,
-                                "channel_id": c.channel_id
-                            })
-                        })
+                        .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
                         .collect();
+                    format!(
+                        "TS server online users ({}): {}",
+                        names.len(),
+                        names.join(", ")
+                    )
+                };
 
-                    let reply = if json_clients.is_empty() {
-                        "No online users on TS server".to_string()
-                    } else {
-                        let names: Vec<_> = json_clients
-                            .iter()
-                            .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
-                            .collect();
-                        format!(
-                            "TS server online users ({}): {}",
-                            names.len(),
-                            names.join(", ")
-                        )
-                    };
-
-                    return Ok(json!({
-                        "status": "ok",
-                        "message": reply,
-                        "clients": json_clients,
-                        "platform": "teamspeak"
-                    }));
-                }
-                Err(anyhow::anyhow!("TeamSpeak clients list not available"))
+                Ok(json!({
+                    "status": "ok",
+                    "message": reply,
+                    "clients": json_clients,
+                    "platform": "teamspeak"
+                }))
             }
         }
     }
@@ -119,12 +112,6 @@ impl Skill for GetClientInfo {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
             as u32;
 
-        // 确认目标客户端在线
-        if !ctx.clients.contains_key(&clid) {
-            let msg = format!("Client {} is not online or does not exist", clid);
-            return Ok(json!({"status": "error", "message": msg}));
-        }
-
         let info = ctx.adapter.get_client_info(clid).await?;
         Ok(json!({"status": "ok", "client_info": info}))
     }
@@ -141,35 +128,35 @@ impl Skill for GetClientInfo {
                 return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
-                // NC 请求查询 TS 指定用户信息
+                let ts_adapter = ctx
+                    .ts_adapter
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
                 let clid = args["clid"]
                     .as_u64()
                     .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
                     as u32;
 
-                if let Some(ref ts_clients) = ctx.ts_clients {
-                    let Some(client) = ts_clients.get(&clid) else {
-                        return Ok(json!({
-                            "status": "error",
-                            "message": format!("Client {} is not online or does not exist", clid)
-                        }));
-                    };
-                    let reply = format!(
-                        "TS user info - nickname:{}, ID:{}, DBID:{}, server groups:{:?}, channel ID:{}",
-                        client.nickname,
-                        client.clid,
-                        client.cldbid,
-                        client.server_groups,
-                        client.channel_id
-                    );
+                let clients = ts_adapter.list_clients().await?;
+                let client = clients
+                    .iter()
+                    .find(|c| c.id as u32 == clid)
+                    .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+                let groups: Vec<u32> = client
+                    .server_groups
+                    .iter()
+                    .filter_map(|g| g.parse().ok())
+                    .collect();
+                let reply = format!(
+                    "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
+                    client.nickname, client.id, groups, client.channel_id
+                );
 
-                    return Ok(json!({
-                        "status": "ok",
-                        "message": reply,
-                        "platform": "teamspeak"
-                    }));
-                }
-                Err(anyhow::anyhow!("TeamSpeak clients list not available"))
+                Ok(json!({
+                    "status": "ok",
+                    "message": reply,
+                    "platform": "teamspeak"
+                }))
             }
         }
     }
