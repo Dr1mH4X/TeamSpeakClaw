@@ -1,91 +1,9 @@
 use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use tracing::info;
-
-fn ts_client_to_json(clients: &[tsclient_rs::ClientInfo]) -> Vec<Value> {
-    clients
-        .iter()
-        .map(|c| {
-            let groups: Vec<u32> = c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
-            json!({
-                "clid": c.id,
-                "nickname": c.nickname,
-                "dbid": 0,
-                "groups": groups,
-                "channel_id": c.channel_id
-            })
-        })
-        .collect()
-}
-
-pub struct GetClientList;
-
-#[async_trait]
-impl Skill for GetClientList {
-    fn name(&self) -> &'static str {
-        "get_client_list"
-    }
-    fn description(&self) -> &'static str {
-        "Get the list of online clients."
-    }
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-    async fn execute(&self, _args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clients = ctx.adapter.list_clients().await?;
-        let json_clients = ts_client_to_json(&clients);
-        Ok(json!({"status": "ok", "clients": json_clients}))
-    }
-
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!(
-            "GetClientList: unified execution, platform={:?}",
-            ctx.platform
-        );
-
-        match ctx.platform {
-            Platform::TeamSpeak => {
-                let ts_ctx = ctx.to_ts_ctx()?;
-                return self.execute(args.clone(), &ts_ctx).await;
-            }
-            Platform::NapCat => {
-                let ts_adapter = ctx
-                    .ts_adapter
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
-                let clients = ts_adapter.list_clients().await?;
-                let json_clients = ts_client_to_json(&clients);
-
-                let reply = if json_clients.is_empty() {
-                    "No online users on TS server".to_string()
-                } else {
-                    let names: Vec<_> = json_clients
-                        .iter()
-                        .map(|c| c["nickname"].as_str().unwrap_or("unknown"))
-                        .collect();
-                    format!(
-                        "TS server online users ({}): {}",
-                        names.len(),
-                        names.join(", ")
-                    )
-                };
-
-                Ok(json!({
-                    "status": "ok",
-                    "message": reply,
-                    "clients": json_clients,
-                    "platform": "teamspeak"
-                }))
-            }
-        }
-    }
-}
 
 pub struct GetClientInfo;
 
@@ -95,24 +13,54 @@ impl Skill for GetClientInfo {
         "get_client_info"
     }
     fn description(&self) -> &'static str {
-        "Get detailed information about a specific online client by their client ID, including connection time, IP address, version, and more."
+        "Get detailed information about an online user by their nickname, including connection time, IP address, version, and more."
     }
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "clid": { "type": "integer", "description": "The client ID to query." }
+                "nickname": { "type": "string", "description": "The nickname of the online user to query." }
             },
-            "required": ["clid"]
+            "required": ["nickname"]
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-            as u32;
+        let nickname = args["nickname"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: nickname"))?;
 
-        let info = ctx.adapter.get_client_info(clid).await?;
+        let clients = ctx.adapter.list_clients().await?;
+        let client = clients
+            .iter()
+            .find(|c| c.nickname == nickname)
+            .ok_or_else(|| anyhow::anyhow!("Client '{}' is not online or does not exist", nickname))?;
+        let clid = client.id as u32;
+
+        let mut info = ctx.adapter.get_client_info(clid).await?;
+
+        if let Some(ts) = info.get("client_connection_connected_time") {
+            if let Ok(timestamp) = ts.parse::<i64>() {
+                if let Some(connected) = DateTime::from_timestamp(timestamp, 0) {
+                    let now = Utc::now();
+                    let secs = (now - connected).num_seconds().max(0);
+
+                    let h = secs / 3600;
+                    let m = (secs % 3600) / 60;
+                    let s = secs % 60;
+
+                    let dur_str = if h > 0 {
+                        format!("{h} hours {m} minutes {s} seconds")
+                    } else if m > 0 {
+                        format!("{m} minutes {s} seconds")
+                    } else {
+                        format!("{s} seconds")
+                    };
+                    info.insert("connection_duration".to_string(), dur_str);
+                    info.remove("client_connection_connected_time");
+                }
+            }
+        }
+
         Ok(json!({"status": "ok", "client_info": info}))
     }
 
@@ -121,6 +69,10 @@ impl Skill for GetClientInfo {
             "GetClientInfo: unified execution, platform={:?}",
             ctx.platform
         );
+
+        let nickname = args["nickname"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: nickname"))?;
 
         match ctx.platform {
             Platform::TeamSpeak => {
@@ -132,16 +84,12 @@ impl Skill for GetClientInfo {
                     .ts_adapter
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
-                let clid = args["clid"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-                    as u32;
 
                 let clients = ts_adapter.list_clients().await?;
                 let client = clients
                     .iter()
-                    .find(|c| c.id as u32 == clid)
-                    .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+                    .find(|c| c.nickname == nickname)
+                    .ok_or_else(|| anyhow::anyhow!("Client '{}' is not online or does not exist", nickname))?;
                 let groups: Vec<u32> = client
                     .server_groups
                     .iter()
