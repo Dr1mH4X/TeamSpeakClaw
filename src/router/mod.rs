@@ -4,7 +4,7 @@ mod unified;
 mod voice_router;
 
 pub use nc_router::NcRouter;
-pub use ts_router::{ClientInfo, EventRouter};
+pub use ts_router::EventRouter;
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 pub use voice_router::VoiceRouter;
 
@@ -42,7 +42,6 @@ pub async fn run_routers(
             llm,
             registry,
             Some(adapter),
-            Some(ts_router.clients.clone()),
         );
         let nc_future = tokio::spawn(async move { nc_router.run().await });
 

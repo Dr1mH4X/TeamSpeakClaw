@@ -12,7 +12,7 @@ static TS3AUDIOBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 pub(crate) async fn execute(
     action: &str,
     args: &Value,
-    ctx: &ExecutionContext<'_>,
+    ctx: &ExecutionContext,
 ) -> Result<Value> {
     // Validate required parameters before building commands
     let needs_value = matches!(
@@ -74,7 +74,7 @@ pub(crate) async fn execute(
     };
 
     let target_name = &ctx.config.music_backend.musicbot_name;
-    let clients: Vec<_> = ctx.clients.iter().map(|r| r.value().clone()).collect();
+    let clients = ctx.adapter.list_clients().await?;
     let audiobot = clients
         .iter()
         .find(|c| {
@@ -89,7 +89,7 @@ pub(crate) async fn execute(
     let mut ts_rx = ctx.adapter.subscribe();
 
     ctx.adapter
-        .send_text_message(1, audiobot.clid, &bot_cmd)
+        .send_text_message(1, audiobot.id as u32, &bot_cmd)
         .await?;
 
     let reply = tokio::time::timeout(Duration::from_secs(10), async {
