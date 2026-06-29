@@ -16,7 +16,7 @@ fn shared_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .build()
-            .unwrap_or_default()
+            .expect("failed to build reqwest::Client with configured timeout")
     })
 }
 
@@ -119,7 +119,7 @@ async fn execute_search(args: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
 
-    let num_results = args["num_results"]
+    let num_results = args["numResults"]
         .as_u64()
         .unwrap_or(8)
         .min(MAX_RESULTS as u64) as u8;
