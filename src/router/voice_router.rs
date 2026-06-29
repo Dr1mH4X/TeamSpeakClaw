@@ -20,7 +20,7 @@ use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{ExecutionContext, SkillRegistry};
 use voicev1::voice_service_client::VoiceServiceClient;
 
 struct CallerContext {
@@ -146,8 +146,11 @@ impl VoiceRouter {
         match self.ts_adapter.list_clients().await {
             Ok(clients) => {
                 if let Some(c) = clients.iter().find(|c| c.nickname == chat.invoker_name) {
-                    let groups: Vec<u32> =
-                        c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    let groups: Vec<u32> = c
+                        .server_groups
+                        .iter()
+                        .filter_map(|g| g.parse().ok())
+                        .collect();
                     debug!(
                         "Resolved chat caller '{}' from online list: clid={}",
                         chat.invoker_name, c.id
@@ -194,8 +197,11 @@ impl VoiceRouter {
         match self.ts_adapter.list_clients().await {
             Ok(clients) => {
                 if let Some(c) = clients.iter().find(|c| c.id as u32 == audio.from_client_id) {
-                    let groups: Vec<u32> =
-                        c.server_groups.iter().filter_map(|g| g.parse().ok()).collect();
+                    let groups: Vec<u32> = c
+                        .server_groups
+                        .iter()
+                        .filter_map(|g| g.parse().ok())
+                        .collect();
                     debug!(
                         "Resolved audio caller '{}' from online list: clid={}",
                         audio.from_client_name, c.id
@@ -237,42 +243,16 @@ impl VoiceRouter {
     }
 
     async fn execute_skill(&self, call: &ToolCall, ctx: &CallerContext) -> String {
-        if let Some(skill) = self.registry.get(&call.name) {
-            let exec_ctx = ExecutionContext {
-                adapter: self.ts_adapter.clone(),
-                caller_id: ctx.caller_id,
-                caller_name: ctx.caller_name.clone(),
-                caller_groups: ctx.groups.clone(),
-                caller_channel_group_id: ctx.channel_group_id,
-                gate: self.gate.clone(),
-                config: self.config.clone(),
-            };
-            let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx).with_cross_adapters(
-                Some(self.ts_adapter.clone()),
-                None,
-            );
-            let args = call.arguments.clone();
-            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
-                Ok(val) => {
-                    info!(skill = %call.name, caller = %ctx.caller_name, "Voice unified skill executed successfully");
-                    Ok(val)
-                }
-                Err(unified_err) => {
-                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
-                    skill.execute(args, &exec_ctx).await
-                }
-            };
-            match result {
-                Ok(val) => val.to_string(),
-                Err(e) => {
-                    error!(skill = %call.name, error = %e, "Skill execution failed");
-                    format!("Skill execution failed: {}", e)
-                }
-            }
-        } else {
-            warn!(caller = %ctx.caller_name, skill = %call.name, "Skill not found");
-            "Skill not found".to_string()
-        }
+        let exec_ctx = ExecutionContext {
+            adapter: self.ts_adapter.clone(),
+            caller_id: ctx.caller_id,
+            caller_name: ctx.caller_name.clone(),
+            caller_groups: ctx.groups.clone(),
+            caller_channel_group_id: ctx.channel_group_id,
+            gate: self.gate.clone(),
+            config: self.config.clone(),
+        };
+        self.registry.execute_skill(call, exec_ctx, None).await
     }
 
     async fn handle_chat_event(
@@ -368,7 +348,8 @@ impl VoiceRouter {
         ctx.caller_name = chunk.speaker_name;
         ctx.caller_id = chunk.speaker_client_id;
 
-        let (mut messages, tools, session_source) = self.build_omni_llm_request(&ctx, audio_data).await;
+        let (mut messages, tools, session_source) =
+            self.build_omni_llm_request(&ctx, audio_data).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -418,7 +399,8 @@ impl VoiceRouter {
     ) -> Result<()> {
         info!(event = "voice.chat.user_message", invoker = %ctx.caller_name, clid = ctx.caller_id, message = %self.truncate_for_log(&user_msg));
 
-        let (mut messages, tools, session_source) = self.build_llm_request(&ctx, user_msg.clone()).await;
+        let (mut messages, tools, session_source) =
+            self.build_llm_request(&ctx, user_msg.clone()).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
@@ -581,9 +563,7 @@ impl VoiceRouter {
             Ok(clients) => {
                 let arr: Vec<serde_json::Value> = clients
                     .iter()
-                    .map(|c| {
-                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
-                    })
+                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
                     .collect();
                 info!("Fetched {} online clients for LLM context", clients.len());
                 serde_json::to_string(&arr).unwrap_or_default()

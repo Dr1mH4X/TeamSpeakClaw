@@ -5,12 +5,12 @@ use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
-use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{ExecutionContext, SkillRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 struct SqExecutor<'a> {
     router: &'a EventRouter,
@@ -79,44 +79,18 @@ impl EventRouter {
         groups: &[u32],
         channel_group_id: u32,
     ) -> String {
-        if let Some(skill) = self.registry.get(&call.name) {
-            let ctx = ExecutionContext {
-                adapter: self.adapter.clone(),
-                caller_id: event.invoker_id,
-                caller_name: event.invoker_name.clone(),
-                caller_groups: groups.to_vec(),
-                caller_channel_group_id: channel_group_id,
-                gate: self.gate.clone(),
-                config: self.config.clone(),
-            };
-            let unified_ctx = UnifiedExecutionContext::from_ts(&ctx).with_cross_adapters(
-                Some(self.adapter.clone()),
-                self.nc_adapter.clone(),
-            );
-
-            let args = call.arguments.clone();
-            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
-                Ok(val) => {
-                    info!(skill = %call.name, caller = %event.invoker_name, "Unified skill executed successfully");
-                    Ok(val)
-                }
-                Err(unified_err) => {
-                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
-                    skill.execute(args, &ctx).await
-                }
-            };
-
-            match result {
-                Ok(val) => val.to_string(),
-                Err(e) => {
-                    error!(skill = %call.name, error = %e, "Skill execution failed");
-                    format!("Skill execution failed: {}", e)
-                }
-            }
-        } else {
-            warn!(caller = %event.invoker_name, skill = %call.name, "Skill not found");
-            "Skill not found".to_string()
-        }
+        let ctx = ExecutionContext {
+            adapter: self.adapter.clone(),
+            caller_id: event.invoker_id,
+            caller_name: event.invoker_name.clone(),
+            caller_groups: groups.to_vec(),
+            caller_channel_group_id: channel_group_id,
+            gate: self.gate.clone(),
+            config: self.config.clone(),
+        };
+        self.registry
+            .execute_skill(call, ctx, self.nc_adapter.clone())
+            .await
     }
 
     async fn handle_message(&self, event: TextMessageEvent) {
