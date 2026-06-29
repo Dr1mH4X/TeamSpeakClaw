@@ -2,13 +2,16 @@ pub mod communication;
 pub mod information;
 pub mod moderation;
 pub mod music;
+pub mod web_search;
 
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::TsAdapter;
 use crate::config::AppConfig;
+use crate::llm::ToolCall;
 use crate::permission::PermissionGate;
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::{debug, error, warn};
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
@@ -175,6 +178,7 @@ impl SkillRegistry {
         use information::GetClientInfo;
         use moderation::{BanClient, KickClient, MoveClient};
         use music::MusicControl;
+        use web_search::WebSearch;
         use tracing::info;
 
         let registry = Self::default();
@@ -184,6 +188,7 @@ impl SkillRegistry {
         registry.register(Box::new(BanClient));
         registry.register(Box::new(MoveClient));
         registry.register(Box::new(GetClientInfo));
+        registry.register(Box::new(WebSearch));
         registry.register(Box::new(MusicControl::new(music_backend)));
         info!("Skills registered: {:?}", registry.list_skills());
         registry
@@ -199,6 +204,39 @@ impl SkillRegistry {
 
     pub fn list_skills(&self) -> Vec<String> {
         self.skills.iter().map(|s| s.key().clone()).collect()
+    }
+
+    pub async fn execute_skill(
+        &self,
+        call: &ToolCall,
+        exec_ctx: ExecutionContext,
+        nc_adapter: Option<Arc<NapCatAdapter>>,
+    ) -> String {
+        if let Some(skill) = self.get(&call.name) {
+            let ts_adapter = Some(exec_ctx.adapter.clone());
+            let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
+                .with_cross_adapters(ts_adapter, nc_adapter);
+
+            let args = call.arguments.clone();
+            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
+                Ok(val) => Ok(val),
+                Err(unified_err) => {
+                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
+                    skill.execute(args, &exec_ctx).await
+                }
+            };
+
+            match result {
+                Ok(val) => val.to_string(),
+                Err(e) => {
+                    error!(skill = %call.name, error = %e, "Skill execution failed");
+                    format!("Skill execution failed: {}", e)
+                }
+            }
+        } else {
+            warn!(skill = %call.name, "Skill not found");
+            "Skill not found".to_string()
+        }
     }
 
     pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<Value> {
