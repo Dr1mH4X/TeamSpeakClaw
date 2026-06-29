@@ -131,7 +131,6 @@ pub async fn run_tool_loop(
             info!(
                 event = "tool_loop.execute",
                 tool_name = %call.name,
-                tool_call_id = %call.id,
                 "executing tool call"
             );
 
@@ -140,7 +139,6 @@ pub async fn run_tool_loop(
             info!(
                 event = "tool_loop.result",
                 tool_name = %call.name,
-                tool_call_id = %call.id,
                 "tool execution completed"
             );
 
