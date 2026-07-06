@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use base64::Engine;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -8,6 +9,7 @@ use crate::adapter::headless::speech::{
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::{TsAdapter, TsEvent};
+use crate::llm::LlmEngine;
 
 use super::transcriber::Transcriber;
 
@@ -251,10 +253,11 @@ pub async fn listen_for_audio(
     recorder: Arc<Recorder>,
     mut event_rx: broadcast::Receiver<TsEvent>,
     stt_pipeline: Arc<tokio::sync::Mutex<OpusSttPipeline>>,
-    speech_provider: Arc<OpenAiSpeechProvider>,
+    speech_provider: Option<Arc<OpenAiSpeechProvider>>,
     transcriber: Arc<Transcriber>,
     ts_adapter: Arc<TsAdapter>,
     config: Arc<crate::config::AppConfig>,
+    llm: Arc<LlmEngine>,
 ) {
     loop {
         match event_rx.recv().await {
@@ -289,30 +292,64 @@ pub async fn listen_for_audio(
                         };
 
                         if let Some(chunk) = chunk {
-                            // 转录音频
                             let wav = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
-                            match speech_provider.transcribe_wav(wav).await {
-                                Ok(raw_text) => {
-                                    if !raw_text.is_empty() {
-                                        // 使用LLM进行纠错
-                                        let text =
-                                            match transcriber.correct_stt_errors(&raw_text).await {
-                                                Ok(corrected) => corrected,
-                                                Err(e) => {
-                                                    warn!("LLM纠错失败，使用原始文本: {}", e);
-                                                    raw_text
-                                                }
-                                            };
 
-                                        let entry = TranscriptEntry {
-                                            speaker_name: chunk.speaker_name,
-                                            text,
-                                        };
-                                        recorder.add_transcript_entry(entry).await;
+                            if let Some(provider) = speech_provider.as_ref() {
+                                // STT模式：转录 → LLM纠错 → 记录
+                                match provider.transcribe_wav(wav.clone()).await {
+                                    Ok(raw_text) => {
+                                        if !raw_text.is_empty() {
+                                            let text =
+                                                match transcriber.correct_stt_errors(&raw_text).await {
+                                                    Ok(corrected) => corrected,
+                                                    Err(e) => {
+                                                        warn!("LLM纠错失败，使用原始文本: {}", e);
+                                                        raw_text
+                                                    }
+                                                };
+                                            let entry = TranscriptEntry {
+                                                speaker_name: chunk.speaker_name,
+                                                text,
+                                            };
+                                            recorder.add_transcript_entry(entry).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("STT转录失败: {}", e);
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("STT转录失败: {}", e);
+                            } else if config.llm.omni_model {
+                                // omni模式：直接发送音频给多模态模型总结
+                                let audio_base64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+                                let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
+                                let prompt = format!(
+                                    "请转录以下音频内容，只输出转录文本，不要添加任何解释。发言人: {}",
+                                    chunk.speaker_name
+                                );
+                                let messages = vec![
+                                    serde_json::json!({"role": "user", "content": [
+                                        serde_json::json!({"type": "text", "text": prompt}),
+                                        serde_json::json!({"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}})
+                                    ]})
+                                ];
+                                match llm.run_tool_loop(
+                                    &mut messages.clone(),
+                                    &[],
+                                    &super::transcriber::NoopExecutor,
+                                    None,
+                                ).await {
+                                    Ok(r) => {
+                                        if !r.content.is_empty() {
+                                            let entry = TranscriptEntry {
+                                                speaker_name: chunk.speaker_name,
+                                                text: r.content,
+                                            };
+                                            recorder.add_transcript_entry(entry).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("omni模型处理失败: {}", e);
+                                    }
                                 }
                             }
                         }

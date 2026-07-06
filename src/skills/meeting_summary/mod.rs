@@ -33,22 +33,26 @@ impl MeetingSummary {
     ) -> Self {
         let recorder = Arc::new(Recorder::new());
         let transcriber = Arc::new(Transcriber::new(llm.clone()));
-        let summarizer = Arc::new(Summarizer::new(llm));
+        let summarizer = Arc::new(Summarizer::new(llm.clone()));
 
-        // 创建STT管道和语音提供器
-        let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
-        let stt_pipeline = Arc::new(tokio::sync::Mutex::new(
-            need_audio_pipeline
-                .then(OpusSttPipeline::new)
-                .unwrap_or_else(|| {
-                    // 如果不需要音频管道，创建一个空的
-                    OpusSttPipeline::new()
-                }),
-        ));
+        let has_stt = config.headless.stt.enabled;
+        let has_omni = config.llm.omni_model;
 
-        let speech_provider =
+        // STT和omni都没开则不加载此技能
+        if !has_stt && !has_omni {
+            return Self {
+                recorder,
+                summarizer,
+            };
+        }
+
+        // 创建STT管道（两种模式都需要opus解码）
+        let stt_pipeline = Arc::new(tokio::sync::Mutex::new(OpusSttPipeline::new()));
+
+        // STT模式需要SpeechProvider
+        let speech_provider = if has_stt {
             match OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone()) {
-                Ok(provider) => Arc::new(provider),
+                Ok(provider) => Some(Arc::new(provider)),
                 Err(e) => {
                     tracing::warn!("创建语音提供器失败: {}", e);
                     return Self {
@@ -56,12 +60,16 @@ impl MeetingSummary {
                         summarizer,
                     };
                 }
-            };
+            }
+        } else {
+            None
+        };
 
         // 启动音频监听任务
         let recorder_clone = recorder.clone();
         let transcriber_clone = transcriber.clone();
         let config_clone = config.clone();
+        let llm_clone = llm.clone();
         tokio::spawn(async move {
             let event_rx = crate::adapter::headless::TsAdapter::subscribe_global();
             recorder::listen_for_audio(
@@ -72,6 +80,7 @@ impl MeetingSummary {
                 transcriber_clone,
                 ts_adapter,
                 config_clone,
+                llm_clone,
             )
             .await;
         });

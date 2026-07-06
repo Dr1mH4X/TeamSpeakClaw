@@ -57,7 +57,7 @@ impl Transcriber {
     }
 }
 
-struct NoopExecutor;
+pub struct NoopExecutor;
 
 #[async_trait::async_trait]
 impl crate::llm::tool_loop::ToolExecutor for NoopExecutor {
