@@ -63,11 +63,17 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
-        while let Ok(TsEvent::TextMessage(msg)) = rx.recv().await {
-            let this = self.clone();
-            tokio::spawn(async move {
-                this.handle_message(msg).await;
-            });
+        loop {
+            match rx.recv().await {
+                Ok(TsEvent::TextMessage(msg)) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_message(msg).await;
+                    });
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
         }
         Ok(())
     }
