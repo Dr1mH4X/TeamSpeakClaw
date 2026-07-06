@@ -13,6 +13,10 @@ const IDENTITY_MAX_LEVEL: i32 = 29;
 /// 每次重试提升的等级步长
 const IDENTITY_UPGRADE_STEP: i32 = 5;
 
+// 全局广播发送器，用于音频事件
+static GLOBAL_AUDIO_TX: std::sync::OnceLock<broadcast::Sender<TsEvent>> =
+    std::sync::OnceLock::new();
+
 /// 检查 TS 错误，如果是权限问题则额外提示用户。
 fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
     let is_perm = matches!(&err,
@@ -20,9 +24,7 @@ fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
         if id == "2568" || id == "2569" || id.contains("permission") || id.contains("insufficient")
     );
     if is_perm {
-        error!(
-            "{op} failed: insufficient permissions. Grant the bot Server Admin permissions"
-        );
+        error!("{op} failed: insufficient permissions. Grant the bot Server Admin permissions");
     }
     anyhow!("{op} failed: {err}")
 }
@@ -36,10 +38,7 @@ pub struct TsAdapter {
 }
 
 impl TsAdapter {
-    pub async fn connect(
-        config: Arc<AppConfig>,
-        identity_file: PathBuf,
-    ) -> Result<Arc<Self>> {
+    pub async fn connect(config: Arc<AppConfig>, identity_file: PathBuf) -> Result<Arc<Self>> {
         let hc = &config.headless;
         let host = &hc.server_address;
         let port = hc.server_port;
@@ -100,7 +99,8 @@ impl TsAdapter {
                         if let Ok(cid_u64) = cid.parse::<u64>() {
                             let pw = &hc.channel_password;
                             let clid = client.client_id();
-                            if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
+                            if let Err(e) =
+                                tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
                             {
                                 warn!("join channel failed: {e}");
                             }
@@ -114,6 +114,9 @@ impl TsAdapter {
 
                     let clid = client.client_id();
                     let client = Arc::new(client);
+
+                    // 初始化全局广播发送器
+                    let _ = GLOBAL_AUDIO_TX.set(event_tx.clone());
 
                     return Ok(Arc::new(Self {
                         client,
@@ -159,7 +162,17 @@ impl TsAdapter {
             }));
         }
 
-
+        // 监听客户端离开事件
+        {
+            let tx = tx.clone();
+            client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::ClientLeave(ref left) = event {
+                    let _ = tx.send(TsEvent::ClientLeave(ClientLeaveEvent {
+                        client_id: left.id as u32,
+                    }));
+                }
+            }));
+        }
     }
 
     async fn upgrade_identity_and_save(
@@ -224,6 +237,22 @@ impl TsAdapter {
 
     pub fn subscribe(&self) -> broadcast::Receiver<TsEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// 订阅全局音频事件（用于MeetingSummary等跨模块监听）
+    pub fn subscribe_global() -> broadcast::Receiver<TsEvent> {
+        GLOBAL_AUDIO_TX
+            .get()
+            .expect("全局广播发送器未初始化")
+            .subscribe()
+    }
+
+    pub fn broadcast_audio_frame(&self, data: AudioFrameData) {
+        let _ = self.event_tx.send(TsEvent::AudioFrame(data.clone()));
+        // 同时发送到全局广播
+        if let Some(global_tx) = GLOBAL_AUDIO_TX.get() {
+            let _ = global_tx.send(TsEvent::AudioFrame(data));
+        }
     }
 
     pub async fn send_text_message(&self, target_mode: u8, target: u32, msg: &str) -> Result<()> {
@@ -293,6 +322,21 @@ impl TsAdapter {
 #[derive(Debug, Clone)]
 pub enum TsEvent {
     TextMessage(TextMessageEvent),
+    AudioFrame(AudioFrameData),
+    ClientLeave(ClientLeaveEvent),
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioFrameData {
+    pub from_client_id: u32,
+    pub from_client_name: String,
+    pub frame: Vec<u8>,
+    pub codec: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientLeaveEvent {
+    pub client_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -311,5 +355,3 @@ pub enum TextMessageTarget {
     Channel,
     Server,
 }
-
-

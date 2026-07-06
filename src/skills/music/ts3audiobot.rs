@@ -9,11 +9,7 @@ use tracing::{debug, info};
 
 static TS3AUDIOBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(crate) async fn execute(
-    action: &str,
-    args: &Value,
-    ctx: &ExecutionContext,
-) -> Result<Value> {
+pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) -> Result<Value> {
     // Validate required parameters before building commands
     let needs_value = matches!(
         action,

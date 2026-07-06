@@ -17,7 +17,12 @@ async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> 
     let target_groups: Vec<u32> = clients
         .iter()
         .find(|c| c.id as u32 == clid)
-        .map(|c| c.server_groups.iter().filter_map(|g| g.parse().ok()).collect())
+        .map(|c| {
+            c.server_groups
+                .iter()
+                .filter_map(|g| g.parse().ok())
+                .collect()
+        })
         .unwrap_or_default();
 
     // 检查是否可以对目标执行操作

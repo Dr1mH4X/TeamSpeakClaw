@@ -1,5 +1,6 @@
 pub mod communication;
 pub mod information;
+pub mod meeting_summary;
 pub mod moderation;
 pub mod music;
 pub mod web_search;
@@ -11,10 +12,30 @@ use crate::llm::ToolCall;
 use crate::permission::PermissionGate;
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
 use dashmap::DashMap;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::{debug, error, warn};
+
+/// Skill存储路径规范
+/// 标准路径：config/skills/<skill_name>/
+pub fn skill_storage_dir(skill_name: &str) -> PathBuf {
+    crate::config::config_dir().join("skills").join(skill_name)
+}
+
+/// 自动获取当前技能的存储路径，基于调用模块的路径推断技能名
+/// 用法：在技能模块内直接调用 `skill_storage_dir!()`
+#[macro_export]
+macro_rules! skill_storage_dir {
+    () => {{
+        let skill_name = module_path!()
+            .split("::")
+            .nth(2)
+            .expect("skill_storage_dir!必须在技能模块内调用");
+        $crate::skills::skill_storage_dir(skill_name)
+    }};
+}
 
 // ─────────────────────────────────────────────
 // 平台类型枚举
@@ -27,7 +48,7 @@ pub enum Platform {
 }
 
 // ─────────────────────────────────────────────
-// TeamSpeak 执行上下文（原有）
+// TeamSpeak 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct ExecutionContext {
@@ -41,7 +62,7 @@ pub struct ExecutionContext {
 }
 
 // ─────────────────────────────────────────────
-// NapCat / QQ 执行上下文（新增）
+// NapCat / QQ 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct NcExecutionContext {
@@ -173,13 +194,20 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn with_defaults(music_backend: &str) -> Self {
+    pub fn with_defaults(
+        music_backend: &str,
+        config: &AppConfig,
+        llm: &Arc<crate::llm::LlmEngine>,
+        prompts: &crate::config::PromptsConfig,
+        ts_adapter: &Arc<crate::adapter::TsAdapter>,
+    ) -> Self {
         use communication::{PokeClient, SendMessage};
         use information::GetClientInfo;
+        use meeting_summary::MeetingSummary;
         use moderation::{BanClient, KickClient, MoveClient};
         use music::MusicControl;
-        use web_search::WebSearch;
         use tracing::info;
+        use web_search::WebSearch;
 
         let registry = Self::default();
         registry.register(Box::new(PokeClient));
@@ -190,6 +218,12 @@ impl SkillRegistry {
         registry.register(Box::new(GetClientInfo));
         registry.register(Box::new(WebSearch));
         registry.register(Box::new(MusicControl::new(music_backend)));
+        registry.register(Box::new(MeetingSummary::new(
+            Arc::new(config.clone()),
+            llm.clone(),
+            prompts,
+            ts_adapter.clone(),
+        )));
         info!("Skills registered: {:?}", registry.list_skills());
         registry
     }
