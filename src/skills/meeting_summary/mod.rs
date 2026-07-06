@@ -35,22 +35,11 @@ impl MeetingSummary {
         let transcriber = Arc::new(Transcriber::new(llm.clone()));
         let summarizer = Arc::new(Summarizer::new(llm.clone()));
 
-        let has_stt = config.headless.stt.enabled;
-        let has_omni = config.llm.omni_model;
-
-        // STT和omni都没开则不加载此技能
-        if !has_stt && !has_omni {
-            return Self {
-                recorder,
-                summarizer,
-            };
-        }
-
         // 创建STT管道（两种模式都需要opus解码）
         let stt_pipeline = Arc::new(tokio::sync::Mutex::new(OpusSttPipeline::new()));
 
         // STT模式需要SpeechProvider
-        let speech_provider = if has_stt {
+        let speech_provider = if config.headless.stt.enabled {
             match OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone()) {
                 Ok(provider) => Some(Arc::new(provider)),
                 Err(e) => {
@@ -187,6 +176,10 @@ impl Skill for MeetingSummary {
 
     fn description(&self) -> &'static str {
         "管理语音会议录制和生成会议总结。当用户想要记录会议、录制比赛、保存语音对话时使用此技能。"
+    }
+
+    fn is_enabled(&self, config: &AppConfig) -> bool {
+        config.headless.stt.enabled || config.llm.omni_model
     }
 
     fn parameters(&self) -> Value {

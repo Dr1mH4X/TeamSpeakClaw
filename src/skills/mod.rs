@@ -162,6 +162,11 @@ pub trait Skill: Send + Sync {
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
 
+    /// 技能是否启用，默认true
+    fn is_enabled(&self, _config: &AppConfig) -> bool {
+        true
+    }
+
     /// TeamSpeak 执行（原有）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
@@ -210,20 +215,30 @@ impl SkillRegistry {
         use web_search::WebSearch;
 
         let registry = Self::default();
-        registry.register(Box::new(PokeClient));
-        registry.register(Box::new(SendMessage));
-        registry.register(Box::new(KickClient));
-        registry.register(Box::new(BanClient));
-        registry.register(Box::new(MoveClient));
-        registry.register(Box::new(GetClientInfo));
-        registry.register(Box::new(WebSearch));
-        registry.register(Box::new(MusicControl::new(music_backend)));
-        registry.register(Box::new(MeetingSummary::new(
-            Arc::new(config.clone()),
-            llm.clone(),
-            prompts,
-            ts_adapter.clone(),
-        )));
+
+        let skills: Vec<Box<dyn Skill>> = vec![
+            Box::new(PokeClient),
+            Box::new(SendMessage),
+            Box::new(KickClient),
+            Box::new(BanClient),
+            Box::new(MoveClient),
+            Box::new(GetClientInfo),
+            Box::new(WebSearch),
+            Box::new(MusicControl::new(music_backend)),
+            Box::new(MeetingSummary::new(
+                Arc::new(config.clone()),
+                llm.clone(),
+                prompts,
+                ts_adapter.clone(),
+            )),
+        ];
+
+        for skill in skills {
+            if skill.is_enabled(config) {
+                registry.register(skill);
+            }
+        }
+
         info!("Skills registered: {:?}", registry.list_skills());
         registry
     }
