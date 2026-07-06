@@ -133,22 +133,28 @@ impl Recorder {
         }
         drop(state);
 
-        // 获取当前频道内的用户数
         match ts_adapter.list_clients().await {
             Ok(clients) => {
                 let bot_clid = ts_adapter.get_bot_clid();
+                let bot_channel_id = clients
+                    .iter()
+                    .find(|c| c.id as u32 == bot_clid)
+                    .map(|c| c.channel_id);
                 let musicbot_name = config.music_backend.musicbot_name.clone();
 
-                // 过滤掉机器人和音乐机器人
                 let non_bot_clients: Vec<_> = clients
                     .iter()
                     .filter(|c| {
                         let clid = c.id as u32;
-                        // 排除机器人自己
                         if clid == bot_clid {
                             return false;
                         }
-                        // 排除音乐机器人
+                        // 只统计机器人所在频道的用户
+                        if let Some(ch) = bot_channel_id {
+                            if c.channel_id != ch {
+                                return false;
+                            }
+                        }
                         if !musicbot_name.is_empty()
                             && c.nickname
                                 .to_ascii_lowercase()
@@ -161,7 +167,6 @@ impl Recorder {
                     .collect();
 
                 if non_bot_clients.is_empty() {
-                    // 频道为空，启动超时计时器
                     info!(
                         "频道内用户（除机器人外）已全部离开，启动{:?}超时计时器",
                         self.empty_channel_timeout
@@ -171,14 +176,22 @@ impl Recorder {
                     let musicbot_name = musicbot_name.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(recorder.empty_channel_timeout).await;
-                        // 再次检查频道是否仍然为空
                         if let Ok(clients) = ts_adapter.list_clients().await {
+                            let bot_channel_id = clients
+                                .iter()
+                                .find(|c| c.id as u32 == bot_clid)
+                                .map(|c| c.channel_id);
                             let non_bot_clients: Vec<_> = clients
                                 .iter()
                                 .filter(|c| {
                                     let clid = c.id as u32;
                                     if clid == bot_clid {
                                         return false;
+                                    }
+                                    if let Some(ch) = bot_channel_id {
+                                        if c.channel_id != ch {
+                                            return false;
+                                        }
                                     }
                                     if !musicbot_name.is_empty()
                                         && c.nickname
@@ -196,7 +209,7 @@ impl Recorder {
                                     "频道内无人超过{:?}，自动停止录制",
                                     recorder.empty_channel_timeout
                                 );
-                                let _ = recorder.stop_recording().await;
+                                recorder.reset().await;
                             }
                         }
                     });

@@ -248,8 +248,6 @@ impl TsAdapter {
     }
 
     pub fn broadcast_audio_frame(&self, data: AudioFrameData) {
-        let _ = self.event_tx.send(TsEvent::AudioFrame(data.clone()));
-        // 同时发送到全局广播
         if let Some(global_tx) = GLOBAL_AUDIO_TX.get() {
             let _ = global_tx.send(TsEvent::AudioFrame(data));
         }

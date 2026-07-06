@@ -90,31 +90,30 @@ impl MeetingSummary {
                 Ok(json!({"status": "ok", "message": result}))
             }
             "结束录制" | "stop recording" | "stop" | "end" => {
-                let _result = self.recorder.stop_recording().await?;
+                self.recorder.stop_recording().await?;
 
-                // 获取转录文本
                 let transcript = self.recorder.get_transcript_text().await;
                 if transcript.is_empty() {
+                    self.recorder.reset().await;
                     return Ok(json!({"status": "ok", "message": "录制已结束，但没有录制到内容"}));
                 }
 
-                // 生成总结
-                let summary = self.summarizer.generate_summary(&transcript).await?;
+                let result = async {
+                    let summary = self.summarizer.generate_summary(&transcript).await?;
+                    let dir = storage::create_recording_dir()?;
+                    storage::save_transcript(&dir, &transcript)?;
+                    storage::save_summary_json(&dir, &summary)?;
+                    storage::save_summary_markdown(&dir, &summary)?;
+                    Ok::<_, anyhow::Error>(json!({
+                        "status": "ok",
+                        "message": format!("会议总结已生成并保存到: {}", dir.display()),
+                        "summary": summary
+                    }))
+                }
+                .await;
 
-                // 保存到文件
-                let dir = storage::create_recording_dir()?;
-                storage::save_transcript(&dir, &transcript)?;
-                storage::save_summary_json(&dir, &summary)?;
-                storage::save_summary_markdown(&dir, &summary)?;
-
-                // 重置录制器
                 self.recorder.reset().await;
-
-                Ok(json!({
-                    "status": "ok",
-                    "message": format!("会议总结已生成并保存到: {}", dir.display()),
-                    "summary": summary
-                }))
+                result
             }
             "会议总结" | "meeting summary" | "summary" | "总结" => {
                 let state = self.recorder.get_state().await;
