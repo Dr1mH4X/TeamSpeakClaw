@@ -289,6 +289,15 @@ impl VoiceRouter {
             return Ok(());
         }
 
+        // 广播音频帧给其他订阅者（如会议录制）
+        self.ts_adapter
+            .broadcast_audio_frame(crate::adapter::headless::AudioFrameData {
+                from_client_id: audio.from_client_id,
+                from_client_name: audio.from_client_name.clone(),
+                frame: audio.frame.clone(),
+                codec: audio.codec,
+            });
+
         if self.config.llm.omni_model {
             return self.handle_omni_audio_event(client, audio).await;
         }

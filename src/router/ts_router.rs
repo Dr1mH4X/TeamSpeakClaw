@@ -149,9 +149,7 @@ impl EventRouter {
             Ok(clients) => {
                 let arr: Vec<serde_json::Value> = clients
                     .iter()
-                    .map(|c| {
-                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
-                    })
+                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
                     .collect();
                 let invoker_chan = clients
                     .iter()
@@ -159,7 +157,10 @@ impl EventRouter {
                     .map(|c| c.channel_id)
                     .unwrap_or(0);
                 info!("Fetched {} online clients for LLM context", clients.len());
-                (serde_json::to_string(&arr).unwrap_or_default(), invoker_chan)
+                (
+                    serde_json::to_string(&arr).unwrap_or_default(),
+                    invoker_chan,
+                )
             }
             Err(e) => {
                 warn!("Failed to fetch online clients: {e}");

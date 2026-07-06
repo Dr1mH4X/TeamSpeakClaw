@@ -9,11 +9,7 @@ use tracing::{debug, info};
 
 static TSMUSICBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(crate) async fn execute(
-    action: &str,
-    args: &Value,
-    ctx: &ExecutionContext,
-) -> Result<Value> {
+pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) -> Result<Value> {
     let needs_value = matches!(
         action,
         "play" | "add" | "search" | "playlist" | "vol" | "mode"

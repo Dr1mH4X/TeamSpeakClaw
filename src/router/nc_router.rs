@@ -310,10 +310,8 @@ impl NcRouter {
                 gate: self.gate.clone(),
                 config: self.config.clone(),
             };
-            let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx).with_cross_adapters(
-                self.ts_adapter.clone(),
-                Some(self.adapter.clone()),
-            );
+            let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
+                .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
 
             let args = call.arguments.clone();
             match skill.execute_unified(args.clone(), &unified_ctx).await {
@@ -388,7 +386,10 @@ impl NcRouter {
                         })
                         .collect();
                     info!("Fetched {} online clients for LLM context", clients.len());
-                    format!("\nOnline: {}", serde_json::to_string(&arr).unwrap_or_default())
+                    format!(
+                        "\nOnline: {}",
+                        serde_json::to_string(&arr).unwrap_or_default()
+                    )
                 }
                 Err(_) => String::new(),
             }
@@ -397,8 +398,14 @@ impl NcRouter {
         };
 
         let user_ctx = match group_id {
-            Some(gid) => format!("User: {} (QQ: {}, Group: {}){}", sender_name, user_id, gid, online_suffix),
-            None => format!("User: {} (QQ: {}, Private Chat){}", sender_name, user_id, online_suffix),
+            Some(gid) => format!(
+                "User: {} (QQ: {}, Group: {}){}",
+                sender_name, user_id, gid, online_suffix
+            ),
+            None => format!(
+                "User: {} (QQ: {}, Private Chat){}",
+                sender_name, user_id, online_suffix
+            ),
         };
 
         let mut messages = self

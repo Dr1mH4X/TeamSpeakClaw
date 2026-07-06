@@ -29,7 +29,7 @@ pub mod speech;
 mod types;
 mod voice_service;
 
-pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
+pub use self::event::{AudioFrameData, TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 

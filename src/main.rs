@@ -39,11 +39,18 @@ async fn main() -> Result<()> {
     let prompts_config = crate::config::PromptsConfig::load(config_dir.join("prompts.toml"))?;
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
-    let registry = Arc::new(SkillRegistry::with_defaults(&config.music_backend.backend));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     let identity_file = config_dir.join("identity.json");
     let adapter = TsAdapter::connect(config.clone(), identity_file).await?;
+
+    let registry = Arc::new(SkillRegistry::with_defaults(
+        &config.music_backend.backend,
+        &config,
+        &llm,
+        &prompts,
+        &adapter,
+    ));
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
 
