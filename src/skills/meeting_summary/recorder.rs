@@ -332,8 +332,9 @@ pub async fn listen_for_audio(
                                         serde_json::json!({"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}})
                                     ]})
                                 ];
+                                let mut msgs = messages;
                                 match llm.run_tool_loop(
-                                    &mut messages.clone(),
+                                    &mut msgs,
                                     &[],
                                     &super::transcriber::NoopExecutor,
                                     None,

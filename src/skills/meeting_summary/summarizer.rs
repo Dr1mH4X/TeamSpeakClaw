@@ -40,11 +40,12 @@ impl Summarizer {
         );
 
         let messages = vec![json!({"role": "user", "content": prompt})];
+        let mut msgs = messages.clone();
 
         let result = self
             .llm
             .run_tool_loop(
-                &mut messages.clone(),
+                &mut msgs,
                 &[], // 不需要工具
                 &NoopExecutor,
                 None,
