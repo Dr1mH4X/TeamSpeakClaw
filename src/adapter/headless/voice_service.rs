@@ -22,6 +22,7 @@ pub struct VoiceServiceImpl {
     bot_respond_to_private: bool,
     bot_default_reply_mode: String,
     bot_trigger_prefixes: Vec<String>,
+    tts_stream_lock: tokio::sync::Mutex<()>,
 }
 
 impl VoiceServiceImpl {
@@ -40,6 +41,7 @@ impl VoiceServiceImpl {
             bot_respond_to_private,
             bot_default_reply_mode,
             bot_trigger_prefixes,
+            tts_stream_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -291,6 +293,7 @@ impl VoiceService for VoiceServiceImpl {
         &self,
         req: Request<tonic::Streaming<voicev1::TtsAudioChunk>>,
     ) -> std::result::Result<Response<voicev1::CommandResponse>, Status> {
+        let _guard = self.tts_stream_lock.lock().await;
         let result = stream_tts_audio_loop(req.into_inner(), self.ts3_audio_tx.clone()).await;
 
         match result {
