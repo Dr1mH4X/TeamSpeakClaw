@@ -38,6 +38,8 @@ impl LlmEngine {
         system_prompt: &str,
         user_ctx: &str,
     ) -> Vec<Value> {
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let system_prompt = system_prompt.replace("{date}", &date);
         let system_content = format!("{system_prompt}\n\n{user_ctx}");
         let mut messages = vec![json!({"role": "system", "content": system_content})];
 
