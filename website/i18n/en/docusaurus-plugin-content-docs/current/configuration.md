@@ -113,6 +113,17 @@ Defines the bot's System Prompt and error messages. Usually no modification is n
 
 **View full configuration example**: [prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml)
 
+### System Prompt
+
+| Field | Description |
+|---|---|
+| `content` | System prompt that defines the bot's role, personality, response rules, etc. |
+
+The system prompt supports placeholder substitution:
+- `{date}` — Replaced with the current local date (e.g. `2026-07-09`), used to remind the LLM about information timeliness
+
+Refer to the `[system].content` field in [prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml) for the default value.
+
 ### TTS Style Prompt Configuration
 
 | Field | Description |
