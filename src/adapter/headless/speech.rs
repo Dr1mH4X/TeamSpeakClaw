@@ -73,13 +73,9 @@ impl OpusSttPipeline {
         let now = Instant::now();
         self.evict_idle_speakers(now, event.from_client_id);
 
-        let codec = voicev1::audio_frame_event::Codec::try_from(event.codec)
-            .unwrap_or(voicev1::audio_frame_event::Codec::Unspecified);
-        if !matches!(
-            codec,
-            voicev1::audio_frame_event::Codec::OpusVoice
-                | voicev1::audio_frame_event::Codec::OpusMusic
-        ) {
+        // TS3 协议 codec: 4=OPUS_VOICE, 5=OPUS_MUSIC
+        if !matches!(event.codec, 4 | 5) {
+            debug!("跳过非Opus音频帧: codec={} frame_len={}", event.codec, event.frame.len());
             return Ok(None);
         }
 
