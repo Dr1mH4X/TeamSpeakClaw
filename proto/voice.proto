@@ -99,14 +99,14 @@ message LogEvent {
 }
 
 message AudioFrameEvent {
+  // TS3 CodecType 协议（原始 codec byte）
   enum Codec {
-    CODEC_UNSPECIFIED = 0;
-    CODEC_OPUS_VOICE = 1;
-    CODEC_OPUS_MUSIC = 2;
+    CODEC_SPEEX_NARROWBAND = 0;
+    CODEC_SPEEX_WIDEBAND = 1;
+    CODEC_SPEEX_ULTRAWIDEBAND = 2;
     CODEC_CELT_MONO = 3;
-    CODEC_SPEEX_NARROW = 4;
-    CODEC_SPEEX_WIDE = 5;
-    CODEC_SPEEX_ULTRA_WIDE = 6;
+    CODEC_OPUS_VOICE = 4;
+    CODEC_OPUS_MUSIC = 5;
   }
 
   uint32 from_client_id = 1;
