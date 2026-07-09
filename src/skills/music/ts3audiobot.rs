@@ -73,7 +73,7 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
         .config
         .music_backend
         .as_ref()
-        .expect("registered")
+        .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?
         .musicbot_name
         .as_str();
     let clients = ctx.adapter.list_clients().await?;
