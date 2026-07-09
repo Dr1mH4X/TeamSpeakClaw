@@ -19,6 +19,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::config::music_backend::VALID_BACKENDS;
+
 pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -63,6 +65,19 @@ impl AppConfig {
         ))
     }
 
+    pub fn validate(&self) -> Result<()> {
+        if let Some(ref mc) = self.music_backend {
+            if !VALID_BACKENDS.contains(&mc.backend.as_str()) {
+                anyhow::bail!(
+                    "Unsupported music backend '{}'. Supported: {}",
+                    mc.backend,
+                    VALID_BACKENDS.join(", "),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).context(format!(
@@ -70,6 +85,7 @@ impl AppConfig {
             path.display()
         ))?;
         let config: AppConfig = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 }
