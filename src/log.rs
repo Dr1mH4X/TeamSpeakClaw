@@ -13,6 +13,8 @@ use tracing_subscriber::{
     EnvFilter, Layer,
 };
 
+use crate::config::LogConfig;
+
 fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
     let now = chrono::Local::now();
     let entries = match fs::read_dir(log_dir) {
@@ -42,7 +44,7 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
     }
 }
 
-pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) -> WorkerGuard {
+pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
     let noise_directives = [
         "h2=off",
         "hyper::client::connect=off",
@@ -63,21 +65,17 @@ pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) ->
         .with_timer(LocalTime::rfc_3339())
         .with_filter(console_filter);
 
-    let log_dir: PathBuf = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("logs");
+    let log_dir: PathBuf = crate::config::exe_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 
-    cleanup_old_logs(&log_dir, max_log_days);
+    cleanup_old_logs(&log_dir, log_cfg.max_log_days);
 
     let file_appender = DailyFileAppender::new(log_dir.clone(), "tsclaw");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = noise_directives
         .iter()
-        .fold(EnvFilter::new(file_level), |filter, directive| {
+        .fold(EnvFilter::new(&log_cfg.file_level), |filter, directive| {
             filter.add_directive(directive.parse().unwrap())
         });
 
@@ -100,10 +98,11 @@ pub fn init_tracing(console_level: &str, file_level: &str, max_log_days: u32) ->
     // Periodic cleanup
     {
         let dir = log_dir;
+        let days = log_cfg.max_log_days;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
-                cleanup_old_logs(&dir, max_log_days);
+                cleanup_old_logs(&dir, days);
             }
         });
     }

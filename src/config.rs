@@ -19,19 +19,24 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub fn config_dir() -> PathBuf {
+use crate::config::music_backend::VALID_BACKENDS;
+
+pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("config")
+}
+
+pub fn config_dir() -> PathBuf {
+    exe_dir().join("config")
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
-    pub music_backend: MusicBackendConfig,
+    pub music_backend: Option<MusicBackendConfig>,
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
@@ -42,7 +47,7 @@ impl Default for AppConfig {
         Self {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
-            music_backend: MusicBackendConfig::default(),
+            music_backend: None,
             napcat: NapCatConfig::default(),
             headless: HeadlessConfig::default(),
             logging: LogConfig::default(),
@@ -51,6 +56,28 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn load_all() -> Result<(Self, AclConfig, PromptsConfig)> {
+        let dir = config_dir();
+        Ok((
+            Self::load(dir.join("settings.toml"))?,
+            AclConfig::load(dir.join("acl.toml"))?,
+            PromptsConfig::load(dir.join("prompts.toml"))?,
+        ))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(ref mc) = self.music_backend {
+            if !VALID_BACKENDS.contains(&mc.backend.as_str()) {
+                anyhow::bail!(
+                    "Unsupported music backend '{}'. Supported: {}",
+                    mc.backend,
+                    VALID_BACKENDS.join(", "),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).context(format!(
@@ -58,6 +85,7 @@ impl AppConfig {
             path.display()
         ))?;
         let config: AppConfig = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 }

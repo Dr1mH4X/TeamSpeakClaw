@@ -21,9 +21,9 @@ async fn dispatch_backend(
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
         "ts3audiobot" => ts3audiobot::execute(action, args, ctx).await,
         "tsmusicbot" => tsmusicbot::execute(action, args, ctx).await,
-        other => Err(anyhow::anyhow!(
-            "Unknown music backend '{}'. Valid options: ts3audiobot, tsmusicbot, tsbot_backend",
-            other
+        _ => Err(anyhow::anyhow!(
+            "Unknown music backend '{}', expected one of: ts3audiobot, tsmusicbot, tsbot_backend",
+            cfg.backend
         )),
     }
 }
@@ -33,7 +33,10 @@ pub struct MusicControl {
 }
 
 impl MusicControl {
-    pub fn new(backend: &str) -> Self {
+    pub fn new(cfg: Option<&MusicBackendConfig>) -> Self {
+        let backend = cfg
+            .map(|c| c.backend.as_str())
+            .unwrap_or("");
         Self {
             backend: backend.to_string(),
         }
@@ -46,6 +49,10 @@ impl Skill for MusicControl {
         "music_control"
     }
 
+    fn should_register(&self) -> bool {
+        !self.backend.is_empty()
+    }
+
     fn description(&self) -> &'static str {
         match self.backend.as_str() {
             "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
@@ -54,7 +61,7 @@ impl Skill for MusicControl {
                             Supports play, pause, resume, next/prev, stop, volume, mode, queue, search, add, playlist, fm.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
                                 manage the queue, and control playback.",
-            _ => "Control the music player.",
+            _ => unreachable!(),
         }
     }
 
@@ -63,7 +70,7 @@ impl Skill for MusicControl {
             "ts3audiobot" => ts3audiobot_schema(),
             "tsmusicbot" => tsmusicbot_schema(),
             "tsbot_backend" => tsbot_schema(),
-            _ => ts3audiobot_schema(),
+            _ => unreachable!(),
         }
     }
 
@@ -72,7 +79,12 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        dispatch_backend(action, &args, &ctx.config.music_backend, Some(ctx)).await
+        let cfg = ctx
+            .config
+            .music_backend
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
+        dispatch_backend(action, &args, cfg, Some(ctx)).await
     }
 
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
@@ -85,7 +97,11 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        let cfg = &ctx.config.music_backend;
+        let cfg = ctx
+            .config
+            .music_backend
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
 
         match ctx.platform {
             crate::skills::Platform::TeamSpeak => {
