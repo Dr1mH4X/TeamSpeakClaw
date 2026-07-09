@@ -31,7 +31,7 @@ pub fn config_dir() -> PathBuf {
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
-    pub music_backend: MusicBackendConfig,
+    pub music_backend: Option<MusicBackendConfig>,
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
@@ -42,7 +42,7 @@ impl Default for AppConfig {
         Self {
             llm: LlmConfig::default(),
             bot: BotConfig::default(),
-            music_backend: MusicBackendConfig::default(),
+            music_backend: None,
             napcat: NapCatConfig::default(),
             headless: HeadlessConfig::default(),
             logging: LogConfig::default(),

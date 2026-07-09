@@ -279,7 +279,11 @@ impl VoiceRouter {
         if bot_clid != 0 && audio.from_client_id == bot_clid {
             return Ok(());
         }
-        let musicbot_name = &self.config.music_backend.musicbot_name;
+        let musicbot_name = self
+            .config
+            .music_backend
+            .as_ref()
+            .map_or("", |c| c.musicbot_name.as_str());
         if !musicbot_name.is_empty()
             && audio
                 .from_client_name

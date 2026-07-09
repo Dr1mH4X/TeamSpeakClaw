@@ -75,7 +75,11 @@ impl OpusSttPipeline {
 
         // TS3 协议 codec: 4=OPUS_VOICE, 5=OPUS_MUSIC
         if !matches!(event.codec, 4 | 5) {
-            debug!("跳过非Opus音频帧: codec={} frame_len={}", event.codec, event.frame.len());
+            debug!(
+                "跳过非Opus音频帧: codec={} frame_len={}",
+                event.codec,
+                event.frame.len()
+            );
             return Ok(None);
         }
 
