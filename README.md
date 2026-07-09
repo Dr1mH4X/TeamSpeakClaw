@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  [🇨🇳 中文] · [🇬🇧 English](README_EN.md)
+  [中文] · [English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md)
 </div>
 
 > ⚠️ 自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。
