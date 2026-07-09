@@ -11,10 +11,10 @@ use crate::llm::ToolCall;
 use crate::permission::PermissionGate;
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 // ─────────────────────────────────────────────
 // 平台类型枚举
@@ -161,6 +161,11 @@ pub trait Skill: Send + Sync {
             self.name()
         ))
     }
+
+    /// 是否应该注册此 skill，默认 true。覆盖返回 false 可阻止注册。
+    fn should_register(&self) -> bool {
+        true
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -173,13 +178,12 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn with_defaults(music_backend: &str) -> Self {
+    pub fn with_defaults(config: &AppConfig) -> Self {
         use communication::{PokeClient, SendMessage};
         use information::GetClientInfo;
         use moderation::{BanClient, KickClient, MoveClient};
         use music::MusicControl;
         use web_search::WebSearch;
-        use tracing::info;
 
         let registry = Self::default();
         registry.register(Box::new(PokeClient));
@@ -189,12 +193,16 @@ impl SkillRegistry {
         registry.register(Box::new(MoveClient));
         registry.register(Box::new(GetClientInfo));
         registry.register(Box::new(WebSearch));
-        registry.register(Box::new(MusicControl::new(music_backend)));
+        registry.register(Box::new(MusicControl::new(config)));
         info!("Skills registered: {:?}", registry.list_skills());
         registry
     }
 
     pub fn register(&self, skill: Box<dyn Skill>) {
+        if !skill.should_register() {
+            info!("Skill '{}' disabled, skipping", skill.name());
+            return;
+        }
         self.skills.insert(skill.name().to_string(), skill);
     }
 
