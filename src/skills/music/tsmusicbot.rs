@@ -9,11 +9,7 @@ use tracing::{debug, info};
 
 static TSMUSICBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(crate) async fn execute(
-    action: &str,
-    args: &Value,
-    ctx: &ExecutionContext,
-) -> Result<Value> {
+pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) -> Result<Value> {
     let needs_value = matches!(
         action,
         "play" | "add" | "search" | "playlist" | "vol" | "mode"
@@ -56,7 +52,13 @@ pub(crate) async fn execute(
         }
     };
 
-    let target_name = &ctx.config.music_backend.musicbot_name;
+    let target_name = ctx
+        .config
+        .music_backend
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?
+        .musicbot_name
+        .as_str();
     let clients = ctx.adapter.list_clients().await?;
     let audiobot = clients
         .iter()

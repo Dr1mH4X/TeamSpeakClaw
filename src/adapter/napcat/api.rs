@@ -41,5 +41,3 @@ pub fn action_get_login_info() -> NcAction {
         echo: new_echo(),
     }
 }
-
-

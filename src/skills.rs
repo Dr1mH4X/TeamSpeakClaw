@@ -7,14 +7,15 @@ pub mod web_search;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::TsAdapter;
 use crate::config::AppConfig;
+use crate::config::MusicBackendConfig;
 use crate::llm::ToolCall;
 use crate::permission::PermissionGate;
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 // ─────────────────────────────────────────────
 // 平台类型枚举
@@ -27,7 +28,7 @@ pub enum Platform {
 }
 
 // ─────────────────────────────────────────────
-// TeamSpeak 执行上下文（原有）
+// TeamSpeak 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct ExecutionContext {
@@ -41,7 +42,7 @@ pub struct ExecutionContext {
 }
 
 // ─────────────────────────────────────────────
-// NapCat / QQ 执行上下文（新增）
+// NapCat / QQ 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct NcExecutionContext {
@@ -132,6 +133,23 @@ impl UnifiedExecutionContext {
 }
 
 // ─────────────────────────────────────────────
+// SkillContext：skill 构造依赖的统一来源
+// ─────────────────────────────────────────────
+
+pub struct SkillContext {
+    pub config: Arc<AppConfig>,
+}
+
+impl SkillContext {
+    pub fn music_backend_config(&self) -> Option<&MusicBackendConfig> {
+        self.config.music_backend.as_ref()
+    }
+}
+
+/// Skill 工厂函数类型
+pub type SkillFactory = fn(&SkillContext) -> Box<dyn Skill>;
+
+// ─────────────────────────────────────────────
 // Skill trait
 // ─────────────────────────────────────────────
 
@@ -161,6 +179,11 @@ pub trait Skill: Send + Sync {
             self.name()
         ))
     }
+
+    /// 是否应该注册此 skill，默认 true。覆盖返回 false 可阻止注册。
+    fn should_register(&self) -> bool {
+        true
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -173,28 +196,22 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn with_defaults(music_backend: &str) -> Self {
-        use communication::{PokeClient, SendMessage};
-        use information::GetClientInfo;
-        use moderation::{BanClient, KickClient, MoveClient};
-        use music::MusicControl;
-        use web_search::WebSearch;
-        use tracing::info;
-
-        let registry = Self::default();
-        registry.register(Box::new(PokeClient));
-        registry.register(Box::new(SendMessage));
-        registry.register(Box::new(KickClient));
-        registry.register(Box::new(BanClient));
-        registry.register(Box::new(MoveClient));
-        registry.register(Box::new(GetClientInfo));
-        registry.register(Box::new(WebSearch));
-        registry.register(Box::new(MusicControl::new(music_backend)));
-        info!("Skills registered: {:?}", registry.list_skills());
-        registry
+    pub fn with_defaults(config: Arc<AppConfig>) -> Self {
+        let ctx = SkillContext { config };
+        let reg = Self::default();
+        for (name, factory) in DEFAULT_SKILLS.iter() {
+            debug!(skill = name, "constructing");
+            reg.register(factory(&ctx));
+        }
+        info!("Skills registered: {:?}", reg.list_skills());
+        reg
     }
 
     pub fn register(&self, skill: Box<dyn Skill>) {
+        if !skill.should_register() {
+            info!("Skill '{}' disabled, skipping", skill.name());
+            return;
+        }
         self.skills.insert(skill.name().to_string(), skill);
     }
 
@@ -259,3 +276,18 @@ impl SkillRegistry {
             .collect()
     }
 }
+
+// ─────────────────────────────────────────────
+// 声明式工厂表：新增 skill = 加一行
+// ─────────────────────────────────────────────
+
+static DEFAULT_SKILLS: &[(&str, SkillFactory)] = &[
+    ("poke",         |_| Box::new(communication::PokeClient) as Box<dyn Skill>),
+    ("send_message", |_| Box::new(communication::SendMessage) as Box<dyn Skill>),
+    ("kick",         |_| Box::new(moderation::KickClient) as Box<dyn Skill>),
+    ("ban",          |_| Box::new(moderation::BanClient) as Box<dyn Skill>),
+    ("move",         |_| Box::new(moderation::MoveClient) as Box<dyn Skill>),
+    ("client_info",  |_| Box::new(information::GetClientInfo) as Box<dyn Skill>),
+    ("web_search",   |_| Box::new(web_search::WebSearch) as Box<dyn Skill>),
+    ("music",       |ctx| Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Skill>),
+];

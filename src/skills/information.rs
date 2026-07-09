@@ -50,12 +50,34 @@ impl Skill for GetClientInfo {
 
                 let dur_str = format!(
                     "{}{}{}{}{}{}",
-                    if years > 0 { format!("{years} years ") } else { String::new() },
-                    if months > 0 { format!("{months} months ") } else { String::new() },
-                    if days > 0 { format!("{days} days ") } else { String::new() },
-                    if hours > 0 { format!("{hours} hours ") } else { String::new() },
-                    if minutes > 0 { format!("{minutes} minutes ") } else { String::new() },
-                    if seconds > 0 || (years == 0 && months == 0 && days == 0 && hours == 0 && minutes == 0) {
+                    if years > 0 {
+                        format!("{years} years ")
+                    } else {
+                        String::new()
+                    },
+                    if months > 0 {
+                        format!("{months} months ")
+                    } else {
+                        String::new()
+                    },
+                    if days > 0 {
+                        format!("{days} days ")
+                    } else {
+                        String::new()
+                    },
+                    if hours > 0 {
+                        format!("{hours} hours ")
+                    } else {
+                        String::new()
+                    },
+                    if minutes > 0 {
+                        format!("{minutes} minutes ")
+                    } else {
+                        String::new()
+                    },
+                    if seconds > 0
+                        || (years == 0 && months == 0 && days == 0 && hours == 0 && minutes == 0)
+                    {
                         format!("{seconds} seconds")
                     } else {
                         String::new()
@@ -97,7 +119,9 @@ impl Skill for GetClientInfo {
                 let client = clients
                     .iter()
                     .find(|c| c.id as u32 == clid)
-                    .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Client {} is not online or does not exist", clid)
+                    })?;
                 let groups: Vec<u32> = client
                     .server_groups
                     .iter()
