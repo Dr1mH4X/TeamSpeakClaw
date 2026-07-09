@@ -32,6 +32,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 ## ✨ Features
 
 - **🧠 Natural Language Interaction**: No more memorizing complicated commands. Just say "play Jay Chou's song" or "kick that guy who just joined the channel".
+- **💾 Ultra-Lightweight**: Docker memory usage as low as **6MB** — comparable projects typically consume 100MB+.
 - **🛡️ Fine-grained Permission Control**: Built-in powerful permission system. Configure specific skill permissions for different TeamSpeak server groups/user groups.
 - **🔌 Flexible Skill System**:
   - **Music Control**: Supports three external music bot backends:[TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin),[TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) or [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot).

@@ -63,7 +63,7 @@
 }
 
 .featureCard {
-    padding: 3rem 2rem;
+    padding: 2rem 1.5rem;
     border: 1px solid #222;
     background: transparent;
     transition: border-color 0.4s ease;

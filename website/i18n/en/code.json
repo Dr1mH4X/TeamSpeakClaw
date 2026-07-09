@@ -29,6 +29,12 @@
   "homepage.features.cloudMusic.description": {
     "message": "Seamless integration with TS3AudioBot, TSMusicBot and NeteaseTSBot."
   },
+  "homepage.features.lightweight.title": {
+    "message": "ULTRA LIGHTWEIGHT"
+  },
+  "homepage.features.lightweight.description": {
+    "message": "Docker memory usage as low as 6MB, while comparable projects typically need 100MB+."
+  },
   "theme.ErrorPageContent.title": {
     "message": "This page crashed.",
     "description": "The title of the fallback page when the page crashed"
