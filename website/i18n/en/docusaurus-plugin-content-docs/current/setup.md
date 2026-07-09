@@ -51,7 +51,7 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-comp
 2. Prepare configuration files and models (optional):
 
 - Copy configuration files from `examples/config/` directory to `config/` and modify them
-- If you need local STT service, download whisper.cpp GGML models to the `models/` directory:
+- If you need local STT service, download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) to the `models/` directory:
 
 ```bash
 mkdir -p models
