@@ -1,0 +1,47 @@
+name: reusable-meta
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.meta.outputs.version }}
+      tag:
+        value: ${{ jobs.meta.outputs.tag }}
+      is-release:
+        value: ${{ jobs.meta.outputs.is-release }}
+      is-prerelease:
+        value: ${{ jobs.meta.outputs.is-prerelease }}
+      is-stable-release:
+        value: ${{ jobs.meta.outputs.is-stable-release }}
+
+jobs:
+  meta:
+    name: Meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is-release: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      is-prerelease: ${{ startsWith(github.ref, 'refs/tags/v') && contains(steps.version.outputs.tag, '-beta') }}
+      is-stable-release: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(steps.version.outputs.tag, '-beta') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="0.0.0-dev.${GITHUB_SHA::7}"
+            TAG="dev"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT

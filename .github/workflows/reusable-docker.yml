@@ -1,0 +1,78 @@
+name: reusable-docker
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "发版时使用的版本号（如 1.2.3）"
+        type: string
+        required: false
+        default: ""
+      is-release:
+        description: "是否为正式发版"
+        type: boolean
+        required: true
+      is-stable-release:
+        description: "是否为稳定版（推 latest）"
+        type: boolean
+        required: false
+        default: false
+      sha-tag:
+        description: "手动模式下的自定义 tag（如 sha-abc1234），留空则用 sha-<短sha>"
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update version in Cargo.toml
+        if: inputs.is-release == true
+        run: |
+          VERSION="${{ inputs.version }}"
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/teamspeakclaw
+          tags: |
+            type=raw,value=latest,enable=${{ inputs.is-stable-release == true }}
+            type=semver,pattern={{version}},value=v${{ inputs.version }},enable=${{ inputs.is-release == true }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ inputs.version }},enable=${{ inputs.is-release == true }}
+            type=raw,value=${{ inputs.sha-tag }},enable=${{ inputs.sha-tag != '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ inputs.is-release != true && inputs.sha-tag == '' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
