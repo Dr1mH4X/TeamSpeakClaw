@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  [中文](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md) · [English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md)
+  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a>
 </div>
 
 > ⚠️ Since v0.5.0, config files and `identity.json` are no longer compatible with older versions. Please refer to the latest [config templates](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples) before upgrading.
