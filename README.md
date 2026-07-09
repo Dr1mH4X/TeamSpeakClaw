@@ -5,7 +5,7 @@
   <img src="https://count.getloli.com/get/@TeamSpeakClaw?theme=booru-lewd" alt=":name" /></p>
   
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/actions">
-    <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/build.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
+    <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/ci.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
   </a>
 
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/releases">
@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  [中文] · [English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md)
+  [中文](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md) · [English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md)
 </div>
 
 > ⚠️ 自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。

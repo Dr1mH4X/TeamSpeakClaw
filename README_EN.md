@@ -5,7 +5,7 @@
   <img src="https://count.getloli.com/get/@TeamSpeakClaw?theme=booru-lewd" alt=":name" /></p>
   
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/actions">
-    <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/build.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
+    <img src="https://img.shields.io/github/actions/workflow/status/Dr1mH4X/TeamSpeakClaw/ci.yml?style=for-the-badge&label=Build" alt="TeamSpeakClaw Build Status">
   </a>
 
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/releases">
@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  [中文](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md) · [English]
+  [中文](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md) · [English](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md)
 </div>
 
 > ⚠️ Since v0.5.0, config files and `identity.json` are no longer compatible with older versions. Please refer to the latest [config templates](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples) before upgrading.
