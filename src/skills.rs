@@ -27,7 +27,7 @@ pub enum Platform {
 }
 
 // ─────────────────────────────────────────────
-// TeamSpeak 执行上下文（原有）
+// TeamSpeak 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct ExecutionContext {
@@ -41,7 +41,7 @@ pub struct ExecutionContext {
 }
 
 // ─────────────────────────────────────────────
-// NapCat / QQ 执行上下文（新增）
+// NapCat / QQ 执行上下文
 // ─────────────────────────────────────────────
 
 pub struct NcExecutionContext {
