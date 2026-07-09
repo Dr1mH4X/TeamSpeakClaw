@@ -1,0 +1,25 @@
+name: Docker SHA (Manual)
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha-tag:
+        description: "要推送的 sha tag（如 sha-abc1234），留空则用当前 commit 的短 sha"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    uses: ./.github/workflows/reusable-docker.yml
+    with:
+      is-release: false
+      is-stable-release: false
+      sha-tag: ${{ inputs.sha-tag }}
+    secrets: inherit

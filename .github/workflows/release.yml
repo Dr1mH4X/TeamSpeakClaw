@@ -1,0 +1,67 @@
+name: Release
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  meta:
+    uses: ./.github/workflows/reusable-meta.yml
+
+  build:
+    needs: meta
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      is-release: true
+
+  docker:
+    needs: meta
+    uses: ./.github/workflows/reusable-docker.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      is-release: true
+      is-stable-release: ${{ needs.meta.outputs.is-stable-release == 'true' }}
+    secrets: inherit
+
+  changelog:
+    needs: meta
+    uses: ./.github/workflows/reusable-changelog.yml
+
+  release:
+    name: Create Release
+    needs: [meta, build, changelog, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: artifacts-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Release ${{ needs.meta.outputs.tag }}
+          body: |
+            ${{ needs.changelog.outputs.release_body }}
+          draft: false
+          prerelease: ${{ needs.meta.outputs.is-prerelease == 'true' }}
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

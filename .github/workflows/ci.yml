@@ -1,0 +1,36 @@
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - "website/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    uses: ./.github/workflows/reusable-meta.yml
+
+  build:
+    needs: meta
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      is-release: false
