@@ -1,5 +1,5 @@
-use crate::config::AclConfig;
 use crate::config::acl::AclRule;
+use crate::config::AclConfig;
 
 pub struct PermissionGate {
     config: AclConfig,
@@ -10,7 +10,12 @@ impl PermissionGate {
         Self { config }
     }
 
-    fn matches_rule(&self, rule: &AclRule, caller_groups: &[u32], caller_channel_group_id: u32) -> bool {
+    fn matches_rule(
+        &self,
+        rule: &AclRule,
+        caller_groups: &[u32],
+        caller_channel_group_id: u32,
+    ) -> bool {
         let match_server_group = if rule.server_group_ids.is_empty() {
             true
         } else {

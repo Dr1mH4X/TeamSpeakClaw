@@ -97,7 +97,11 @@ impl EventRouter {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
-        let musicbot_name = &self.config.music_backend.musicbot_name;
+        let musicbot_name = self
+            .config
+            .music_backend
+            .as_ref()
+            .map_or("", |c| c.musicbot_name.as_str());
         if !musicbot_name.is_empty()
             && event
                 .invoker_name
@@ -149,9 +153,7 @@ impl EventRouter {
             Ok(clients) => {
                 let arr: Vec<serde_json::Value> = clients
                     .iter()
-                    .map(|c| {
-                        json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
-                    })
+                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
                     .collect();
                 let invoker_chan = clients
                     .iter()
@@ -159,7 +161,10 @@ impl EventRouter {
                     .map(|c| c.channel_id)
                     .unwrap_or(0);
                 info!("Fetched {} online clients for LLM context", clients.len());
-                (serde_json::to_string(&arr).unwrap_or_default(), invoker_chan)
+                (
+                    serde_json::to_string(&arr).unwrap_or_default(),
+                    invoker_chan,
+                )
             }
             Err(e) => {
                 warn!("Failed to fetch online clients: {e}");
