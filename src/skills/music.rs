@@ -9,8 +9,6 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
 
-pub const VALID_BACKENDS: &[&str] = &["ts3audiobot", "tsmusicbot", "tsbot_backend"];
-
 async fn dispatch_backend(
     action: &str,
     args: &Value,
@@ -52,7 +50,7 @@ impl Skill for MusicControl {
     }
 
     fn should_register(&self) -> bool {
-        VALID_BACKENDS.contains(&self.backend.as_str())
+        !self.backend.is_empty()
     }
 
     fn description(&self) -> &'static str {
