@@ -11,6 +11,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 ## ✨ Features
 
 - **🧠 Natural Language Interaction**: Say goodbye to tedious command manuals. Simply say "Play some Jay Chou" or "Kick that troublemaker," and TSClaw will understand and execute.
+- **💾 Ultra-Lightweight**: Docker memory usage as low as **6MB** — comparable projects typically consume 100MB+.
 - **🎙️ Headless Voice Service**: Supports headless voice mode with STT (Speech-to-Text) and TTS (Text-to-Speech) capabilities. Configurable wake words, supports OpenAI-compatible voice services.
 - **🛡️ Fine-grained Access Control (RBAC)**: Built-in robust permission system. You can configure specific skill permissions for different TeamSpeak user groups (e.g., allow only admins to kick users, while regular users are limited to requesting songs).
 - **🔌 Flexible Skill System (Skills)**:

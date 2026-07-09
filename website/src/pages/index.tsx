@@ -78,6 +78,18 @@ export default function Home(): React.JSX.Element {
                 </Translate>
               }
             />
+            <FeatureItem
+              title={
+                <Translate id="homepage.features.lightweight.title">
+                  极致轻量
+                </Translate>
+              }
+              description={
+                <Translate id="homepage.features.lightweight.description">
+                  Docker 运行内存占用低至 6MB，同类项目通常占用 100MB+
+                </Translate>
+              }
+            />
           </div>
         </div>
       </main>
@@ -87,7 +99,7 @@ export default function Home(): React.JSX.Element {
 
 function FeatureItem({ title, description }) {
   return (
-    <div className="col col--4">
+    <div className="col col--3">
       <div className={styles.featureCard}>
         <Heading as="h3" className={styles.featureCardTitle}>
           {title}
