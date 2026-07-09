@@ -19,12 +19,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub fn config_dir() -> PathBuf {
+pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("config")
+}
+
+pub fn config_dir() -> PathBuf {
+    exe_dir().join("config")
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -51,6 +54,15 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn load_all() -> Result<(Self, AclConfig, PromptsConfig)> {
+        let dir = config_dir();
+        Ok((
+            Self::load(dir.join("settings.toml"))?,
+            AclConfig::load(dir.join("acl.toml"))?,
+            PromptsConfig::load(dir.join("prompts.toml"))?,
+        ))
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).context(format!(
