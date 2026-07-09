@@ -7,15 +7,13 @@ services:
     user: "1000:10" #PUID:GUID
     restart: unless-stopped
     volumes:
-      # 配置文件目录（必须）
-      - ./config:/app/config
-      # 日志目录
-      - ./logs:/app/logs
+      - ./config:/app/config  # 配置文件目录（必须）
+      - ./logs:/app/logs  # 日志目录
     environment:
       - TZ=Asia/Shanghai
     networks:
       - openteamspeak
-    depends_on:
+    depends_on: # 若无需本地STT需求可以注释掉depends_on和下方stt-api块
       - stt-api
 
   stt-api:
@@ -23,13 +21,11 @@ services:
     container_name: whisper-stt-api
     restart: unless-stopped
     volumes:
-      # whisper 模型目录（只读）
-      - ./models:/models:ro
+      - ./models:/models:ro # whisper 模型目录（只读）
     environment:
       - TZ=Asia/Shanghai
     devices:
-      # Intel/AMD GPU 加速（可选，无 GPU 可删除此行）
-      - /dev/dri
+      - /dev/dri  # Intel/AMD GPU 加速（可选，无 GPU 可删除此行）
     entrypoint: ""
     command: >
       whisper-server
