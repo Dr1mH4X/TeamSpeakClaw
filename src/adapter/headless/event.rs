@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +5,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use crate::config::AppConfig;
+use crate::config::{config_dir, AppConfig};
 
 /// 身份升级最大安全等级
 const IDENTITY_MAX_LEVEL: i32 = 29;
@@ -20,9 +19,7 @@ fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
         if id == "2568" || id == "2569" || id.contains("permission") || id.contains("insufficient")
     );
     if is_perm {
-        error!(
-            "{op} failed: insufficient permissions. Grant the bot Server Admin permissions"
-        );
+        error!("{op} failed: insufficient permissions. Grant the bot Server Admin permissions");
     }
     anyhow!("{op} failed: {err}")
 }
@@ -36,15 +33,13 @@ pub struct TsAdapter {
 }
 
 impl TsAdapter {
-    pub async fn connect(
-        config: Arc<AppConfig>,
-        identity_file: PathBuf,
-    ) -> Result<Arc<Self>> {
+    pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
         let hc = &config.headless;
         let host = &hc.server_address;
         let port = hc.server_port;
         let nickname = &config.bot.nickname;
 
+        let identity_file = config_dir().join("identity.json");
         let mut identity = Self::load_or_create_identity(&identity_file, 8)?;
         let addr = format!("{host}:{port}");
 
@@ -100,7 +95,8 @@ impl TsAdapter {
                         if let Ok(cid_u64) = cid.parse::<u64>() {
                             let pw = &hc.channel_password;
                             let clid = client.client_id();
-                            if let Err(e) = tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
+                            if let Err(e) =
+                                tsclient_rs::clientMove(&client, clid, cid_u64, pw).await
                             {
                                 warn!("join channel failed: {e}");
                             }
@@ -158,8 +154,6 @@ impl TsAdapter {
                 }
             }));
         }
-
-
     }
 
     async fn upgrade_identity_and_save(
@@ -311,5 +305,3 @@ pub enum TextMessageTarget {
     Channel,
     Server,
 }
-
-
