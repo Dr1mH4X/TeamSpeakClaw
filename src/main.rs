@@ -24,26 +24,18 @@ async fn main() -> Result<()> {
     cli::print_banner();
 
     let args = Args::parse();
-    let config_dir = crate::config::config_dir();
-    let cfg = AppConfig::load(config_dir.join("settings.toml"))?;
-    let _guard = crate::log::init_tracing(
-        &args.log_level,
-        &cfg.logging.file_level,
-        cfg.logging.max_log_days,
-    );
+    let (cfg, acl_config, prompts_config) = AppConfig::load_all()?;
+    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
 
     let config = Arc::new(cfg);
-    let acl_config = crate::config::AclConfig::load(config_dir.join("acl.toml"))?;
-    let prompts_config = crate::config::PromptsConfig::load(config_dir.join("prompts.toml"))?;
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
     let registry = Arc::new(SkillRegistry::with_defaults(&config));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
-    let identity_file = config_dir.join("identity.json");
-    let adapter = TsAdapter::connect(config.clone(), identity_file).await?;
+    let adapter = TsAdapter::connect(config.clone()).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
 
