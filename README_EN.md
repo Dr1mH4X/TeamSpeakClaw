@@ -34,10 +34,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 - **🧠 Natural Language Interaction**: No more memorizing complicated commands. Just say "play Jay Chou's song" or "kick that guy who just joined the channel".
 - **🛡️ Fine-grained Permission Control**: Built-in powerful permission system. Configure specific skill permissions for different TeamSpeak server groups/user groups.
 - **🔌 Flexible Skill System**:
-  - **Music Control**: Supports three external music bot backends.
-    - `ts3audiobot`: Control via private message with [TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin) or `tsmusicbot`: [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot).
-    - `tsbot_backend`: Control [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API.
-    - Supports song requests, skipping, searching, and more.
+  - **Music Control**: Supports three external music bot backends:[TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin),[TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) or [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot).
   - **Server Administration**: Support for kick, poke, move user, etc.
   - **Information Query**: Get online user list/info, server status, etc.
   - **etc.**
