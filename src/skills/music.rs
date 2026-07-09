@@ -2,7 +2,7 @@ pub mod ts3audiobot;
 pub mod tsbot_http;
 pub mod tsmusicbot;
 
-use crate::config::{AppConfig, MusicBackendConfig};
+use crate::config::MusicBackendConfig;
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -23,7 +23,10 @@ async fn dispatch_backend(
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
         "ts3audiobot" => ts3audiobot::execute(action, args, ctx).await,
         "tsmusicbot" => tsmusicbot::execute(action, args, ctx).await,
-        _ => unreachable!(),
+        _ => Err(anyhow::anyhow!(
+            "Unknown music backend '{}', expected one of: ts3audiobot, tsmusicbot, tsbot_backend",
+            cfg.backend
+        )),
     }
 }
 
@@ -32,10 +35,8 @@ pub struct MusicControl {
 }
 
 impl MusicControl {
-    pub fn new(config: &AppConfig) -> Self {
-        let backend = config
-            .music_backend
-            .as_ref()
+    pub fn new(cfg: Option<&MusicBackendConfig>) -> Self {
+        let backend = cfg
             .map(|c| c.backend.as_str())
             .unwrap_or("");
         Self {
@@ -84,7 +85,7 @@ impl Skill for MusicControl {
             .config
             .music_backend
             .as_ref()
-            .expect("MusicControl registered but music_backend is None");
+            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
         dispatch_backend(action, &args, cfg, Some(ctx)).await
     }
 
@@ -102,7 +103,7 @@ impl Skill for MusicControl {
             .config
             .music_backend
             .as_ref()
-            .expect("MusicControl registered but music_backend is None");
+            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
 
         match ctx.platform {
             crate::skills::Platform::TeamSpeak => {
