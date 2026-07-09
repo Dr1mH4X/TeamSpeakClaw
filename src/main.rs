@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     let config = Arc::new(cfg);
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
-    let registry = Arc::new(SkillRegistry::with_defaults(&config));
+    let registry = Arc::new(SkillRegistry::with_defaults(config.clone()));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
     let adapter = TsAdapter::connect(config.clone()).await?;
