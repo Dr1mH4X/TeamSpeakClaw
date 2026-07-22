@@ -10,17 +10,9 @@ use tracing::{debug, info};
 static TS3AUDIOBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) -> Result<Value> {
-    // Validate required parameters before building commands
     let needs_value = matches!(
         action,
-        "play"
-            | "ts_play"
-            | "ts_add"
-            | "ts_gedan"
-            | "ts_gedanid"
-            | "ts_playid"
-            | "ts_addid"
-            | "ts_mode"
+        "play" | "add" | "gedan" | "gedanid" | "playid" | "addid" | "mode"
     );
     if needs_value && args["value"].as_str().unwrap_or("").is_empty() {
         return Err(anyhow::anyhow!(
@@ -28,39 +20,20 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
             action
         ));
     }
-    if action == "search" && args["keywords"].as_str().unwrap_or("").is_empty() {
-        return Err(anyhow::anyhow!(
-            "Action 'search' requires 'keywords' parameter"
-        ));
-    }
 
     let value = args["value"].as_str().unwrap_or("");
 
     let bot_cmd = match action {
         "next" => "!yun next".to_string(),
-        "ts_login" => "!yun login".to_string(),
-        "play" | "ts_play" => format!("!yun play {value}"),
-        "ts_add" => format!("!yun add {value}"),
-        "ts_gedan" => format!("!yun gedan {value}"),
-        "ts_gedanid" => format!("!yun gedanid {value}"),
-        "ts_playid" => format!("!yun playid {value}"),
-        "ts_addid" => format!("!yun addid {value}"),
-        "ts_mode" => format!("!yun mode {value}"),
-        "search" => {
-            let kw = args["keywords"].as_str().unwrap_or(value);
-            format!("!yun play {kw}")
-        }
-        "repeat" => {
-            let mode = args["repeat_mode"].as_str().unwrap_or("all");
-            let mode_num = match mode {
-                "none" => "0",
-                "one" => "1",
-                _ => "2",
-            };
-            format!("!yun mode {mode_num}")
-        }
-        "pause" => "!yun pause".to_string(),
-        "skip" => "!yun next".to_string(),
+        "stop" => "!yun stop".to_string(),
+        "login" => "!yun login".to_string(),
+        "play" => format!("!yun play {value}"),
+        "add" => format!("!yun add {value}"),
+        "gedan" => format!("!yun gedan {value}"),
+        "gedanid" => format!("!yun gedanid {value}"),
+        "playid" => format!("!yun playid {value}"),
+        "addid" => format!("!yun addid {value}"),
+        "mode" => format!("!yun mode {value}"),
         other => {
             return Err(anyhow::anyhow!(
                 "Action '{}' is not supported by the ts3audiobot backend.",

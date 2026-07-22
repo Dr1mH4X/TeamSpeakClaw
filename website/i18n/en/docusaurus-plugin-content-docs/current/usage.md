@@ -51,40 +51,58 @@ The bot currently supports the following skills (depending on your permission co
 
 ### 🎵 Music Control (music_control)
 
-TeamSpeakClaw supports two music backends:
+TeamSpeakClaw supports three music backends:
 
 **Mode 1: ts3audiobot (Default)**
 
-Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages. Ensure the music bot's nickname is set to `TS3AudioBot`.
-
-**Mode 2: tsmusicbot**
-
-Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages, supporting play/pause/skip/queue/radio etc.
-
-**Mode 3: tsbot_backend**
-
-Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `backend = "tsbot_backend"` and `base_url` in `settings.toml`.
-
-Supported actions:
+Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages. Set `musicbot_name` in `settings.toml` (default `TS3AudioBot`).
 
 | Action | Description |
 |---|---|
-| `play` | Play a song (search by keyword) |
-| `pause` | Pause / resume playback |
-| `next` / `skip` | Skip song |
-| `previous` | Previous song |
+| `ts_play` / `play` | Play a song (search by name) |
+| `ts_add` | Add song to next |
+| `ts_gedan` / `ts_gedanid` | Playlist by name / ID |
+| `ts_playid` / `ts_addid` | Play / add by ID |
+| `next` | Next track |
+| `stop` | Stop / pause |
+| `ts_mode` | Playback mode (0=seq, 1=seq loop, 2=shuffle, 3=shuffle loop) |
+| `ts_login` | Login for VIP music (scan QR code) |
+
+**Mode 2: tsmusicbot**
+
+Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. Set `musicbot_name` in `settings.toml`.
+
+| Action | Description |
+|---|---|
+| `play` | Play a song |
+| `add` | Add to queue |
 | `search` | Search and play |
-| `repeat` | Repeat mode (none/one/all) |
-| `volume` | Adjust volume |
-| `fx` | Sound effect settings |
-| `ts_play` | TS3AudioBot exclusive play |
-| `ts_add` | TS3AudioBot exclusive add to queue |
-| `ts_gedan` / `ts_gedanid` | TS3AudioBot playlist operations |
-| `ts_playid` / `ts_addid` | TS3AudioBot operations by ID |
-| `ts_mode` | TS3AudioBot playback mode |
-| `ts_login` | TS3AudioBot login |
-| `queue_netease` | tsbot_backend: NetEase playlist enqueue |
-| `queue_qqmusic` | tsbot_backend: QQ Music playlist enqueue |
+| `playlist` | Load playlist |
+| `pause` / `resume` | Pause / resume |
+| `next` / `skip` | Next track |
+| `previous` / `prev` | Previous track |
+| `stop` | Stop |
+| `vol` / `volume` | Volume (0-100) |
+| `mode` | Playback mode (seq/loop/random/rloop) |
+| `queue` | View queue |
+| `now` | Current track info |
+| `fm` | Radio mode |
+
+**Mode 3: tsbot_backend**
+
+Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires `backend = "tsbot_backend"` and `base_url` in `settings.toml`.
+
+| Action | Description |
+|---|---|
+| `play` / `pause` / `next` / `previous` / `skip` | Playback control |
+| `seek` | Seek to time (seconds) |
+| `search` | Search songs |
+| `queue_netease` | Enqueue from NetEase Music |
+| `queue_qqmusic` | Enqueue from QQ Music |
+| `repeat` | Repeat mode (none/all/one) |
+| `shuffle` | Toggle shuffle |
+| `volume` | Volume percentage (0-200) |
+| `fx` | Sound effects (pan/width/swap/bass/reverb) |
 
 ### 🛡️ Administration
 
@@ -119,6 +137,6 @@ Supported actions:
     - Check the configuration in `acl.toml` to ensure your User Group ID is included in an allowed rule.
 
 - **Music features aren't working?**
--   ts3audiobot mode: Ensure TS3AudioBot is online and its nickname is exactly `TS3AudioBot`.
--   tsmusicbot mode: Ensure TSMusicBot is online and its nickname matches the `musicbot_name` config.
+-   ts3audiobot mode: Ensure TS3AudioBot is online and its nickname contains the `musicbot_name` value from `settings.toml` (default `TS3AudioBot`).
+-   tsmusicbot mode: Ensure TSMusicBot is online and its nickname contains the `musicbot_name` config value.
 -   tsbot_backend mode: Ensure the NeteaseTSBot backend service is running and the `base_url` is correct.
