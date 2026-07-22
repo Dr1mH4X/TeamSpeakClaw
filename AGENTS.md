@@ -16,19 +16,24 @@ Single binary `teamspeakclaw`, three inbound adapters:
 src/
 ├── main.rs                  # Entrypoint: wires up adapters, routers, shutdown
 ├── cli.rs                   # --log-level
-├── config/                  # settings.toml, acl.toml, prompts.toml
-├── router/                  # Event routing
-│   ├── ts_router.rs         # TeamSpeak client events (via tsclient-rs)
-│   ├── nc_router.rs         # NapCat/QQ (OneBot 11 WebSocket)
-│   ├── voice_router.rs      # Headless gRPC events (STT/TTS/chat)
-│   └── unified.rs           # Cross-platform event normalization
+├── config.rs                # settings.toml, acl.toml, prompts.toml
+├── config/                  # Sub-modules (acl, bot, headless, llm, ...)
+├── router.rs                # Event routing
+├── router/                  # Sub-modules (ts_router, nc_router, voice_router, unified)
+├── adapter.rs               # Re-exports TsAdapter, TsEvent (from headless)
 ├── adapter/
+│   ├── headless.rs          # gRPC voice bridge root
 │   ├── headless/            # gRPC voice bridge (actor, event, speech, voice_service)
-│   ├── napcat/              # OneBot 11 WebSocket (api, ws, event, types)
-│   └── mod.rs               # Re-exports TsAdapter, TsEvent (from headless)
-├── llm/                     # OpenAI-compatible LLM engine, context, tool loop
-├── permission/              # ACL-based permission gate
-└── skills/                  # Skill system (music/, moderation, information, communication)
+│   ├── napcat.rs            # OneBot 11 WebSocket root
+│   └── napcat/              # OneBot 11 WebSocket (api, ws, event, types)
+├── llm.rs                   # OpenAI-compatible LLM engine, context, tool loop
+├── llm/                     # Sub-modules (context, engine, provider, tool_loop)
+├── permission.rs            # ACL-based permission gate
+├── permission/              # Sub-modules (gate)
+└── skills.rs                # Skill system root
+└── skills/                  # Skill system (music, moderation, information, ...)
+    ├── music.rs             # Music skill root
+    └── music/               # Music backends (ts3audiobot, tsbot_http, tsmusicbot)
 ```
 
 ## Critical Code Paths

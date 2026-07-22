@@ -51,40 +51,58 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 ### 🎵 音乐控制 (music_control)
 
-TeamSpeakClaw 支持两种音乐后端：
+TeamSpeakClaw 支持三种音乐后端：
 
 **模式一：ts3audiobot（默认）**
 
-通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。需确保音乐机器人昵称为 `TS3AudioBot`。
+通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。需在 `settings.toml` 中配置 `musicbot_name`（默认 `TS3AudioBot`）。
+
+| 动作 | 说明 |
+|---|---|
+| `ts_play` / `play` | 播放歌曲（名称搜索） |
+| `ts_add` | 添加音乐到下一首 |
+| `ts_gedan` / `ts_gedanid` | 歌单操作（名称/ID） |
+| `ts_playid` / `ts_addid` | 按 ID 播放 / 添加 |
+| `next` | 下一首 |
+| `stop` | 停止/暂停 |
+| `ts_mode` | 播放模式（0=顺序, 1=顺序循环, 2=随机, 3=随机循环） |
+| `ts_login` | 登录（扫描二维码播放 VIP 音乐） |
 
 **模式二：tsmusicbot**
 
-通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)，支持播放/暂停/切歌/队列/电台等操作。
+通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)。需在 `settings.toml` 中配置 `musicbot_name`。
+
+| 动作 | 说明 |
+|---|---|
+| `play` | 播放歌曲 |
+| `add` | 添加到队列 |
+| `search` | 搜索并播放 |
+| `playlist` | 加载歌单 |
+| `pause` / `resume` | 暂停 / 继续 |
+| `next` / `skip` | 下一首 |
+| `previous` / `prev` | 上一首 |
+| `stop` | 停止 |
+| `vol` / `volume` | 音量（0-100） |
+| `mode` | 播放模式（seq/loop/random/rloop） |
+| `queue` | 查看队列 |
+| `now` | 当前播放信息 |
+| `fm` | 电台模式 |
 
 **模式三：tsbot_backend**
 
 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)。需在 `settings.toml` 中配置 `backend = "tsbot_backend"` 和 `base_url`。
 
-支持的操作：
-
 | 动作 | 说明 |
 |---|---|
-| `play` | 播放歌曲（搜索关键词） |
-| `pause` | 暂停 / 继续播放 |
-| `next` / `skip` | 切歌 |
-| `previous` | 上一首 |
-| `search` | 搜索并播放 |
-| `repeat` | 循环模式（none/one/all） |
-| `volume` | 调节音量 |
-| `fx` | 音效设置 |
-| `ts_play` | TS3AudioBot 专用播放 |
-| `ts_add` | TS3AudioBot 专用添加到队列 |
-| `ts_gedan` / `ts_gedanid` | TS3AudioBot 歌单操作 |
-| `ts_playid` / `ts_addid` | TS3AudioBot 按 ID 操作 |
-| `ts_mode` | TS3AudioBot 播放模式 |
-| `ts_login` | TS3AudioBot 登录 |
-| `queue_netease` | tsbot_backend: 网易云歌单入队 |
-| `queue_qqmusic` | tsbot_backend: QQ 音乐歌单入队 |
+| `play` / `pause` / `next` / `previous` / `skip` | 播放控制 |
+| `seek` | 跳转到指定时间（秒） |
+| `search` | 搜索歌曲 |
+| `queue_netease` | 网易云音乐入队 |
+| `queue_qqmusic` | QQ 音乐入队 |
+| `repeat` | 循环模式（none/all/one） |
+| `shuffle` | 随机播放开关 |
+| `volume` | 音量百分比（0-200） |
+| `fx` | 音效设置（pan/width/swap/bass/reverb） |
 
 ### 🛡️ 管理功能
 
@@ -119,6 +137,6 @@ TeamSpeakClaw 支持两种音乐后端：
     -   检查 `acl.toml` 中的配置，确认您的用户组 ID 是否在允许的规则中。
 
 - **音乐功能不工作？**
--   ts3audiobot 模式：确认 TS3AudioBot 是否在线且昵称是否为 `TS3AudioBot`。
--   tsmusicbot 模式：确认 TSMusicBot 是否在线且昵称匹配 `musicbot_name` 配置。
+-   ts3audiobot 模式：确认 TS3AudioBot 是否在线，且昵称包含 `settings.toml` 中 `musicbot_name` 配置的值（默认 `TS3AudioBot`）。
+-   tsmusicbot 模式：确认 TSMusicBot 是否在线，且昵称包含 `musicbot_name` 配置的值。
 -   tsbot_backend 模式：确认 NeteaseTSBot 后端服务是否运行，`base_url` 是否正确。
