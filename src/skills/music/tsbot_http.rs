@@ -101,18 +101,22 @@ pub(crate) async fn execute(action: &str, args: &Value, base_url: &str) -> Resul
             let title = args["title"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("Missing title"))?;
-            let artist = args["artist"].as_str().unwrap_or("");
-            let play_now = args["play_now"].as_bool().unwrap_or(false);
-            http.post(
-                "/queue/netease",
-                Some(json!({
-                    "song_id": song_id,
-                    "title": title,
-                    "artist": artist,
-                    "play_now": play_now
-                })),
-            )
-            .await
+            let mut body = json!({
+                "song_id": song_id,
+                "title": title,
+            });
+            for key in &["artist", "album", "cover_url", "level"] {
+                if let Some(v) = args[key].as_str() {
+                    body[key] = json!(v);
+                }
+            }
+            if let Some(v) = args["duration_ms"].as_u64() {
+                body["duration_ms"] = json!(v);
+            }
+            if let Some(v) = args["play_now"].as_bool() {
+                body["play_now"] = json!(v);
+            }
+            http.post("/queue/netease", Some(body)).await
         }
 
         "queue_qqmusic" => {
@@ -122,20 +126,22 @@ pub(crate) async fn execute(action: &str, args: &Value, base_url: &str) -> Resul
             let title = args["title"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("Missing title"))?;
-            let artist = args["artist"].as_str().unwrap_or("");
-            let play_now = args["play_now"].as_bool().unwrap_or(false);
-            let quality = args["quality"].as_str().unwrap_or("320");
-            http.post(
-                "/queue/qqmusic",
-                Some(json!({
-                    "song_mid": song_mid,
-                    "title": title,
-                    "artist": artist,
-                    "play_now": play_now,
-                    "quality": quality
-                })),
-            )
-            .await
+            let mut body = json!({
+                "song_mid": song_mid,
+                "title": title,
+            });
+            for key in &["artist", "album_mid", "quality"] {
+                if let Some(v) = args[key].as_str() {
+                    body[key] = json!(v);
+                }
+            }
+            if let Some(v) = args["duration_ms"].as_u64() {
+                body["duration_ms"] = json!(v);
+            }
+            if let Some(v) = args["play_now"].as_bool() {
+                body["play_now"] = json!(v);
+            }
+            http.post("/queue/qqmusic", Some(body)).await
         }
 
         "repeat" => {
@@ -164,15 +170,11 @@ pub(crate) async fn execute(action: &str, args: &Value, base_url: &str) -> Resul
 
         "fx" => {
             let mut body = json!({});
-            if let Some(v) = args["fx_pan"].as_f64() {
-                body["pan"] = json!(v);
-            }
-            if let Some(v) = args["fx_bass_db"].as_f64() {
-                body["bass_db"] = json!(v);
-            }
-            if let Some(v) = args["fx_reverb_mix"].as_f64() {
-                body["reverb_mix"] = json!(v);
-            }
+            if let Some(v) = args["fx_pan"].as_f64() { body["pan"] = json!(v); }
+            if let Some(v) = args["fx_width"].as_f64() { body["width"] = json!(v); }
+            if let Some(v) = args["fx_swap_lr"].as_bool() { body["swap_lr"] = json!(v); }
+            if let Some(v) = args["fx_bass_db"].as_f64() { body["bass_db"] = json!(v); }
+            if let Some(v) = args["fx_reverb_mix"].as_f64() { body["reverb_mix"] = json!(v); }
             http.put("/voice/fx", body).await
         }
 

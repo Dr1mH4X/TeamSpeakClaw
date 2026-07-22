@@ -125,10 +125,11 @@ fn ts3audiobot_schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "description": "The action to perform. All ts_* actions send commands to TS3AudioBot via chat.",
+                "description": "The action to perform. Sends commands to TS3AudioBot via chat.",
                 "enum": [
-                    "ts_play", "ts_add", "ts_gedan", "ts_gedanid",
-                    "ts_playid", "ts_addid", "ts_mode", "ts_login"
+                    "play", "add", "gedan", "gedanid",
+                    "playid", "addid", "mode", "login",
+                    "next", "stop"
                 ]
             },
             "value": {
@@ -176,7 +177,8 @@ fn tsbot_schema() -> Value {
                 "enum": [
                     "play", "pause", "next", "previous", "skip", "seek",
                     "search",
-                    "queue_netease", "queue_qqmusic"
+                    "queue_netease", "queue_qqmusic",
+                    "repeat", "shuffle", "volume", "fx"
                 ]
             },
             "keywords": {
@@ -195,6 +197,22 @@ fn tsbot_schema() -> Value {
                 "type": "string",
                 "description": "Artist name."
             },
+            "album": {
+                "type": "string",
+                "description": "Album name for 'queue_netease'."
+            },
+            "duration_ms": {
+                "type": "integer",
+                "description": "Song duration in milliseconds."
+            },
+            "cover_url": {
+                "type": "string",
+                "description": "Cover image URL for 'queue_netease'."
+            },
+            "level": {
+                "type": "string",
+                "description": "Audio quality level for NetEase: 'standard', 'lossless', 'hires'. Default auto."
+            },
             "play_now": {
                 "type": "boolean",
                 "description": "If true, play immediately instead of appending to queue."
@@ -207,6 +225,10 @@ fn tsbot_schema() -> Value {
                 "type": "string",
                 "description": "Audio quality for QQ Music: '128', '320', 'flac'. Default '320'."
             },
+            "album_mid": {
+                "type": "string",
+                "description": "QQ Music album mid for 'queue_qqmusic'."
+            },
             "seek_time": {
                 "type": "number",
                 "description": "Seek position in seconds for 'seek' action."
@@ -214,6 +236,38 @@ fn tsbot_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "description": "Search result limit for 'search' action."
+            },
+            "repeat_mode": {
+                "type": "string",
+                "description": "Repeat mode for 'repeat' action: 'none', 'all', 'one'."
+            },
+            "shuffle_enabled": {
+                "type": "boolean",
+                "description": "Enable/disable shuffle for 'shuffle' action."
+            },
+            "volume_percent": {
+                "type": "integer",
+                "description": "Volume percentage (0-200) for 'volume' action."
+            },
+            "fx_pan": {
+                "type": "number",
+                "description": "Pan value (-1 to 1) for 'fx' action."
+            },
+            "fx_width": {
+                "type": "number",
+                "description": "Stereo width for 'fx' action."
+            },
+            "fx_swap_lr": {
+                "type": "boolean",
+                "description": "Swap left/right channels for 'fx' action."
+            },
+            "fx_bass_db": {
+                "type": "number",
+                "description": "Bass gain in dB for 'fx' action."
+            },
+            "fx_reverb_mix": {
+                "type": "number",
+                "description": "Reverb mix for 'fx' action."
             }
         },
         "required": ["action"]
