@@ -53,7 +53,7 @@ The bot currently supports the following skills (depending on your permission co
 
 TeamSpeakClaw supports three music backends:
 
-**Mode 1: ts3audiobot (Default)**
+**Mode 1: ts3audiobot (Example configuration)**
 
 Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages. Set `musicbot_name` in `settings.toml` (default `TS3AudioBot`).
 
@@ -123,8 +123,8 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
 
 ### ℹ️ Information Query
 
-- **List Online Users** (get_client_list): "Who is online right now?"
 - **Client Info** (get_client_info): "Show detailed info for UserA"
+- **Web Search** (web_search): "Search for today's latest news"
 
 ## FAQ
 
