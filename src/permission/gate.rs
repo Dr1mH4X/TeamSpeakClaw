@@ -65,12 +65,76 @@ impl PermissionGate {
             return true;
         }
 
-        for rule in &self.config.rules {
-            if self.matches_rule(rule, caller_groups, caller_channel_group_id) {
-                return rule.can_target_admins;
-            }
-        }
+        self.config.rules.iter().any(|rule| {
+            rule.can_target_admins
+                && self.matches_rule(rule, caller_groups, caller_channel_group_id)
+        })
+    }
+}
 
-        false
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::acl::AclSettings;
+
+    fn rule(name: &str, server_group_ids: Vec<u32>, can_target_admins: bool) -> AclRule {
+        AclRule {
+            name: name.to_string(),
+            server_group_ids,
+            channel_group_ids: Vec::new(),
+            allowed_skills: Vec::new(),
+            can_target_admins,
+        }
+    }
+
+    #[test]
+    fn target_permission_combines_all_matching_rules() {
+        let gate = PermissionGate::new(AclConfig {
+            rules: vec![
+                rule("default", Vec::new(), false),
+                rule("admin", vec![6], true),
+            ],
+            acl: AclSettings {
+                protected_group_ids: vec![6],
+            },
+        });
+
+        assert!(gate.can_target(&[6], 0, &[6]));
+    }
+
+    #[test]
+    fn protected_target_is_denied_without_an_explicit_grant() {
+        let gate = PermissionGate::new(AclConfig {
+            rules: vec![rule("default", Vec::new(), false)],
+            acl: AclSettings {
+                protected_group_ids: vec![6],
+            },
+        });
+
+        assert!(!gate.can_target(&[8], 0, &[6]));
+    }
+
+    #[test]
+    fn nonzero_channel_group_controls_skills_and_protected_targets() {
+        let gate = PermissionGate::new(AclConfig {
+            rules: vec![AclRule {
+                name: "channel-admin".to_string(),
+                server_group_ids: Vec::new(),
+                channel_group_ids: vec![42],
+                allowed_skills: vec!["move_client".to_string()],
+                can_target_admins: true,
+            }],
+            acl: AclSettings {
+                protected_group_ids: vec![6],
+            },
+        });
+
+        assert_eq!(
+            gate.get_allowed_skills(&[], 42),
+            vec!["move_client".to_string()]
+        );
+        assert!(gate.get_allowed_skills(&[], 0).is_empty());
+        assert!(gate.can_target(&[], 42, &[6]));
+        assert!(!gate.can_target(&[], 0, &[6]));
     }
 }

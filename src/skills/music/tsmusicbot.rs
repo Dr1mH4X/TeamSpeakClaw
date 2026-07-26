@@ -1,6 +1,6 @@
 use crate::adapter::{TextMessageTarget, TsEvent};
 use crate::skills::ExecutionContext;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -68,25 +68,21 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
                 .contains(&target_name.to_ascii_lowercase())
         })
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
+    let audiobot_id =
+        u32::try_from(audiobot.id).context("Music bot returned an invalid client ID")?;
 
-    let mut ts_rx;
-    {
-        let _guard = TSMUSICBOT_LOCK.lock().await;
-        ts_rx = ctx.adapter.subscribe();
+    let _guard = TSMUSICBOT_LOCK.lock().await;
+    let mut ts_rx = ctx.adapter.subscribe();
 
-        ctx.adapter
-            .send_text_message(1, audiobot.id as u32, &bot_cmd)
-            .await?;
-    }
+    ctx.adapter
+        .send_text_message(1, audiobot_id, &bot_cmd)
+        .await?;
 
     let reply = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match ts_rx.recv().await {
                 Ok(TsEvent::TextMessage(msg))
-                    if msg
-                        .invoker_name
-                        .to_ascii_lowercase()
-                        .contains(&target_name.to_ascii_lowercase())
+                    if msg.invoker_id == audiobot_id
                         && msg.target_mode == TextMessageTarget::Channel =>
                 {
                     return msg.message;
@@ -100,6 +96,8 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
         }
     })
     .await;
+
+    drop(_guard);
 
     match reply {
         Ok(content) if !content.is_empty() => {

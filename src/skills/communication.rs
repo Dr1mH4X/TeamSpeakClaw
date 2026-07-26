@@ -1,8 +1,19 @@
-use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
+use crate::skills::{required_u32, ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
+
+fn required_message<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
+    let message = args
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: {}", name))?;
+    if message.trim().is_empty() {
+        return Err(anyhow::anyhow!("{} cannot be empty", name));
+    }
+    Ok(message)
+}
 
 pub struct PokeClient;
 
@@ -25,11 +36,8 @@ impl Skill for PokeClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-            as u32;
-        let msg = args["msg"].as_str().unwrap_or("Poke!");
+        let clid = required_u32(&args, "clid")?;
+        let msg = required_message(&args, "msg")?;
 
         ctx.adapter.poke(clid, msg).await?;
         Ok(json!({"status": "ok", "message": "Poke sent"}))
@@ -38,7 +46,7 @@ impl Skill for PokeClient {
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         info!("PokeClient: unified execution, platform={:?}", ctx.platform);
 
-        let msg = args["msg"].as_str().unwrap_or("Poke!");
+        let msg = required_message(&args, "msg")?;
 
         match ctx.platform {
             Platform::TeamSpeak => {
@@ -51,10 +59,7 @@ impl Skill for PokeClient {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
 
-                let clid = args["clid"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-                    as u32;
+                let clid = required_u32(&args, "clid")?;
 
                 ts_adapter.poke(clid, msg).await?;
 
@@ -120,19 +125,13 @@ impl Skill for SendMessage {
     }
 
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let msg = args["msg"].as_str().unwrap_or("");
-        if msg.is_empty() {
-            return Err(anyhow::anyhow!("Message content cannot be empty"));
-        }
+        let msg = required_message(&args, "msg")?;
 
         let mode = args["mode"].as_str().unwrap_or("");
 
         let (targetmode, target) = match mode {
             "private" => {
-                let clid = args["clid"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-                    as u32;
+                let clid = required_u32(&args, "clid")?;
 
                 (1, clid)
             }
@@ -161,10 +160,7 @@ impl Skill for SendMessage {
             ctx.platform
         );
 
-        let msg = args["msg"].as_str().unwrap_or("");
-        if msg.is_empty() {
-            return Err(anyhow::anyhow!("Message content cannot be empty"));
-        }
+        let msg = required_message(&args, "msg")?;
 
         let mode = args["mode"].as_str().unwrap_or("");
         let ts_route = args["ts_route"].as_bool().unwrap_or(false);
@@ -227,15 +223,8 @@ impl Skill for SendMessage {
                             anyhow::anyhow!("TeamSpeak adapter not available for ts_route=true")
                         })?;
                         // NC 请求 → TS 执行
-                        let target = args["clid"].as_u64().map(|v| v as u32);
-
                         let (targetmode, target_id) = match mode {
-                            "private" => {
-                                let clid = target.ok_or_else(|| {
-                                    anyhow::anyhow!("Missing required parameter: clid")
-                                })?;
-                                (1, clid)
-                            }
+                            "private" => (1, required_u32(&args, "clid")?),
                             "channel" => (2, 0),
                             "server" => (3, 0),
                             _ => {
