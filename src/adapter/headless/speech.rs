@@ -217,7 +217,7 @@ impl OpenAiSpeechProvider {
             "sending stt request"
         );
 
-        let api_key = fallback_str(&stt.api_key, &self.config.llm.api_key);
+        let api_key = resolve_speech_api_key(&stt.api_key, &stt.base_url, &self.config.llm.api_key);
 
         let mut form = Form::new();
         if !stt.model.is_empty() {
@@ -234,13 +234,11 @@ impl OpenAiSpeechProvider {
                 .context("set wav mime failed")?,
         );
 
-        let resp = self
-            .client
-            .post(url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .multipart(form)
-            .send()
-            .await?;
+        let mut request = self.client.post(url).multipart(form);
+        if !api_key.is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let resp = request.send().await?;
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(anyhow!("stt request failed: {err}"));
@@ -265,7 +263,7 @@ impl OpenAiSpeechProvider {
             return Err(anyhow!("tts disabled"));
         }
 
-        let api_key = fallback_str(&tts.api_key, &self.config.llm.api_key);
+        let api_key = resolve_speech_api_key(&tts.api_key, &tts.base_url, &self.config.llm.api_key);
 
         // MiMo TTS: uses /chat/completions with audio field
         if tts.provider == "mimo" {
@@ -287,13 +285,11 @@ impl OpenAiSpeechProvider {
             "response_format": "mp3",
         });
 
-        let resp = self
-            .client
-            .post(url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .json(&body)
-            .send()
-            .await?;
+        let mut request = self.client.post(url).json(&body);
+        if !api_key.is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let resp = request.send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
@@ -337,13 +333,11 @@ impl OpenAiSpeechProvider {
             }
         });
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&body)
-            .send()
-            .await?;
+        let mut request = self.client.post(&url).json(&body);
+        if !api_key.is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let resp = request.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -437,11 +431,17 @@ fn downsample_48k_stereo_to_16k_mono(stereo: &[i16]) -> Vec<i16> {
     mono_16k
 }
 
-fn fallback_str<'a>(value: &'a str, fallback: &'a str) -> &'a str {
-    if value.is_empty() {
-        fallback
+fn resolve_speech_api_key<'a>(
+    service_api_key: &'a str,
+    service_base_url: &str,
+    llm_api_key: &'a str,
+) -> &'a str {
+    if !service_api_key.is_empty() {
+        service_api_key
+    } else if service_base_url.is_empty() {
+        llm_api_key
     } else {
-        value
+        ""
     }
 }
 
@@ -627,4 +627,30 @@ pub fn is_speakable(text: &str) -> bool {
         .filter(|c| matches!(c, '+' | '/' | '='))
         .count();
     garbled_chars == 0 || total <= 8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_speech_api_key;
+
+    #[test]
+    fn explicit_speech_endpoint_does_not_inherit_llm_key() {
+        assert_eq!(
+            resolve_speech_api_key("", "https://speech.example/v1", "llm-secret"),
+            ""
+        );
+    }
+
+    #[test]
+    fn llm_endpoint_fallback_inherits_llm_key() {
+        assert_eq!(resolve_speech_api_key("", "", "llm-secret"), "llm-secret");
+    }
+
+    #[test]
+    fn explicit_speech_key_takes_precedence() {
+        assert_eq!(
+            resolve_speech_api_key("speech-secret", "https://speech.example/v1", "llm-secret"),
+            "speech-secret"
+        );
+    }
 }
