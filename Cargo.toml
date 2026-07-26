@@ -44,7 +44,7 @@ once_cell = "1"
 futures = "0.3"
 futures-util = "0.3"
 bytes = "1"
-rand = "0.9"
+rand = "0.10"
 dialoguer = "0.11"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 tsclient-rs = "0.1.1"
