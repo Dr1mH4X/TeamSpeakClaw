@@ -16,6 +16,20 @@ sidebar_position: 3
 
 **查看完整配置示例**：[settings.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/settings.toml)
 
+### LLM 配置
+
+`[llm]` 区段配置 OpenAI 兼容的 Chat Completions 接口：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `api_key` | string | `""` | API 密钥；本地免鉴权服务可留空 |
+| `base_url` | string | `https://api.openai.com/v1` | API 基础 URL，仅支持 HTTP 或 HTTPS |
+| `model` | string | `gpt-4o` | 模型名称 |
+| `omni_model` | bool | `false` | 是否直接使用多模态模型处理语音 |
+| `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
+| `max_context_sessions` | integer | `1000` | 最多保留的会话数；`0` 表示不限制 |
+| `max_concurrent_requests` | integer | `4` | 全局并发 LLM 请求上限，必须大于 `0` |
+
 ### NapCat 配置详解
 
 `[napcat]` 区段用于配置 QQ 机器人功能，通过 NapCat（OneBot 11 协议实现）连接 QQ。
@@ -52,7 +66,7 @@ sidebar_position: 3
 
 | 值 | 说明 |
 |---|---|---|
-| `ts3audiobot` | （默认）通过 TS 私信控制 TS3AudioBot，需确保音乐机器人昵称为 `TS3AudioBot` |
+| `ts3audiobot` | （配置示例）通过 TS 私信控制 TS3AudioBot，需确保音乐机器人昵称为 `TS3AudioBot` |
 | `tsmusicbot` | 通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) |
 | `tsbot_backend` | 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)，需设置 `base_url` |
 
@@ -84,9 +98,9 @@ sidebar_position: 3
 | `kick_client` | 踢出用户 |
 | `ban_client` | 封禁用户 |
 | `move_client` | 移动用户到指定频道 |
-| `get_client_list` | 获取在线用户列表 |
 | `get_client_info` | 获取用户详细信息 |
 | `music_control` | 音乐控制 |
+| `web_search` | 搜索最新网络信息 |
 
 ### NapCat 与跨平台行为说明
 

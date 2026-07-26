@@ -4,11 +4,15 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+
+pub(crate) const MAX_TOOL_CALLS_PER_TURN: usize = 8;
+pub(crate) const MAX_TOOL_ARGUMENT_BYTES_TOTAL: usize = 64 * 1024;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -33,6 +37,98 @@ pub enum LlmStreamEvent {
         finish_reason: String,
         tool_calls: Vec<ToolCall>,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionChunk {
+    #[serde(default)]
+    choices: Vec<ChunkChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkChoice {
+    #[serde(default)]
+    delta: ChunkDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChunkDelta {
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCallDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    function: Option<FunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Default)]
+struct ToolCallBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+fn merge_tool_call_delta(
+    builders: &mut BTreeMap<usize, ToolCallBuilder>,
+    tool_call: ToolCallDelta,
+) -> Result<()> {
+    let index = tool_call.index;
+    if !builders.contains_key(&index) && builders.len() >= MAX_TOOL_CALLS_PER_TURN {
+        anyhow::bail!("tool call count exceeds the per-turn limit of {MAX_TOOL_CALLS_PER_TURN}");
+    }
+
+    let incoming_argument_bytes = tool_call
+        .function
+        .as_ref()
+        .and_then(|function| function.arguments.as_ref())
+        .map_or(0, String::len);
+    let accumulated_argument_bytes = builders
+        .values()
+        .try_fold(0usize, |total, builder| {
+            total.checked_add(builder.arguments.len())
+        })
+        .ok_or_else(|| anyhow::anyhow!("tool argument byte count overflowed"))?;
+    let next_argument_bytes = accumulated_argument_bytes
+        .checked_add(incoming_argument_bytes)
+        .ok_or_else(|| anyhow::anyhow!("tool argument byte count overflowed"))?;
+    if next_argument_bytes > MAX_TOOL_ARGUMENT_BYTES_TOTAL {
+        anyhow::bail!(
+            "tool arguments exceed the total byte limit of {MAX_TOOL_ARGUMENT_BYTES_TOTAL}"
+        );
+    }
+
+    let entry = builders.entry(index).or_default();
+    if let Some(id) = tool_call.id.filter(|value| !value.is_empty()) {
+        if entry.id.replace(id.clone()).is_some_and(|old| old != id) {
+            anyhow::bail!("conflicting IDs for tool call index {index}");
+        }
+    }
+    if let Some(function) = tool_call.function {
+        if let Some(name) = function.name.filter(|value| !value.is_empty()) {
+            if entry
+                .name
+                .replace(name.clone())
+                .is_some_and(|old| old != name)
+            {
+                anyhow::bail!("conflicting names for tool call index {index}");
+            }
+        }
+        if let Some(arguments) = function.arguments {
+            entry.arguments.push_str(&arguments);
+        }
+    }
+    Ok(())
 }
 
 pub struct OpenAiProvider {
@@ -83,16 +179,14 @@ impl LlmProvider for OpenAiProvider {
             .await?;
 
         if !resp.status().is_success() {
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("LLM API error: {}", error_text).into());
+            return Err(anyhow::anyhow!("LLM API error: HTTP {}", resp.status()).into());
         }
 
         let mut byte_stream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(128);
         tokio::spawn(async move {
             let mut pending: Vec<u8> = Vec::new();
-            let mut tool_call_builders: BTreeMap<usize, (Option<String>, Option<String>, String)> =
-                BTreeMap::new();
+            let mut tool_call_builders: BTreeMap<usize, ToolCallBuilder> = BTreeMap::new();
 
             while let Some(item) = byte_stream.next().await {
                 let bytes = match item {
@@ -121,66 +215,58 @@ impl LlmProvider for OpenAiProvider {
                             return;
                         }
                     };
-                    if line.is_empty() || !line.starts_with("data: ") {
+                    let Some(payload) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let payload = payload.trim_start();
+                    if payload.is_empty() {
                         continue;
                     }
-                    let payload = line.trim_start_matches("data: ").trim();
                     if payload == "[DONE]" {
-                        let tool_calls = finalize_tool_calls(&mut tool_call_builders);
                         let _ = tx
-                            .send(Ok(LlmStreamEvent::Done {
-                                finish_reason: "stop".to_string(),
-                                tool_calls,
-                            }))
+                            .send(Err(anyhow::anyhow!(
+                                "LLM stream ended without a finish reason"
+                            )))
                             .await;
                         return;
                     }
-                    let event: Value = match serde_json::from_str(payload) {
+                    let event: ChatCompletionChunk = match serde_json::from_str(payload) {
                         Ok(v) => v,
                         Err(e) => {
                             let _ = tx.send(Err(e.into())).await;
                             return;
                         }
                     };
-                    if let Some(content) = event["choices"][0]["delta"]["content"].as_str() {
+                    let Some(choice) = event.choices.into_iter().next() else {
+                        continue;
+                    };
+                    if let Some(content) = choice.delta.content {
                         if !content.is_empty() {
-                            let _ = tx
-                                .send(Ok(LlmStreamEvent::Token(content.to_string())))
-                                .await;
-                        }
-                    }
-                    if let Some(tool_calls) = event["choices"][0]["delta"]["tool_calls"].as_array()
-                    {
-                        for tc in tool_calls {
-                            let index = tc["index"].as_i64().unwrap_or(0) as usize;
-                            let entry = tool_call_builders.entry(index).or_insert((
-                                None,
-                                None,
-                                String::new(),
-                            ));
-                            if let Some(id) = tc["id"].as_str() {
-                                if !id.is_empty() {
-                                    entry.0 = Some(id.to_string());
-                                }
-                            }
-                            if let Some(func) = tc.get("function").and_then(|v| v.as_object()) {
-                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                    if !name.is_empty() {
-                                        entry.1 = Some(name.to_string());
-                                    }
-                                }
-                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                                    entry.2.push_str(args);
-                                }
+                            if tx.send(Ok(LlmStreamEvent::Token(content))).await.is_err() {
+                                return;
                             }
                         }
                     }
-                    if let Some(finish_reason) = event["choices"][0]["finish_reason"].as_str() {
+                    for tool_call in choice.delta.tool_calls {
+                        if let Err(error) =
+                            merge_tool_call_delta(&mut tool_call_builders, tool_call)
+                        {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
+                    }
+                    if let Some(finish_reason) = choice.finish_reason {
                         if !finish_reason.is_empty() {
-                            let tool_calls = finalize_tool_calls(&mut tool_call_builders);
+                            let tool_calls = match finalize_tool_calls(&mut tool_call_builders) {
+                                Ok(tool_calls) => tool_calls,
+                                Err(error) => {
+                                    let _ = tx.send(Err(error)).await;
+                                    return;
+                                }
+                            };
                             let _ = tx
                                 .send(Ok(LlmStreamEvent::Done {
-                                    finish_reason: finish_reason.to_string(),
+                                    finish_reason,
                                     tool_calls,
                                 }))
                                 .await;
@@ -189,12 +275,10 @@ impl LlmProvider for OpenAiProvider {
                     }
                 }
             }
-            let tool_calls = finalize_tool_calls(&mut tool_call_builders);
             let _ = tx
-                .send(Ok(LlmStreamEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    tool_calls,
-                }))
+                .send(Err(anyhow::anyhow!(
+                    "LLM stream closed without a finish reason"
+                )))
                 .await;
         });
 
@@ -202,17 +286,173 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
-fn finalize_tool_calls(
-    builders: &mut BTreeMap<usize, (Option<String>, Option<String>, String)>,
-) -> Vec<ToolCall> {
+fn finalize_tool_calls(builders: &mut BTreeMap<usize, ToolCallBuilder>) -> Result<Vec<ToolCall>> {
     std::mem::take(builders)
         .into_iter()
-        .map(
-            |(_, (id, name, args)): (_, (Option<String>, Option<String>, String))| ToolCall {
-                id: id.unwrap_or_default(),
-                name: name.unwrap_or_default(),
-                arguments: serde_json::from_str(&args).unwrap_or(Value::Null),
+        .map(|(index, builder)| {
+            let id = builder
+                .id
+                .ok_or_else(|| anyhow::anyhow!("tool call index {index} is missing an ID"))?;
+            let name = builder
+                .name
+                .ok_or_else(|| anyhow::anyhow!("tool call index {index} is missing a name"))?;
+            let arguments = serde_json::from_str(&builder.arguments).map_err(|error| {
+                anyhow::anyhow!("tool call index {index} has invalid arguments: {error}")
+            })?;
+            Ok(ToolCall {
+                id,
+                name,
+                arguments,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_content_is_ignored() {
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "hidden",
+                    "content": "visible"
+                },
+                "finish_reason": null
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("visible"));
+    }
+
+    #[test]
+    fn finalizes_fragmented_tool_call() {
+        let chunks: Vec<ChatCompletionChunk> = serde_json::from_value(json!([
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": "{\"query\":\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            },
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "rust\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }
+        ]))
+        .unwrap();
+        let mut builders = BTreeMap::new();
+        for chunk in chunks {
+            for tool_call in chunk.choices.into_iter().next().unwrap().delta.tool_calls {
+                merge_tool_call_delta(&mut builders, tool_call).unwrap();
+            }
+        }
+
+        let calls = finalize_tool_calls(&mut builders).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-1");
+        assert_eq!(calls[0].name, "lookup");
+        assert_eq!(calls[0].arguments, json!({"query": "rust"}));
+    }
+
+    #[test]
+    fn rejects_invalid_tool_call_arguments() {
+        let mut builders = BTreeMap::from([(
+            0,
+            ToolCallBuilder {
+                id: Some("call-1".to_string()),
+                name: Some("lookup".to_string()),
+                arguments: "{".to_string(),
+            },
+        )]);
+
+        let error = finalize_tool_calls(&mut builders).unwrap_err();
+
+        assert!(error.to_string().contains("invalid arguments"));
+    }
+
+    #[test]
+    fn rejects_tool_call_without_identity() {
+        let mut builders = BTreeMap::from([(0, ToolCallBuilder::default())]);
+
+        let error = finalize_tool_calls(&mut builders).unwrap_err();
+
+        assert!(error.to_string().contains("missing an ID"));
+    }
+
+    #[test]
+    fn rejects_too_many_streamed_tool_calls() {
+        let mut builders = BTreeMap::new();
+        for index in 0..MAX_TOOL_CALLS_PER_TURN {
+            merge_tool_call_delta(
+                &mut builders,
+                ToolCallDelta {
+                    index,
+                    id: Some(format!("call-{index}")),
+                    function: Some(FunctionDelta {
+                        name: Some("lookup".to_string()),
+                        arguments: Some("{}".to_string()),
+                    }),
+                },
+            )
+            .unwrap();
+        }
+
+        let error = merge_tool_call_delta(
+            &mut builders,
+            ToolCallDelta {
+                index: MAX_TOOL_CALLS_PER_TURN,
+                id: Some("call-over-limit".to_string()),
+                function: Some(FunctionDelta {
+                    name: Some("lookup".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
             },
         )
-        .collect()
+        .unwrap_err();
+
+        assert!(error.to_string().contains("per-turn limit"));
+        assert_eq!(builders.len(), MAX_TOOL_CALLS_PER_TURN);
+    }
+
+    #[test]
+    fn rejects_oversized_streamed_tool_arguments() {
+        let mut builders = BTreeMap::new();
+        let error = merge_tool_call_delta(
+            &mut builders,
+            ToolCallDelta {
+                index: 0,
+                id: Some("call-1".to_string()),
+                function: Some(FunctionDelta {
+                    name: Some("lookup".to_string()),
+                    arguments: Some("x".repeat(MAX_TOOL_ARGUMENT_BYTES_TOTAL + 1)),
+                }),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("total byte limit"));
+        assert!(builders.is_empty());
+    }
 }
