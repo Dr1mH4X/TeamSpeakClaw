@@ -33,6 +33,17 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
+async fn wait_for_retry_or_closed(rx: &mut mpsc::Receiver<()>, delay: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => true,
+        message = rx.recv() => message.is_some(),
+    }
+}
+
+fn parse_ws_url(value: &str) -> Result<url::Url> {
+    url::Url::parse(value).map_err(|_| anyhow::anyhow!("Invalid NapCat WebSocket URL"))
+}
+
 pub struct NapCatAdapter {
     writer: Mutex<Option<WsSink>>,
     event_tx: broadcast::Sender<NcEvent>,
@@ -78,28 +89,33 @@ impl NapCatAdapter {
     }
 
     async fn reconnect_loop(weak: std::sync::Weak<NapCatAdapter>, mut rx: mpsc::Receiver<()>) {
-        const MAX_RETRIES: u32 = 10;
         while rx.recv().await.is_some() {
             let Some(adapter) = weak.upgrade() else { break };
             info!("NapCat reconnecting...");
             *adapter.writer.lock().await = None;
+            drop(adapter);
 
             let mut delay = Duration::from_secs(1);
-            for attempt in 0..MAX_RETRIES {
-                match Self::do_reconnect(&adapter).await {
+            let mut attempt = 1u32;
+            loop {
+                let Some(adapter) = weak.upgrade() else {
+                    return;
+                };
+                let result = Self::do_reconnect(&adapter).await;
+                drop(adapter);
+
+                match result {
                     Ok(()) => {
                         info!("NapCat reconnected");
                         break;
                     }
                     Err(e) => {
-                        warn!(
-                            "[{}/{}] NapCat reconnect failed: {}",
-                            attempt + 1,
-                            MAX_RETRIES,
-                            e
-                        );
-                        tokio::time::sleep(delay).await;
+                        warn!("[{attempt}] NapCat reconnect failed: {e}");
+                        if !wait_for_retry_or_closed(&mut rx, delay).await {
+                            return;
+                        }
                         delay = (delay * 2).min(Duration::from_secs(60));
+                        attempt = attempt.saturating_add(1);
                     }
                 }
             }
@@ -170,35 +186,30 @@ impl NapCatAdapter {
         broadcast::Sender<NcEvent>,
         Arc<DashMap<String, oneshot::Sender<NcApiResponse>>>,
     )> {
-        let url = &config.ws_url;
-        info!("Connecting to NapCat at {url}");
-
-        let mut req = url
-            .clone()
-            .into_client_request()
-            .map_err(|e| anyhow::anyhow!("Invalid WS URL '{}': {}", url, e))?;
+        let mut url = parse_ws_url(&config.ws_url)?;
+        info!("Connecting to NapCat WebSocket");
 
         if !config.access_token.is_empty() {
-            // Header 认证
+            url.query_pairs_mut()
+                .append_pair("access_token", &config.access_token);
+        }
+        let mut req = url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| anyhow::anyhow!("Failed to build NapCat WebSocket request"))?;
+
+        if !config.access_token.is_empty() {
             let bearer = format!("Bearer {}", config.access_token);
             req.headers_mut().insert(
                 AUTHORIZATION,
                 HeaderValue::from_str(&bearer)
                     .map_err(|e| anyhow::anyhow!("Invalid access_token: {e}"))?,
             );
-
-            // Query param 兼容 OneBot 11 标准
-            let uri = req.uri();
-            let sep = if uri.query().is_some() { "&" } else { "?" };
-            let new_uri = format!("{}{}access_token={}", uri, sep, &config.access_token);
-            *req.uri_mut() = new_uri
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Failed to build URI: {e}"))?;
         }
 
         let (ws_stream, _) = connect_async_tls_with_config(req, None, false, None)
             .await
-            .map_err(|e| anyhow::anyhow!("NapCat WS handshake failed: {e}"))?;
+            .map_err(|_| anyhow::anyhow!("NapCat WebSocket handshake failed"))?;
 
         let (tx, _) = broadcast::channel::<NcEvent>(256);
         let pending: Arc<DashMap<String, oneshot::Sender<NcApiResponse>>> =
@@ -338,5 +349,27 @@ impl NapCatAdapter {
 
     pub fn subscribe(&self) -> broadcast::Receiver<NcEvent> {
         self.event_tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_wait_stops_when_adapter_channel_closes() {
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+
+        assert!(!wait_for_retry_or_closed(&mut rx, Duration::from_secs(60)).await);
+    }
+
+    #[test]
+    fn invalid_ws_url_error_does_not_echo_credentials() {
+        let secret = "secret-token";
+        let error =
+            parse_ws_url(&format!("://user:{secret}@host/path?access_token={secret}")).unwrap_err();
+
+        assert!(!error.to_string().contains(secret));
     }
 }

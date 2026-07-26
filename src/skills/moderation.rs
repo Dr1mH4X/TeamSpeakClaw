@@ -1,5 +1,5 @@
-use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
-use anyhow::Result;
+use crate::skills::{required_u32, ExecutionContext, Skill, UnifiedExecutionContext};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
@@ -14,16 +14,19 @@ async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> 
 
     // 获取目标的组信息（实时查询）
     let clients = ctx.adapter.list_clients().await?;
-    let target_groups: Vec<u32> = clients
+    let target = clients
         .iter()
-        .find(|c| c.id as u32 == clid)
-        .map(|c| {
-            c.server_groups
-                .iter()
-                .filter_map(|g| g.parse().ok())
-                .collect()
+        .find(|c| u32::try_from(c.id).ok() == Some(clid))
+        .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+    let target_groups = target
+        .server_groups
+        .iter()
+        .map(|group| {
+            group
+                .parse::<u32>()
+                .with_context(|| format!("Invalid server group ID '{}'", group))
         })
-        .unwrap_or_default();
+        .collect::<Result<Vec<_>>>()?;
 
     // 检查是否可以对目标执行操作
     if !ctx.gate.can_target(
@@ -76,9 +79,7 @@ impl Skill for KickClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
+        let clid = required_u32(&args, "clid")?;
         let reason = args["reason"].as_str().unwrap_or("Kicked by bot");
 
         // 权限和自操作检查
@@ -117,9 +118,7 @@ impl Skill for BanClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing clid"))? as u32;
+        let clid = required_u32(&args, "clid")?;
         let time = args["time"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("Missing time"))?;
@@ -163,14 +162,8 @@ impl Skill for MoveClient {
     }
 
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-            as u32;
-        let channel_id = args["channel_id"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: channel_id"))?
-            as u32;
+        let clid = required_u32(&args, "clid")?;
+        let channel_id = required_u32(&args, "channel_id")?;
 
         validate_target(ctx, clid).await?;
 

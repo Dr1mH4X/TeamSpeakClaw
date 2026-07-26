@@ -3,16 +3,18 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::headless::speech::{
     detect_audio_format, is_speakable, pcm16_mono_to_wav_bytes, preprocess_stt_text,
-    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline,
+    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::INTERNAL_GRPC_ADDR;
@@ -23,8 +25,11 @@ use crate::permission::PermissionGate;
 use crate::skills::{ExecutionContext, SkillRegistry};
 use voicev1::voice_service_client::VoiceServiceClient;
 
+const AUDIO_MAX_IN_FLIGHT: usize = 8;
+
 struct CallerContext {
     caller_id: u32,
+    caller_uid: String,
     caller_name: String,
     groups: Vec<u32>,
     channel_group_id: u32,
@@ -33,15 +38,64 @@ struct CallerContext {
     reply_target_client_id: u32,
 }
 
+enum ManagedTaskExit {
+    Handler,
+    AudioHandler,
+}
+
+#[derive(Default)]
+struct SessionLocks {
+    locks: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl SessionLocks {
+    fn for_uid(&self, uid: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().expect("session lock map poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(uid).and_then(Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(uid.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+}
+
+async fn abort_managed_tasks(tasks: &mut JoinSet<ManagedTaskExit>) {
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                error!("Voice router task failed during shutdown: {error}");
+            }
+        }
+    }
+}
+
+async fn acquire_audio_slot(limit: Arc<Semaphore>) -> Result<OwnedSemaphorePermit> {
+    limit
+        .acquire_owned()
+        .await
+        .map_err(|error| anyhow::anyhow!("voice audio request limit closed: {error}"))
+}
+
+fn should_close_tts_turn(finish_reason: &str) -> bool {
+    finish_reason != "tool_calls"
+}
+
 struct SkillExecutor<'a> {
     router: &'a VoiceRouter,
     ctx: &'a CallerContext,
+    allowed_skills: &'a [String],
 }
 
 #[async_trait]
 impl ToolExecutor for SkillExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
-        self.router.execute_skill(call, self.ctx).await
+        self.router
+            .execute_skill(call, self.ctx, self.allowed_skills)
+            .await
     }
 }
 
@@ -53,11 +107,11 @@ pub struct VoiceRouter {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
+    session_locks: SessionLocks,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
 }
 
 impl VoiceRouter {
-    const OBS_TEXT_MAX_LEN: usize = 240;
     const STREAM_TTS_MIN_CHARS: usize = 4;
     const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
     const STREAM_TTS_MAX_CHARS: usize = 28;
@@ -77,6 +131,7 @@ impl VoiceRouter {
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
+            session_locks: SessionLocks::default(),
             config,
             prompts,
             gate,
@@ -102,88 +157,141 @@ impl VoiceRouter {
             include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
         let mut stream = client.subscribe_events(req).await?.into_inner();
+        let router = Arc::new(self);
+        let audio_limit = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
+        let mut tasks = JoinSet::new();
 
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(ev) => {
+        let result = loop {
+            tokio::select! {
+                item = stream.next() => {
+                    let Some(item) = item else {
+                        break Err(anyhow::anyhow!("voice event stream ended"));
+                    };
+                    let ev = match item {
+                        Ok(ev) => ev,
+                        Err(error) => {
+                            break Err(anyhow::anyhow!("voice event stream error: {error}"));
+                        }
+                    };
                     let Some(payload) = ev.payload else {
                         continue;
                     };
                     match payload {
                         voicev1::event::Payload::Chat(chat) => {
-                            if let Err(e) = self.handle_chat_event(&mut client, chat).await {
-                                error!("Voice router chat handling failed: {e}");
-                            }
+                            let router = router.clone();
+                            let mut client = client.clone();
+                            tasks.spawn(async move {
+                                if let Err(error) = router.handle_chat_event(&mut client, chat).await {
+                                    error!("Voice router chat handling failed: {error}");
+                                }
+                                ManagedTaskExit::Handler
+                            });
                         }
                         voicev1::event::Payload::Audio(audio) => {
-                            if let Err(e) = self.handle_audio_event(&mut client, audio).await {
-                                error!("Voice router audio handling failed: {e}");
+                            match router.process_audio_frame(&audio).await {
+                                Ok(Some(chunk)) => {
+                                    let permit = match acquire_audio_slot(audio_limit.clone()).await {
+                                        Ok(permit) => permit,
+                                        Err(error) => {
+                                            break Err(error);
+                                        }
+                                    };
+                                    let router = router.clone();
+                                    let mut client = client.clone();
+                                    tasks.spawn(async move {
+                                        let _permit = permit;
+                                        if let Err(error) = router
+                                            .handle_audio_chunk(&mut client, audio, chunk)
+                                            .await
+                                        {
+                                            error!("Voice router audio handling failed: {error}");
+                                        }
+                                        ManagedTaskExit::AudioHandler
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    error!("Voice router audio decoding failed: {error}");
+                                }
                             }
                         }
                         _ => {}
                     }
                 }
-                Err(e) => {
-                    warn!("voice event stream error: {e}");
-                    break;
+                task = tasks.join_next(), if !tasks.is_empty() => {
+                    match task {
+                        Some(Ok(ManagedTaskExit::Handler))
+                        | Some(Ok(ManagedTaskExit::AudioHandler)) => {}
+                        Some(Err(error)) => {
+                            break Err(anyhow::anyhow!("voice router task failed: {error}"));
+                        }
+                        None => {
+                            break Err(anyhow::anyhow!("voice router task set closed"));
+                        }
+                    }
                 }
             }
-        }
-        Ok(())
+        };
+
+        abort_managed_tasks(&mut tasks).await;
+        result
     }
 
-    fn truncate_for_log(&self, text: &str) -> String {
-        let max_len = Self::OBS_TEXT_MAX_LEN.max(16);
-        if text.len() <= max_len {
-            return text.to_string();
-        }
-        let mut s = text.chars().take(max_len).collect::<String>();
-        s.push_str("...");
-        s
-    }
-
-    async fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> CallerContext {
-        match self.ts_adapter.list_clients().await {
-            Ok(clients) => {
-                if let Some(c) = clients.iter().find(|c| c.nickname == chat.invoker_name) {
-                    let groups: Vec<u32> = c
-                        .server_groups
-                        .iter()
-                        .filter_map(|g| g.parse().ok())
-                        .collect();
-                    debug!(
-                        "Resolved chat caller '{}' from online list: clid={}",
-                        chat.invoker_name, c.id
-                    );
-                    return CallerContext {
-                        caller_id: c.id as u32,
-                        caller_name: chat.invoker_name.clone(),
-                        groups,
-                        channel_group_id: 0,
-                        channel_id: c.channel_id,
-                        reply_target_mode: chat.reply_target_mode,
-                        reply_target_client_id: chat.reply_target_client_id,
-                    };
-                }
-                debug!(
-                    "Chat caller '{}' not found in online list, using fallback",
-                    chat.invoker_name
-                );
-            }
-            Err(e) => warn!("Failed to list clients for chat caller resolution: {e}"),
-        }
-        CallerContext {
-            caller_id: 0,
+    async fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> Result<CallerContext> {
+        let caller_uid = if chat.invoker_unique_id.is_empty() {
+            format!("clid:{}", chat.invoker_client_id)
+        } else {
+            chat.invoker_unique_id.clone()
+        };
+        let clients = self
+            .ts_adapter
+            .list_clients()
+            .await
+            .map_err(|error| anyhow::anyhow!("list chat caller failed: {error}"))?;
+        let caller = clients
+            .iter()
+            .find(|client| u32::try_from(client.id).ok() == Some(chat.invoker_client_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "chat caller {} not found in online clients",
+                    chat.invoker_client_id
+                )
+            })?;
+        let channel_group_id = self
+            .ts_adapter
+            .get_client_channel_group_id(chat.invoker_client_id)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "resolve chat caller {} channel group failed: {error}",
+                    chat.invoker_client_id
+                )
+            })?;
+        let groups: Vec<u32> = caller
+            .server_groups
+            .iter()
+            .filter_map(|group| group.parse().ok())
+            .collect();
+        debug!(
+            "Resolved chat caller '{}' from online list: clid={}",
+            chat.invoker_name, caller.id
+        );
+        Ok(CallerContext {
+            caller_id: chat.invoker_client_id,
+            caller_uid,
             caller_name: chat.invoker_name.clone(),
-            groups: vec![],
-            channel_group_id: 0,
-            channel_id: 0,
+            groups,
+            channel_group_id,
+            channel_id: caller.channel_id,
             reply_target_mode: chat.reply_target_mode,
             reply_target_client_id: chat.reply_target_client_id,
-        }
+        })
     }
 
-    async fn resolve_caller_from_audio(&self, audio: &voicev1::AudioFrameEvent) -> CallerContext {
+    async fn resolve_caller_from_audio(
+        &self,
+        audio: &voicev1::AudioFrameEvent,
+    ) -> Result<CallerContext> {
         let reply_target_mode = match self.config.bot.default_reply_mode.as_str() {
             "channel" => 2,
             "server" => 3,
@@ -194,55 +302,96 @@ impl VoiceRouter {
         } else {
             0
         };
-        match self.ts_adapter.list_clients().await {
-            Ok(clients) => {
-                if let Some(c) = clients.iter().find(|c| c.id as u32 == audio.from_client_id) {
-                    let groups: Vec<u32> = c
-                        .server_groups
-                        .iter()
-                        .filter_map(|g| g.parse().ok())
-                        .collect();
-                    debug!(
-                        "Resolved audio caller '{}' from online list: clid={}",
-                        audio.from_client_name, c.id
-                    );
-                    return CallerContext {
-                        caller_id: c.id as u32,
-                        caller_name: c.nickname.clone(),
-                        groups,
-                        channel_group_id: 0,
-                        channel_id: c.channel_id,
-                        reply_target_mode,
-                        reply_target_client_id,
-                    };
-                }
-                debug!(
-                    "Audio caller '{}' not found in online list, using fallback",
-                    audio.from_client_name
-                );
-            }
-            Err(e) => warn!("Failed to list clients for audio caller resolution: {e}"),
-        }
-        CallerContext {
+        let clients = self
+            .ts_adapter
+            .list_clients()
+            .await
+            .map_err(|error| anyhow::anyhow!("list audio caller failed: {error}"))?;
+        let caller = clients
+            .iter()
+            .find(|client| u32::try_from(client.id).ok() == Some(audio.from_client_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "audio caller {} not found in online clients",
+                    audio.from_client_id
+                )
+            })?;
+        let channel_group_id = self
+            .ts_adapter
+            .get_client_channel_group_id(audio.from_client_id)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "resolve audio caller {} channel group failed: {error}",
+                    audio.from_client_id
+                )
+            })?;
+        let groups: Vec<u32> = caller
+            .server_groups
+            .iter()
+            .filter_map(|group| group.parse().ok())
+            .collect();
+        debug!(
+            "Resolved audio caller '{}' from online list: clid={}",
+            audio.from_client_name, caller.id
+        );
+        Ok(CallerContext {
             caller_id: audio.from_client_id,
-            caller_name: audio.from_client_name.clone(),
-            groups: vec![],
-            channel_group_id: 0,
-            channel_id: 0,
+            caller_uid: caller.uid.clone(),
+            caller_name: caller.nickname.clone(),
+            groups,
+            channel_group_id,
+            channel_id: caller.channel_id,
             reply_target_mode,
             reply_target_client_id,
-        }
+        })
     }
 
     fn should_ignore_chat(&self, chat: &voicev1::ChatEvent, caller_id: u32) -> bool {
-        if chat.invoker_name == self.config.bot.nickname {
+        if chat.invoker_name == self.config.bot.nickname
+            || self.is_music_bot_name(&chat.invoker_name)
+        {
             return true;
         }
         let bot_clid = self.ts_adapter.get_bot_clid();
         bot_clid != 0 && caller_id == bot_clid
     }
 
-    async fn execute_skill(&self, call: &ToolCall, ctx: &CallerContext) -> String {
+    fn is_music_bot_name(&self, name: &str) -> bool {
+        self.config.music_backend.as_ref().is_some_and(|config| {
+            !config.musicbot_name.is_empty()
+                && name
+                    .to_ascii_lowercase()
+                    .contains(&config.musicbot_name.to_ascii_lowercase())
+        })
+    }
+
+    async fn resolve_audio_chunk_caller(
+        &self,
+        audio: &voicev1::AudioFrameEvent,
+        speaker_client_id: u32,
+        speaker_name: &str,
+    ) -> Result<CallerContext> {
+        let mut ctx = self.resolve_caller_from_audio(audio).await?;
+        if ctx.caller_id != speaker_client_id {
+            anyhow::bail!(
+                "audio caller changed from {} to {} while resolving ACL",
+                ctx.caller_id,
+                speaker_client_id
+            );
+        }
+        if !speaker_name.is_empty() {
+            ctx.caller_name = speaker_name.to_string();
+        }
+        Ok(ctx)
+    }
+
+    async fn execute_skill(
+        &self,
+        call: &ToolCall,
+        ctx: &CallerContext,
+        allowed_skills: &[String],
+    ) -> String {
         let exec_ctx = ExecutionContext {
             adapter: self.ts_adapter.clone(),
             caller_id: ctx.caller_id,
@@ -252,7 +401,9 @@ impl VoiceRouter {
             gate: self.gate.clone(),
             config: self.config.clone(),
         };
-        self.registry.execute_skill(call, exec_ctx, None).await
+        self.registry
+            .execute_skill(call, exec_ctx, allowed_skills, None)
+            .await
     }
 
     async fn handle_chat_event(
@@ -260,53 +411,55 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
-        let ctx = self.resolve_caller_from_chat(&chat).await;
+        let ctx = self.resolve_caller_from_chat(&chat).await?;
         if self.should_ignore_chat(&chat, ctx.caller_id) || !chat.should_trigger_llm {
             return Ok(());
         }
         let Some(clean_text) = preprocess_text_message(&chat.message) else {
             return Ok(());
         };
+        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
+        let _session_guard = session_lock.lock().await;
         self.handle_user_input(client, ctx, clean_text).await
     }
 
-    async fn handle_audio_event(
+    async fn process_audio_frame(
+        &self,
+        audio: &voicev1::AudioFrameEvent,
+    ) -> Result<Option<SpeechChunk>> {
+        let bot_clid = self.ts_adapter.get_bot_clid();
+        if bot_clid != 0 && audio.from_client_id == bot_clid {
+            return Ok(None);
+        }
+        if self.is_music_bot_name(&audio.from_client_name) {
+            return Ok(None);
+        }
+
+        let mut guard = self.audio_pipeline.lock().await;
+        let Some(pipeline) = guard.as_mut() else {
+            return Ok(None);
+        };
+        pipeline.process_audio_frame(audio)
+    }
+
+    async fn handle_audio_chunk(
         &self,
         client: &mut VoiceServiceClient<Channel>,
         audio: voicev1::AudioFrameEvent,
+        chunk: SpeechChunk,
     ) -> Result<()> {
-        let bot_clid = self.ts_adapter.get_bot_clid();
-        if bot_clid != 0 && audio.from_client_id == bot_clid {
+        let ctx = self
+            .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
+            .await?;
+        if self.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
         }
-        let musicbot_name = self
-            .config
-            .music_backend
-            .as_ref()
-            .map_or("", |c| c.musicbot_name.as_str());
-        if !musicbot_name.is_empty()
-            && audio
-                .from_client_name
-                .to_ascii_lowercase()
-                .contains(&musicbot_name.to_ascii_lowercase())
-        {
-            return Ok(());
-        }
+        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
+        let _session_guard = session_lock.lock().await;
 
         if self.config.llm.omni_model {
-            return self.handle_omni_audio_event(client, audio).await;
+            return self.handle_omni_audio_chunk(client, ctx, chunk).await;
         }
-
-        let chunk = {
-            let mut guard = self.audio_pipeline.lock().await;
-            let Some(pipeline) = guard.as_mut() else {
-                return Ok(());
-            };
-            pipeline.process_audio_frame(&audio)?
-        };
-        let Some(chunk) = chunk else {
-            return Ok(());
-        };
 
         let Some(speech_provider) = self.speech_provider.as_ref() else {
             return Ok(());
@@ -323,40 +476,25 @@ impl VoiceRouter {
             return Ok(());
         };
 
-        let mut ctx = self.resolve_caller_from_audio(&audio).await;
-        ctx.caller_name = chunk.speaker_name;
-        ctx.caller_id = chunk.speaker_client_id;
         self.handle_user_input(client, ctx, text).await
     }
 
-    async fn handle_omni_audio_event(
+    async fn handle_omni_audio_chunk(
         &self,
         client: &mut VoiceServiceClient<Channel>,
-        audio: voicev1::AudioFrameEvent,
+        ctx: CallerContext,
+        chunk: SpeechChunk,
     ) -> Result<()> {
-        let chunk = {
-            let mut guard = self.audio_pipeline.lock().await;
-            let Some(pipeline) = guard.as_mut() else {
-                return Ok(());
-            };
-            pipeline.process_audio_frame(&audio)?
-        };
-        let Some(chunk) = chunk else {
-            return Ok(());
-        };
-
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
         let audio_base64 = BASE64.encode(&wav_bytes);
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
-        let mut ctx = self.resolve_caller_from_audio(&audio).await;
-        ctx.caller_name = chunk.speaker_name;
-        ctx.caller_id = chunk.speaker_client_id;
 
-        let (mut messages, tools, session_source) =
+        let (mut messages, tools, allowed_skills, session_source) =
             self.build_omni_llm_request(&ctx, audio_data).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
+            allowed_skills: &allowed_skills,
         };
         let callbacks = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
@@ -371,7 +509,12 @@ impl VoiceRouter {
         {
             Ok(result) => {
                 if !result.content.is_empty() {
-                    info!("[TS&TTS] LLM final reply: {}", &result.content);
+                    info!(
+                        event = "voice.llm.reply",
+                        caller_uid = %ctx.caller_uid,
+                        reply_chars = result.content.chars().count(),
+                        "Voice LLM reply generated"
+                    );
                     self.send_reply(client, &ctx, &result.content).await?;
                     self.llm
                         .save_turn(&session_source, "[Audio message]".into(), result.content);
@@ -401,13 +544,19 @@ impl VoiceRouter {
         ctx: CallerContext,
         user_msg: String,
     ) -> Result<()> {
-        info!(event = "voice.chat.user_message", invoker = %ctx.caller_name, clid = ctx.caller_id, message = %self.truncate_for_log(&user_msg));
+        info!(
+            event = "voice.user_message",
+            caller_uid = %ctx.caller_uid,
+            message_chars = user_msg.chars().count(),
+            "Voice user message received"
+        );
 
-        let (mut messages, tools, session_source) =
+        let (mut messages, tools, allowed_skills, session_source) =
             self.build_llm_request(&ctx, user_msg.clone()).await;
         let executor = SkillExecutor {
             router: self,
             ctx: &ctx,
+            allowed_skills: &allowed_skills,
         };
 
         let callbacks = if self.is_tts_effectively_enabled() {
@@ -439,7 +588,12 @@ impl VoiceRouter {
         };
 
         if !result.content.is_empty() {
-            info!("[TS&TTS] LLM final reply: {}", &result.content);
+            info!(
+                event = "voice.llm.reply",
+                caller_uid = %ctx.caller_uid,
+                reply_chars = result.content.chars().count(),
+                "Voice LLM reply generated"
+            );
             self.send_reply(client, &ctx, &result.content).await?;
             self.llm
                 .save_turn(&session_source, user_msg, result.content);
@@ -534,7 +688,7 @@ impl VoiceRouter {
         let on_turn_end_shared = shared_tx.clone();
         let on_turn_end_chunker = chunker.clone();
         let on_turn_end = move |finish_reason: &str| {
-            if finish_reason == "stop" {
+            if should_close_tts_turn(finish_reason) {
                 let Ok(mut chunker_guard) = on_turn_end_chunker.lock() else {
                     return;
                 };
@@ -560,7 +714,7 @@ impl VoiceRouter {
     async fn build_llm_base_context(
         &self,
         ctx: &CallerContext,
-    ) -> (String, String, Vec<serde_json::Value>) {
+    ) -> (String, String, Vec<serde_json::Value>, Vec<String>) {
         let system_prompt = self.prompts.system.content.clone();
 
         let online_clients = match self.ts_adapter.list_clients().await {
@@ -587,7 +741,7 @@ Online: {}"#,
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
         let tools = self.registry.to_tool_schemas(&allowed_skills);
-        (system_prompt, user_ctx, tools)
+        (system_prompt, user_ctx, tools, allowed_skills)
     }
 
     async fn build_llm_request(
@@ -597,16 +751,18 @@ Online: {}"#,
     ) -> (
         Vec<serde_json::Value>,
         Vec<serde_json::Value>,
+        Vec<String>,
         SessionSource,
     ) {
-        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx).await;
+        let (system_prompt, user_ctx, tools, allowed_skills) =
+            self.build_llm_base_context(ctx).await;
         let source = SessionSource::Headless {
-            caller_id: ctx.caller_id,
+            uid: ctx.caller_uid.clone(),
         };
         let messages = self
             .llm
             .build_messages(&source, &system_prompt, &user_ctx, &user_msg);
-        (messages, tools, source)
+        (messages, tools, allowed_skills, source)
     }
 
     async fn build_omni_llm_request(
@@ -616,17 +772,19 @@ Online: {}"#,
     ) -> (
         Vec<serde_json::Value>,
         Vec<serde_json::Value>,
+        Vec<String>,
         SessionSource,
     ) {
-        let (system_prompt, user_ctx, tools) = self.build_llm_base_context(ctx).await;
+        let (system_prompt, user_ctx, tools, allowed_skills) =
+            self.build_llm_base_context(ctx).await;
         let source = SessionSource::Headless {
-            caller_id: ctx.caller_id,
+            uid: ctx.caller_uid.clone(),
         };
         let content = vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
         let messages = self
             .llm
             .build_omni_messages(&source, &system_prompt, &user_ctx, content);
-        (messages, tools, source)
+        (messages, tools, allowed_skills, source)
     }
 
     async fn send_reply(
@@ -640,7 +798,13 @@ Online: {}"#,
             target_mode: ctx.reply_target_mode,
             target_client_id: ctx.reply_target_client_id,
         };
-        let _ = client.send_notice(tonic::Request::new(req)).await?;
+        let response = client
+            .send_notice(tonic::Request::new(req))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("voice notice rejected: {}", response.message);
+        }
         Ok(())
     }
 }
@@ -698,5 +862,80 @@ impl StreamingSentenceChunker {
         let out = text.to_string();
         self.buffer.clear();
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_locks_serialize_only_the_same_uid() {
+        let locks = SessionLocks::default();
+        let first = locks.for_uid("uid-1");
+        let first_guard = first.lock().await;
+        let same = locks.for_uid("uid-1");
+        let other = locks.for_uid("uid-2");
+
+        assert!(same.try_lock().is_err());
+        assert!(other.try_lock().is_ok());
+
+        drop(first_guard);
+        assert!(same.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn managed_tasks_are_cancelled_on_router_exit() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = DropMarker(dropped.clone());
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let _marker = marker;
+            std::future::pending::<ManagedTaskExit>().await
+        });
+        tokio::task::yield_now().await;
+
+        abort_managed_tasks(&mut tasks).await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audio_limit_waits_instead_of_dropping_work() {
+        let limit = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
+        let mut permits = Vec::new();
+        for _ in 0..AUDIO_MAX_IN_FLIGHT {
+            permits.push(acquire_audio_slot(limit.clone()).await.unwrap());
+        }
+
+        let waiter = tokio::spawn(acquire_audio_slot(limit.clone()));
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(permits.pop());
+        let permit = waiter.await.unwrap().unwrap();
+        assert_eq!(limit.available_permits(), 0);
+
+        drop(permit);
+        drop(permits);
+        assert_eq!(limit.available_permits(), AUDIO_MAX_IN_FLIGHT);
+    }
+
+    #[test]
+    fn tts_closes_for_every_non_tool_call_finish_reason() {
+        assert!(!should_close_tts_turn("tool_calls"));
+        for finish_reason in ["stop", "length", "content_filter", "function_call", ""] {
+            assert!(should_close_tts_turn(finish_reason));
+        }
     }
 }

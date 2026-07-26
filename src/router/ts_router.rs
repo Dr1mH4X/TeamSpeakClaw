@@ -17,13 +17,20 @@ struct SqExecutor<'a> {
     event: &'a TextMessageEvent,
     groups: &'a [u32],
     channel_group_id: u32,
+    allowed_skills: &'a [String],
 }
 
 #[async_trait]
 impl ToolExecutor for SqExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
         self.router
-            .execute_skill(call, self.event, self.groups, self.channel_group_id)
+            .execute_skill(
+                call,
+                self.event,
+                self.groups,
+                self.channel_group_id,
+                self.allowed_skills,
+            )
             .await
     }
 }
@@ -63,13 +70,22 @@ impl EventRouter {
     pub async fn run(&self) -> Result<()> {
         let mut rx = self.adapter.subscribe();
 
-        while let Ok(TsEvent::TextMessage(msg)) = rx.recv().await {
-            let this = self.clone();
-            tokio::spawn(async move {
-                this.handle_message(msg).await;
-            });
+        loop {
+            match rx.recv().await {
+                Ok(TsEvent::TextMessage(msg)) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_message(msg).await;
+                    });
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "TS event router lagged; skipped buffered events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("TS event stream closed"));
+                }
+            }
         }
-        Ok(())
     }
 
     async fn execute_skill(
@@ -78,6 +94,7 @@ impl EventRouter {
         event: &TextMessageEvent,
         groups: &[u32],
         channel_group_id: u32,
+        allowed_skills: &[String],
     ) -> String {
         let ctx = ExecutionContext {
             adapter: self.adapter.clone(),
@@ -89,7 +106,7 @@ impl EventRouter {
             config: self.config.clone(),
         };
         self.registry
-            .execute_skill(call, ctx, self.nc_adapter.clone())
+            .execute_skill(call, ctx, allowed_skills, self.nc_adapter.clone())
             .await
     }
 
@@ -112,7 +129,10 @@ impl EventRouter {
         }
 
         // 开启了语音桥接时，纯文本由 voice_router 处理
-        if self.config.headless.stt.enabled || self.config.headless.tts.enabled {
+        if self.config.headless.stt.enabled
+            || self.config.headless.tts.enabled
+            || self.config.llm.omni_model
+        {
             return;
         }
 
@@ -133,8 +153,10 @@ impl EventRouter {
 
         let msg_content = unified_event.text.as_str();
         info!(
-            "Message received: {} (clid: {}, content: {})",
-            event.invoker_name, event.invoker_id, msg_content
+            invoker = %event.invoker_name,
+            clid = event.invoker_id,
+            message_chars = msg_content.chars().count(),
+            "Message received"
         );
 
         let groups: Vec<u32> = event
@@ -142,10 +164,24 @@ impl EventRouter {
             .iter()
             .filter_map(|g| g.parse().ok())
             .collect();
-        let channel_group_id = 0;
+        let channel_group_id = match self
+            .adapter
+            .get_client_channel_group_id(event.invoker_id)
+            .await
+        {
+            Ok(channel_group_id) => channel_group_id,
+            Err(error) => {
+                error!(
+                    clid = event.invoker_id,
+                    error = %error,
+                    "Failed to resolve caller channel group"
+                );
+                return;
+            }
+        };
 
         let source = SessionSource::TeamSpeak {
-            clid: event.invoker_id,
+            uid: event.invoker_uid.clone(),
         };
         let system_prompt = &self.prompts.system.content;
 
@@ -189,6 +225,7 @@ Online: {}"#,
             event: &event,
             groups: &groups,
             channel_group_id,
+            allowed_skills: &allowed_skills,
         };
 
         // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
@@ -199,7 +236,10 @@ Online: {}"#,
         {
             Ok(result) => {
                 if !result.content.is_empty() {
-                    info!("[TS] LLM final reply: {}", &result.content);
+                    info!(
+                        reply_chars = result.content.chars().count(),
+                        "[TS] LLM final reply ready"
+                    );
                     self.llm
                         .save_turn(&source, msg_content.to_string(), result.content.clone());
                     let _ = self
