@@ -27,22 +27,11 @@ pub struct GroupMessageEvent {
     pub timestamp: u64,
 }
 
-impl PrivateMessageEvent {
-    pub fn timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-}
-
-impl GroupMessageEvent {
-    pub fn timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +42,7 @@ struct RawEvent {
     user_id: Option<i64>,
     message: Option<Value>,
     sender: Option<Value>,
+    time: Option<u64>,
 }
 
 pub fn parse_event(raw: Value) -> NcEvent {
@@ -69,24 +59,32 @@ pub fn parse_event(raw: Value) -> NcEvent {
 }
 
 fn parse_message_event(ev: RawEvent) -> NcEvent {
-    let user_id = ev.user_id.unwrap_or(0);
+    let Some(user_id) = ev.user_id else {
+        return NcEvent::Heartbeat;
+    };
     let message = parse_segments(ev.message.as_ref().unwrap_or(&Value::Array(vec![])));
     let sender = parse_sender(ev.sender.as_ref().unwrap_or(&Value::Null), user_id);
+    let timestamp = ev.time.unwrap_or_else(now_unix_seconds);
 
     match ev.message_type.as_deref() {
         Some("private") => NcEvent::PrivateMessage(PrivateMessageEvent {
             user_id,
             message,
             sender,
-            timestamp: PrivateMessageEvent::timestamp(),
+            timestamp,
         }),
-        Some("group") => NcEvent::GroupMessage(GroupMessageEvent {
-            group_id: ev.group_id.unwrap_or(0),
-            user_id,
-            message,
-            sender,
-            timestamp: GroupMessageEvent::timestamp(),
-        }),
+        Some("group") => {
+            let Some(group_id) = ev.group_id else {
+                return NcEvent::Heartbeat;
+            };
+            NcEvent::GroupMessage(GroupMessageEvent {
+                group_id,
+                user_id,
+                message,
+                sender,
+                timestamp,
+            })
+        }
         _ => NcEvent::Heartbeat,
     }
 }

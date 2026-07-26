@@ -6,12 +6,12 @@ use crate::adapter::napcat::{
     NapCatAdapter,
 };
 use crate::adapter::TsAdapter;
-use crate::config::{AppConfig, PromptsConfig};
+use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, UnifiedInboundEvent};
-use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
@@ -22,13 +22,22 @@ struct NcExecutor<'a> {
     user_id: i64,
     group_id: Option<i64>,
     sender_name: &'a str,
+    caller_groups: &'a [u32],
+    allowed_skills: &'a [String],
 }
 
 #[async_trait]
 impl ToolExecutor for NcExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
         self.router
-            .execute_skill(call, self.user_id, self.group_id, self.sender_name)
+            .execute_skill(
+                call,
+                self.user_id,
+                self.group_id,
+                self.sender_name,
+                self.caller_groups,
+                self.allowed_skills,
+            )
             .await
     }
 }
@@ -43,24 +52,21 @@ pub struct NcRouter {
     ts_adapter: Option<Arc<TsAdapter>>,
 }
 
-impl NcRouter {
-    fn resolve_nc_allowed_skills(&self, user_id: i64, group_id: Option<i64>) -> Vec<String> {
-        let mut pseudo_groups = vec![9000u32];
-        if group_id.is_some() {
-            pseudo_groups.push(9001);
-        }
-        if self.config.napcat.trusted_users.contains(&user_id) {
-            pseudo_groups.push(9002);
-        }
-        if group_id
-            .map(|gid| self.config.napcat.trusted_groups.contains(&gid))
-            .unwrap_or(false)
-        {
-            pseudo_groups.push(9003);
-        }
-        self.gate.get_allowed_skills(&pseudo_groups, 0)
+fn nc_pseudo_groups(config: &NapCatConfig, user_id: i64, group_id: Option<i64>) -> Vec<u32> {
+    let mut groups = vec![9000];
+    if group_id.is_some() {
+        groups.push(9001);
     }
+    if config.trusted_users.contains(&user_id) {
+        groups.push(9002);
+    }
+    if group_id.is_some_and(|gid| config.trusted_groups.contains(&gid)) {
+        groups.push(9003);
+    }
+    groups
+}
 
+impl NcRouter {
     fn is_trusted(&self, user_id: i64, group_id: Option<i64>) -> bool {
         let nc = &self.config.napcat;
         if nc.trusted_users.contains(&user_id) {
@@ -98,7 +104,20 @@ impl NcRouter {
         let mut rx = self.adapter.subscribe();
         info!("NcRouter: listening for NapCat events");
 
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        skipped,
+                        "NapCat event router lagged; skipped buffered events"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("NcRouter event stream closed"));
+                }
+            };
             match event {
                 NcEvent::PrivateMessage(msg) => {
                     if msg.user_id == self.adapter.get_self_id() {
@@ -132,7 +151,6 @@ impl NcRouter {
                 }
             }
         }
-        Err(anyhow::anyhow!("NcRouter event stream ended"))
     }
 
     fn spawn_handle_private(&self, msg: PrivateMessageEvent) {
@@ -200,13 +218,23 @@ impl NcRouter {
 
         let stripped = self.strip_prefix(&unified_event.text);
 
-        info!("[NC Private] user={} msg={}", msg.sender.nickname, stripped);
+        info!(
+            user_id = msg.user_id,
+            user = %msg.sender.nickname,
+            message_chars = stripped.chars().count(),
+            "[NC Private] message received"
+        );
 
-        let allowed = self.resolve_nc_allowed_skills(msg.user_id, None);
-        debug!("NC private allowed skills: {:?}", allowed);
+        let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, None);
 
         let reply_text = self
-            .run_llm(stripped, &msg.sender.nickname, msg.user_id, None, &allowed)
+            .run_llm(
+                stripped,
+                &msg.sender.nickname,
+                msg.user_id,
+                None,
+                &caller_groups,
+            )
             .await;
 
         if let ReplyPolicy::NapCatPrivate { user_id } = unified_event.reply_policy {
@@ -218,7 +246,7 @@ impl NcRouter {
     }
 
     async fn handle_group(&self, msg: GroupMessageEvent) {
-        let triggered = self.is_triggered(segments_to_text(&msg.message).trim());
+        let triggered = self.is_triggered(&msg.message);
         let Some(unified_event) = UnifiedInboundEvent::from_nc_group(&msg, triggered) else {
             return;
         };
@@ -238,12 +266,14 @@ impl NcRouter {
         let stripped = self.strip_prefix(&unified_event.text);
 
         info!(
-            "[NC Group {}] user={} msg={}",
-            msg.group_id, msg.sender.nickname, stripped
+            group_id = msg.group_id,
+            user_id = msg.user_id,
+            user = %msg.sender.nickname,
+            message_chars = stripped.chars().count(),
+            "[NC Group] message received"
         );
 
-        let allowed = self.resolve_nc_allowed_skills(msg.user_id, Some(msg.group_id));
-        debug!("NC group allowed skills: {:?}", allowed);
+        let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, Some(msg.group_id));
 
         let reply_text = self
             .run_llm(
@@ -251,7 +281,7 @@ impl NcRouter {
                 &msg.sender.nickname,
                 msg.user_id,
                 Some(msg.group_id),
-                &allowed,
+                &caller_groups,
             )
             .await;
 
@@ -272,9 +302,17 @@ impl NcRouter {
         }
     }
 
-    fn is_triggered(&self, text: &str) -> bool {
+    fn is_triggered(&self, message: &[Segment]) -> bool {
         let nc = &self.config.napcat;
         let self_id = self.adapter.get_self_id().to_string();
+        if message
+            .iter()
+            .any(|segment| matches!(segment, Segment::At { qq } if qq == &self_id))
+        {
+            return true;
+        }
+        let text = segments_to_text(message);
+        let text = text.trim();
         if text.contains(&format!("[CQ:at,qq={self_id}]")) {
             return true;
         }
@@ -300,12 +338,20 @@ impl NcRouter {
         user_id: i64,
         group_id: Option<i64>,
         sender_name: &str,
+        caller_groups: &[u32],
+        allowed_skills: &[String],
     ) -> String {
+        if !is_skill_allowed(&call.name, allowed_skills) {
+            warn!(skill = %call.name, "NC Skill execution denied by ACL");
+            return "Skill execution denied".to_string();
+        }
+
         if let Some(skill) = self.registry.get(&call.name) {
             let nc_ctx = NcExecutionContext {
                 adapter: self.adapter.clone(),
                 caller_id: user_id,
                 caller_name: sender_name.to_string(),
+                caller_groups: caller_groups.to_vec(),
                 caller_group_id: group_id,
                 gate: self.gate.clone(),
                 config: self.config.clone(),
@@ -313,43 +359,22 @@ impl NcRouter {
             let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
                 .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
 
-            let args = call.arguments.clone();
-            match skill.execute_unified(args.clone(), &unified_ctx).await {
+            match skill
+                .execute_unified(call.arguments.clone(), &unified_ctx)
+                .await
+            {
                 Ok(val) => {
                     info!(
                         skill = %call.name,
                         caller = %sender_name,
-                        result = %val,
                         "NC Unified Skill executed"
                     );
                     val.to_string()
                 }
-                Err(unified_err) => {
-                    debug!(skill = %call.name, error = %unified_err, "Falling back to NC execution");
-                    let nc_ctx = NcExecutionContext {
-                        adapter: self.adapter.clone(),
-                        caller_id: user_id,
-                        caller_name: sender_name.to_string(),
-                        caller_group_id: group_id,
-                        gate: self.gate.clone(),
-                        config: self.config.clone(),
-                    };
-                    match skill.execute_nc(call.arguments.clone(), &nc_ctx).await {
-                        Ok(val) => {
-                            info!(
-                                skill = %call.name,
-                                caller = %sender_name,
-                                result = %val,
-                                "NC Skill executed"
-                            );
-                            val.to_string()
-                        }
-                        Err(e) => {
-                            let msg = format!("Skill execution failed: {}", e);
-                            error!(skill = %call.name, error = %e, "NC Skill failed");
-                            msg
-                        }
-                    }
+                Err(e) => {
+                    let msg = format!("Skill execution failed: {}", e);
+                    error!(skill = %call.name, error = %e, "NC Skill failed");
+                    msg
                 }
             }
         } else {
@@ -365,7 +390,7 @@ impl NcRouter {
         sender_name: &str,
         user_id: i64,
         group_id: Option<i64>,
-        allowed_skills: &[String],
+        caller_groups: &[u32],
     ) -> String {
         let error_msg = "AI backend unavailable. Please try again later.".to_string();
 
@@ -412,13 +437,17 @@ impl NcRouter {
             .llm
             .build_messages(&source, system_prompt, &user_ctx, user_msg);
 
-        let tools = self.registry.to_tool_schemas(allowed_skills);
+        let allowed_skills = self.gate.get_allowed_skills(caller_groups, 0);
+        debug!("NC allowed skills: {:?}", allowed_skills);
+        let tools = self.registry.to_tool_schemas(&allowed_skills);
 
         let executor = NcExecutor {
             router: self,
             user_id,
             group_id,
             sender_name,
+            caller_groups,
+            allowed_skills: &allowed_skills,
         };
 
         match self
@@ -428,7 +457,10 @@ impl NcRouter {
         {
             Ok(result) => {
                 let content = result.content;
-                info!("[NC] LLM final reply: {}", content);
+                info!(
+                    reply_chars = content.chars().count(),
+                    "[NC] LLM final reply ready"
+                );
                 self.llm
                     .save_turn(&source, user_msg.to_string(), content.clone());
                 content
@@ -438,5 +470,34 @@ impl NcRouter {
                 error_msg
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_chat_uses_base_and_trusted_user_groups() {
+        let config = NapCatConfig {
+            trusted_users: vec![42],
+            ..NapCatConfig::default()
+        };
+
+        assert_eq!(nc_pseudo_groups(&config, 42, None), vec![9000, 9002]);
+    }
+
+    #[test]
+    fn group_chat_uses_all_matching_pseudo_groups() {
+        let config = NapCatConfig {
+            trusted_users: vec![42],
+            trusted_groups: vec![7],
+            ..NapCatConfig::default()
+        };
+
+        assert_eq!(
+            nc_pseudo_groups(&config, 42, Some(7)),
+            vec![9000, 9001, 9002, 9003]
+        );
     }
 }

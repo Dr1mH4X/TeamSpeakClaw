@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -58,30 +58,22 @@ pub async fn run(
     let respond_private = config.bot_respond_to_private;
     let trigger_prefixes = config.bot_trigger_prefixes.clone();
     let default_reply = config.bot_default_reply_mode.clone();
-    let ts3_task = tokio::spawn(async move {
-        if let Err(e) = actor::ts3_actor(
-            ts3_client,
-            ts3_audio_rx,
-            ts3_notice_rx,
-            events_tx_clone,
-            ts3_shutdown,
-            respond_private,
-            trigger_prefixes,
-            default_reply,
-        )
-        .await
-        {
-            error!(%e, "ts3 actor exited");
-        }
-    });
+    let ts3_task = tokio::spawn(actor::ts3_actor(
+        ts3_client,
+        ts3_audio_rx,
+        ts3_notice_rx,
+        events_tx_clone,
+        ts3_shutdown,
+        respond_private,
+        trigger_prefixes,
+        default_reply,
+    ));
 
     let svc = voice_service::VoiceServiceImpl::new(
         ts3_audio_tx,
         ts3_notice_tx,
         events_tx,
-        config.bot_respond_to_private,
         config.bot_default_reply_mode.clone(),
-        config.bot_trigger_prefixes.clone(),
     );
 
     let addr: std::net::SocketAddr = match addr.parse() {
@@ -101,20 +93,12 @@ pub async fn run(
         .add_service(VoiceServiceServer::new(svc))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown.cancelled());
 
-    tokio::select! {
-        result = server => {
-            if let Err(e) = result {
-                error!("gRPC server failed: {e:?}");
-            }
-        }
-        _ = shutdown.cancelled() => {}
-    }
-
-    if let Err(e) = ts3_task.await {
-        error!("Failed to wait for TS3 task: {e}");
-    }
-
-    Ok(())
+    let server_result = server.await.context("gRPC server failed");
+    ts3_task
+        .await
+        .context("failed to join TS3 actor")?
+        .context("TS3 actor failed")?;
+    server_result
 }
 
 pub struct Runtime {
@@ -132,9 +116,10 @@ impl Runtime {
         registry: Arc<SkillRegistry>,
         ts_adapter: Arc<crate::adapter::TsAdapter>,
     ) -> Self {
-        let voice_enabled = config.headless.stt.enabled || config.headless.tts.enabled;
+        let voice_enabled =
+            config.headless.stt.enabled || config.headless.tts.enabled || config.llm.omni_model;
         if !voice_enabled {
-            info!("headless: voice disabled (stt/tts not enabled), management-only mode");
+            info!("headless: voice disabled (stt/tts/omni not enabled), management-only mode");
             return Self {
                 shutdown: CancellationToken::new(),
                 service_handle: None,

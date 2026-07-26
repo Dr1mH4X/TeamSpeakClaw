@@ -53,7 +53,7 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 TeamSpeakClaw 支持三种音乐后端：
 
-**模式一：ts3audiobot（默认）**
+**模式一：ts3audiobot（配置示例）**
 
 通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。需在 `settings.toml` 中配置 `musicbot_name`（默认 `TS3AudioBot`）。
 
@@ -123,8 +123,8 @@ TeamSpeakClaw 支持三种音乐后端：
 
 ### ℹ️ 信息查询
 
-- **查询在线用户** (get_client_list): "现在谁在线？"
 - **查询用户信息** (get_client_info): "UserA 的详细信息"
+- **搜索网络** (web_search): "搜索今天的最新新闻"
 
 ## 常见问题
 

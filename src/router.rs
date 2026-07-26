@@ -62,16 +62,13 @@ pub async fn run_routers(
             registry,
             Some(adapter),
         );
-        let nc_future = tokio::spawn(async move { nc_router.run().await });
 
         info!("{bot_ctx}");
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),
-            res = nc_future => map_nc_router_result(res),
-            _ = tokio::signal::ctrl_c() => {
-                Ok(())
-            }
+            res = nc_router.run() => map_nc_router_result(res),
+            res = tokio::signal::ctrl_c() => res.map_err(Into::into),
             _ = sigterm => {
                 Ok(())
             }
@@ -102,9 +99,7 @@ pub async fn run_routers(
 
         tokio::select! {
             res = ts_router.run() => map_ts_router_result(res),
-            _ = tokio::signal::ctrl_c() => {
-                Ok(())
-            }
+            res = tokio::signal::ctrl_c() => res.map_err(Into::into),
             _ = sigterm => {
                 Ok(())
             }
@@ -125,19 +120,15 @@ fn map_ts_router_result(res: Result<()>) -> Result<()> {
     }
 }
 
-fn map_nc_router_result(res: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+fn map_nc_router_result(res: Result<()>) -> Result<()> {
     match res {
-        Ok(Ok(())) => {
+        Ok(()) => {
             warn!("NC router exited unexpectedly");
             Err(anyhow::anyhow!("NC router exited unexpectedly"))
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             error!("NC router error: {e}");
             Err(e)
-        }
-        Err(e) => {
-            error!("NC router task panicked: {e}");
-            Err(anyhow::anyhow!("NC router panicked"))
         }
     }
 }

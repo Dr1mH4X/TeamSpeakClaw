@@ -69,6 +69,7 @@ message ChatEvent {
   bool should_respond = 8;
   TargetMode reply_target_mode = 9;
   uint32 reply_target_client_id = 10;
+  uint32 invoker_client_id = 11;
 }
 
 message PlaybackEvent {
