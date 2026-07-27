@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::now_unix_ms;
 
@@ -152,13 +153,15 @@ pub async fn ts3_actor(
                 if let Some((mode, target, text)) = msg {
                     let target_mode = if mode == 1 || mode == 2 || mode == 3 { mode } else { 2 };
                     let target = if target_mode == 1 { target } else { 0 };
-                    if let Err(e) = tsclient_rs::sendTextMessage(
-                        &client,
-                        target_mode,
-                        target as u64,
-                        &text,
-                    ).await {
-                        warn!("sendTextMessage failed: {e}");
+                    for chunk in split_message(&text, super::text_util::MAX_MESSAGE_BYTES) {
+                        if let Err(e) = tsclient_rs::sendTextMessage(
+                            &client,
+                            target_mode,
+                            target as u64,
+                            &chunk,
+                        ).await {
+                            warn!("sendTextMessage failed: {e}");
+                        }
                     }
                 } else {
                     break;
