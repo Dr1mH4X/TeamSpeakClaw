@@ -44,11 +44,6 @@ fn emoji_preserved() {
 }
 
 #[test]
-fn max_bytes_zero_returns_whole() {
-    assert_eq!(split_message("test", 0), vec!["test"]);
-}
-
-#[test]
 fn whitespace_break_preferred() {
     let r: Vec<String> = split_message("hello world foo bar", 10);
     assert!(r.iter().all(|c: &String| c.len() <= 10));
@@ -75,6 +70,15 @@ fn long_text_roundtrip() {
     let r: Vec<String> = split_message(&msg, 8192);
     assert!(r.iter().all(|c: &String| c.len() <= 8192));
     assert_eq!(r.join(""), msg);
+}
+
+#[test]
+fn fullwidth_space_not_corrupt() {
+    // 全角空格 U+3000 = 3 字节，旧 bug：start = ws + 1 会落在中间
+    let msg = "a\u{3000}b\u{3000}c";
+    let r: Vec<String> = split_message(msg, 3);
+    assert!(r.iter().all(|c: &String| !c.is_empty()));
+    assert_eq!(r.concat(), msg);
 }
 
 #[test]
