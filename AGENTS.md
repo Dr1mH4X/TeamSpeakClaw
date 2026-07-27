@@ -35,8 +35,8 @@ src/
 ├── skills/                  # Skill system (music, moderation, information, ...)
 │   ├── music.rs             # Music skill root
 │   └── music/               # Music backends (ts3audiobot, tsbot_http, tsmusicbot)
-└── test/                    # Integration tests included via include!()
-    └── text_util.rs         # split_message tests
+
+tests/                       # Integration tests (empty; unit tests are inline #[cfg(test)] blocks)
 ```
 
 ## Critical Code Paths
