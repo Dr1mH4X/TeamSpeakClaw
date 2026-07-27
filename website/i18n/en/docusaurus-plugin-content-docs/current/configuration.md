@@ -65,7 +65,7 @@ The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11
 The `[music_backend]` section controls which backend is used for music functionality:
 
 | Value | Description |
-|---|---|---|
+|---|---|
 | `ts3audiobot` | (Example configuration) Controls TS3AudioBot via TS private messages. Ensure the music bot's nickname is `TS3AudioBot`. |
 | `tsmusicbot` | Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. |
 | `tsbot_backend` | Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `base_url`. |
@@ -106,7 +106,6 @@ Controls which user groups can use which features. **All matching rules' allowed
 
 - When `enabled = false`, the program only runs TeamSpeak routing and will not exit early due to NapCat branch completion.
 - Group chats are affected by `listen_groups` and trusted rules; PM only accepts users in `trusted_users`.
-- `send_message` defaults to native NapCat sending on NapCat context; set `ts_route=true` to explicitly route to TeamSpeak.
 
 ### NapCat Permission Mapping (ACL)
 
