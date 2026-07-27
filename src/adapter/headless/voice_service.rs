@@ -19,9 +19,7 @@ pub struct VoiceServiceImpl {
     ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
     ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
     events_tx: broadcast::Sender<voicev1::Event>,
-    bot_respond_to_private: bool,
     bot_default_reply_mode: String,
-    bot_trigger_prefixes: Vec<String>,
     tts_stream_lock: tokio::sync::Mutex<()>,
 }
 
@@ -30,17 +28,13 @@ impl VoiceServiceImpl {
         ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
         ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
         events_tx: broadcast::Sender<voicev1::Event>,
-        bot_respond_to_private: bool,
         bot_default_reply_mode: String,
-        bot_trigger_prefixes: Vec<String>,
     ) -> Self {
         Self {
             ts3_audio_tx,
             ts3_notice_tx,
             events_tx,
-            bot_respond_to_private,
             bot_default_reply_mode,
-            bot_trigger_prefixes,
             tts_stream_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -157,17 +151,17 @@ async fn stream_tts_audio_loop(
             }
         };
 
-        if let Err(e) = stdin.write_all(&chunk.payload).await {
-            warn!("write ffmpeg stdin failed: {e}, skipping chunk");
-            continue;
-        }
-        drop(stdin);
-
         let mut stdout = child
             .child
             .as_mut()
             .and_then(|c| c.stdout.take())
             .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
+        let payload = chunk.payload;
+        let stdin_task = tokio::spawn(async move {
+            let result = stdin.write_all(&payload).await;
+            drop(stdin);
+            result
+        });
 
         let mut pcm = vec![0u8; frame_bytes];
         let mut float_buf = vec![0f32; frame_samples_per_channel * 2];
@@ -206,10 +200,12 @@ async fn stream_tts_audio_loop(
             let _ = c.start_kill();
             let _ = c.wait().await;
         }
-    }
 
-    if let Err(e) = ts3_audio_tx.send((vec![], 5)).await {
-        warn!("send stream_tts eos failed: {e}");
+        match stdin_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("write ffmpeg stdin failed: {e}"),
+            Err(e) => warn!("ffmpeg stdin task failed: {e}"),
+        }
     }
 
     Ok(())
@@ -245,12 +241,6 @@ impl VoiceService for VoiceServiceImpl {
         let mut target = r.target_client_id;
 
         if mode == 1 {
-            if !self.bot_respond_to_private {
-                return Ok(Response::new(voicev1::CommandResponse {
-                    ok: false,
-                    message: "private reply disabled by bot.respond_to_private".to_string(),
-                }));
-            }
             if target == 0 {
                 return Ok(Response::new(voicev1::CommandResponse {
                     ok: false,
@@ -276,10 +266,8 @@ impl VoiceService for VoiceServiceImpl {
             &self.events_tx,
             2,
             format!(
-                "send_notice accepted: target_mode={} target_client_id={} trigger_prefixes={}",
-                mode,
-                target,
-                self.bot_trigger_prefixes.len()
+                "send_notice accepted: target_mode={} target_client_id={}",
+                mode, target
             ),
         );
 

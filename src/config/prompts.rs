@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct PromptsConfig {
     pub system: SystemPrompts,
     pub tts: TtsPrompts,
@@ -18,6 +19,7 @@ impl Default for PromptsConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct SystemPrompts {
     pub content: String,
 }
@@ -31,6 +33,7 @@ impl Default for SystemPrompts {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct TtsPrompts {
     /// MiMo TTS 风格提示，用于控制语音的语调、语速、情感等
     pub style_prompt: String,

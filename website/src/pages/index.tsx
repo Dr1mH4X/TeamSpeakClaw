@@ -6,6 +6,11 @@ import Heading from "@theme/Heading";
 import styles from "./index.module.css";
 import Translate, { translate } from "@docusaurus/Translate";
 
+type FeatureItemProps = {
+  title: React.ReactNode;
+  description: React.ReactNode;
+};
+
 function HomepageHeader() {
   return (
     <header className={styles.heroBanner}>
@@ -97,7 +102,7 @@ export default function Home(): React.JSX.Element {
   );
 }
 
-function FeatureItem({ title, description }) {
+function FeatureItem({ title, description }: FeatureItemProps) {
   return (
     <div className="col col--3">
       <div className={styles.featureCard}>

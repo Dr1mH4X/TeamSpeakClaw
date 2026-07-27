@@ -19,9 +19,9 @@
 #   - kick_client: 踢出用户
 #   - ban_client: 封禁用户
 #   - move_client: 移动用户到指定频道
-#   - get_client_list: 获取在线用户列表
 #   - get_client_info: 获取用户详细信息
 #   - music_control: 音乐控制
+#   - web_search: 搜索最新网络信息
 
 [[rules]]
 name = "superadmin"
@@ -38,7 +38,6 @@ allowed_skills = [
   "poke_client",
   "send_message",
   "get_client_info",
-  "get_client_list",
   "music_control",
   "kick_client"
 ]
@@ -52,7 +51,6 @@ allowed_skills = [
   "poke_client",
   "send_message",
   "get_client_info",
-  "get_client_list",
   "music_control"
 ]
 can_target_admins = false
@@ -65,7 +63,6 @@ channel_group_ids = []
 allowed_skills = [
   "send_message",
   "get_client_info",
-  "get_client_list",
   "music_control"
 ]
 can_target_admins = false

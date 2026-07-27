@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// - `trusted_groups`: 信任的群 ID 列表，群内所有成员可使用机器人
 /// - `trusted_users`: 信任的用户 QQ 号列表，私聊和群聊均可使用
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct NapCatConfig {
     /// 是否启用 NapCat 适配器
     pub enabled: bool,
