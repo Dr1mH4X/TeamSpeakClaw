@@ -26,6 +26,7 @@ use voicev1::voice_service_server::VoiceServiceServer;
 mod actor;
 mod event;
 pub mod speech;
+pub(crate) mod text_util;
 mod types;
 mod voice_service;
 

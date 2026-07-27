@@ -221,9 +221,12 @@ impl TsAdapter {
     }
 
     pub async fn send_text_message(&self, target_mode: u8, target: u32, msg: &str) -> Result<()> {
-        tsclient_rs::sendTextMessage(&self.client, target_mode as i32, target as u64, msg)
-            .await
-            .map_err(|e| anyhow!("sendTextMessage failed: {e}"))
+        for chunk in super::text_util::split_message(msg, 8192) {
+            tsclient_rs::sendTextMessage(&self.client, target_mode as i32, target as u64, &chunk)
+                .await
+                .map_err(|e| anyhow!("sendTextMessage failed: {e}"))?;
+        }
+        Ok(())
     }
 
     pub async fn poke(&self, clid: u32, msg: &str) -> Result<()> {
