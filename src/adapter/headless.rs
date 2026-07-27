@@ -151,7 +151,7 @@ impl Runtime {
         let bridge_ts_adapter = ts_adapter.clone();
         let shutdown_for_bridge = shutdown.clone();
         let bridge_handle = Some(tokio::spawn(async move {
-            let mut attempt = 0u32;
+            let mut attempt = 1u32;
             loop {
                 tokio::select! {
                     _ = shutdown_for_bridge.cancelled() => break,
@@ -165,13 +165,13 @@ impl Runtime {
                     ).run() => {
                         if let Err(e) = run_result {
                             error!("voice router failed: {}", e);
-                            attempt += 1;
                             if attempt >= crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
                                 break;
                             }
                             tokio::time::sleep(
-                                crate::adapter::reconnect::reconnect_delay(attempt - 1)
+                                crate::adapter::reconnect::reconnect_delay_for_attempt(attempt)
                             ).await;
+                            attempt += 1;
                             continue;
                         }
                         break;

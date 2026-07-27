@@ -56,7 +56,7 @@ pub struct NapCatAdapter {
 impl NapCatAdapter {
     pub async fn connect(config: NapCatConfig) -> Result<Arc<Self>> {
         let mut result = None;
-        for attempt in 0..crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
+        for attempt in 1..=crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
             match Self::try_connect(config.clone()).await {
                 Ok(r) => {
                     result = Some(r);
@@ -65,12 +65,12 @@ impl NapCatAdapter {
                 Err(e) => {
                     warn!(
                         "[{}/{}] NapCat connect failed: {}",
-                        attempt + 1,
+                        attempt,
                         crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS,
                         e
                     );
                     tokio::time::sleep(
-                        crate::adapter::reconnect::reconnect_delay(attempt),
+                        crate::adapter::reconnect::reconnect_delay_for_attempt(attempt),
                     )
                     .await;
                 }
@@ -96,7 +96,7 @@ impl NapCatAdapter {
             *adapter.writer.lock().await = None;
             drop(adapter);
 
-            let mut attempt = 0u32;
+            let mut attempt = 1u32;
             loop {
                 let Some(adapter) = weak.upgrade() else {
                     return;
@@ -112,22 +112,22 @@ impl NapCatAdapter {
                     Err(e) => {
                         warn!(
                             "[{}/{}] NapCat reconnect failed: {}",
-                            attempt + 1,
+                            attempt,
                             crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS,
                             e
                         );
-                        attempt += 1;
                         if attempt >= crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
                             return;
                         }
                         if !wait_for_retry_or_closed(
                             &mut rx,
-                            crate::adapter::reconnect::reconnect_delay(attempt - 1),
+                            crate::adapter::reconnect::reconnect_delay_for_attempt(attempt),
                         )
                         .await
                         {
                             return;
                         }
+                        attempt += 1;
                     }
                 }
             }
