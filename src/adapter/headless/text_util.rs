@@ -1,8 +1,13 @@
-/// 按 UTF-8 字节长度分片，每片不超过 max_bytes。
-/// 优先在空白符处分片，回退到字符边界处截断（绝不断开多字节字符）。
-/// 注意：空白符被丢弃在分片边界，不影响语义。
+/// TeamSpeak ServerQuery 单行消息最大字节数限制。
+pub const MAX_MESSAGE_BYTES: usize = 8192;
+
+/// 按 UTF-8 字节长度分片，每片不超过 `max_bytes`。
+/// 若单个字符超过 `max_bytes`，该字符独自成片（不截断字符）。
+/// 优先在空白符处分片，回退到字符边界截断。
+/// 注意：分片边界上的空白符被丢弃，不影响语义。
 pub fn split_message(msg: &str, max_bytes: usize) -> Vec<String> {
-    if msg.len() <= max_bytes || max_bytes == 0 {
+    debug_assert!(max_bytes > 0, "max_bytes must be > 0");
+    if msg.len() <= max_bytes {
         return vec![msg.to_string()];
     }
 
@@ -40,7 +45,9 @@ pub fn split_message(msg: &str, max_bytes: usize) -> Vec<String> {
                 let ws = lookback_start + rel_pos;
                 if ws > start {
                     chunks.push(msg[start..ws].to_string());
-                    start = ws + 1; // 跳过空白符
+                    // 跳过完整空白符（可能多字节，如全角空格）
+                    let ws_chars: Vec<char> = msg[ws..].chars().collect();
+                    start = ws + ws_chars[0].len_utf8();
                     continue;
                 }
             }

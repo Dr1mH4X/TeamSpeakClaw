@@ -106,7 +106,7 @@ pub async fn ts3_actor(
                 if let Some((mode, target, text)) = msg {
                     let target_mode = if mode == 1 || mode == 2 || mode == 3 { mode } else { 2 };
                     let target = if target_mode == 1 { target } else { 0 };
-                    for chunk in split_message(&text, 8192) {
+                    for chunk in split_message(&text, super::text_util::MAX_MESSAGE_BYTES) {
                         if let Err(e) = tsclient_rs::sendTextMessage(
                             &client,
                             target_mode,
