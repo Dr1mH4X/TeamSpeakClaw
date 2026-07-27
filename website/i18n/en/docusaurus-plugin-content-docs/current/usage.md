@@ -115,12 +115,6 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
 - **Poke Client** (poke_client): "Poke UserA"
 - **Send Message** (send_message): "Send a private message to UserA saying hello"
 
-#### `send_message` Cross-Platform Routing Notes
-
-- TeamSpeak context: supports `mode=private|channel|server`.
-- NapCat context: defaults to native NapCat sending, supports `mode=private|group`.
-- To explicitly route from NapCat to TeamSpeak, pass `ts_route=true`; then `mode=private|channel|server` is used (`private` requires `clid`).
-
 ### ℹ️ Information Query
 
 - **Client Info** (get_client_info): "Show detailed info for UserA"
