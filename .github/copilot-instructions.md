@@ -36,6 +36,21 @@
 - 临时文件使用后要及时删除
 - 每次新增文件，都要注意保持目录结构合理
 
+## Test Conventions
+
+Unit tests live alongside implementation as `#[cfg(test)] mod tests { use super::*; }`
+blocks within each source file. This is the standard Rust convention — tests stay close
+to the code they verify and have access to private items.
+
+Integration tests, if needed, belong in the top-level `tests/` directory. Each file
+there is a separate crate and may only access public APIs. Currently unused.
+
+When writing tests:
+- Wrap in `#[cfg(test)] mod tests { use super::*; }`
+- Use `#[test]` for sync, `#[tokio::test]` for async
+- Function names: descriptive snake_case in English
+- Assertions: standard `assert_eq!` / `assert!` only
+
 ## 层级规范(Layer Hierarchy)
 
 - `main.rs` 只做初始化 + 调用上层 API，不包含任何其他逻辑
