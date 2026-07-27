@@ -181,6 +181,13 @@ impl TsAdapter {
                 }
             }));
         }
+
+        {
+            let tx_dc = tx.clone();
+            client.on_disconnected(Arc::new(move |_: tsclient_rs::Event| {
+                let _ = tx_dc.send(TsEvent::Disconnected);
+            }));
+        }
     }
 
     async fn upgrade_identity_and_save(
@@ -327,6 +334,7 @@ impl TsAdapter {
 #[derive(Debug, Clone)]
 pub enum TsEvent {
     TextMessage(TextMessageEvent),
+    Disconnected,
 }
 
 #[derive(Debug, Clone)]

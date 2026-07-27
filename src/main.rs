@@ -10,14 +10,13 @@ mod skills;
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::cli::Args;
+use crate::config::AppConfig;
+use crate::llm::LlmEngine;
+use crate::permission::PermissionGate;
 use crate::skills::SkillRegistry;
-use crate::{
-    adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
-    router::EventRouter,
-};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,46 +34,5 @@ async fn main() -> Result<()> {
     let registry = Arc::new(SkillRegistry::with_defaults(config.clone()));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
-    let adapter = TsAdapter::connect(config.clone()).await?;
-
-    let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;
-
-    let ts_router = EventRouter::new_with_clients(
-        config.clone(),
-        prompts.clone(),
-        adapter.clone(),
-        gate.clone(),
-        llm.clone(),
-        registry.clone(),
-        nc_adapter.clone(),
-    );
-
-    let headless = adapter::headless::Runtime::start(
-        config.clone(),
-        prompts.clone(),
-        gate.clone(),
-        llm.clone(),
-        registry.clone(),
-        adapter.clone(),
-    );
-
-    let result = router::run_routers(
-        config,
-        prompts,
-        gate,
-        llm,
-        registry,
-        adapter.clone(),
-        ts_router,
-        nc_adapter,
-    )
-    .await;
-
-    headless.shutdown().await;
-
-    if let Err(e) = adapter.quit().await {
-        error!("Failed to send quit command: {}", e);
-    }
-
-    result
+    crate::adapter::run(config, prompts, gate, registry, llm).await
 }
