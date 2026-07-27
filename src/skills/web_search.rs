@@ -57,8 +57,8 @@ async fn search_exa(query: &str, num_results: u8, search_type: &str) -> Result<S
     }
 
     for line in text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Some(result) = parse_payload(data.trim()) {
+        if let Some(data) = line.strip_prefix("data:") {
+            if let Some(result) = parse_payload(data.trim_start()) {
                 return Ok(result);
             }
         }
@@ -104,8 +104,7 @@ impl Skill for WebSearch {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let _ = ctx;
+    async fn execute(&self, args: Value, _ctx: &ExecutionContext) -> Result<Value> {
         execute_search(args).await
     }
 
@@ -118,13 +117,28 @@ async fn execute_search(args: Value) -> Result<Value> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
+    if query.trim().is_empty() {
+        return Err(anyhow::anyhow!("query cannot be empty"));
+    }
 
-    let num_results = args["numResults"]
-        .as_u64()
-        .unwrap_or(8)
-        .min(MAX_RESULTS as u64) as u8;
+    let num_results = match args.get("numResults") {
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("numResults must be an integer"))?,
+        None => 8,
+    };
+    if !(1..=u64::from(MAX_RESULTS)).contains(&num_results) {
+        return Err(anyhow::anyhow!(
+            "numResults must be between 1 and {}",
+            MAX_RESULTS
+        ));
+    }
+    let num_results = num_results as u8;
 
     let search_type = args["type"].as_str().unwrap_or("auto");
+    if !matches!(search_type, "auto" | "fast" | "deep") {
+        return Err(anyhow::anyhow!("type must be one of: auto, fast, deep"));
+    }
 
     debug!(query, num_results, search_type, "WebSearch executing");
 

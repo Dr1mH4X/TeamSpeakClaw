@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct BotConfig {
     #[serde(default = "default_bot_nickname")]
     pub nickname: String,

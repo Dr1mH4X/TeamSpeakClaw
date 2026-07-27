@@ -15,12 +15,18 @@ async fn dispatch_backend(
     cfg: &MusicBackendConfig,
     ts_ctx: Option<&ExecutionContext>,
 ) -> Result<Value> {
-    let ctx = ts_ctx
-        .ok_or_else(|| anyhow::anyhow!("{} backend requires TeamSpeak context", cfg.backend))?;
     match cfg.backend.as_str() {
         "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
-        "ts3audiobot" => ts3audiobot::execute(action, args, ctx).await,
-        "tsmusicbot" => tsmusicbot::execute(action, args, ctx).await,
+        "ts3audiobot" => {
+            let ctx = ts_ctx
+                .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
+            ts3audiobot::execute(action, args, ctx).await
+        }
+        "tsmusicbot" => {
+            let ctx = ts_ctx
+                .ok_or_else(|| anyhow::anyhow!("tsmusicbot backend requires TeamSpeak context"))?;
+            tsmusicbot::execute(action, args, ctx).await
+        }
         _ => Err(anyhow::anyhow!(
             "Unknown music backend '{}', expected one of: ts3audiobot, tsmusicbot, tsbot_backend",
             cfg.backend
@@ -34,9 +40,7 @@ pub struct MusicControl {
 
 impl MusicControl {
     pub fn new(cfg: Option<&MusicBackendConfig>) -> Self {
-        let backend = cfg
-            .map(|c| c.backend.as_str())
-            .unwrap_or("");
+        let backend = cfg.map(|c| c.backend.as_str()).unwrap_or("");
         Self {
             backend: backend.to_string(),
         }
@@ -56,7 +60,7 @@ impl Skill for MusicControl {
     fn description(&self) -> &'static str {
         match self.backend.as_str() {
             "ts3audiobot" => "Control the TS3AudioBot music player via chat commands. \
-                             Use ts_* actions to play songs, manage playlists, and switch modes.",
+                             Play songs, manage playlists, and switch modes.",
             "tsmusicbot" => "Control the TSMusicBot music player via chat commands. \
                             Supports play, pause, resume, next/prev, stop, volume, mode, queue, search, add, playlist, fm.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
@@ -79,11 +83,10 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        let cfg = ctx
-            .config
-            .music_backend
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
+        let cfg =
+            ctx.config.music_backend.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("MusicControl registered but music_backend is None")
+            })?;
         dispatch_backend(action, &args, cfg, Some(ctx)).await
     }
 
@@ -97,23 +100,20 @@ impl Skill for MusicControl {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
 
-        let cfg = ctx
-            .config
-            .music_backend
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?;
+        let cfg =
+            ctx.config.music_backend.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("MusicControl registered but music_backend is None")
+            })?;
 
-        match ctx.platform {
-            crate::skills::Platform::TeamSpeak => {
-                let ts_ctx = ctx.to_ts_ctx()?;
-                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
-            }
-            crate::skills::Platform::NapCat => {
-                let ts_ctx = ctx.to_ts_ctx()?;
+        let ts_ctx = if cfg.backend == "tsbot_backend" {
+            None
+        } else {
+            if ctx.platform == crate::skills::Platform::NapCat {
                 info!("MusicControl: NC request forwarded to TS");
-                dispatch_backend(action, &args, cfg, Some(&ts_ctx)).await
             }
-        }
+            Some(ctx.to_ts_ctx()?)
+        };
+        dispatch_backend(action, &args, cfg, ts_ctx.as_ref()).await
     }
 }
 
@@ -231,15 +231,20 @@ fn tsbot_schema() -> Value {
             },
             "seek_time": {
                 "type": "number",
-                "description": "Seek position in seconds for 'seek' action."
+                "description": "Seek position in seconds for 'seek' action.",
+                "minimum": 0
             },
             "limit": {
                 "type": "integer",
-                "description": "Search result limit for 'search' action."
+                "description": "Search result limit for 'search' action.",
+                "minimum": 1,
+                "maximum": 50,
+                "default": 20
             },
             "repeat_mode": {
                 "type": "string",
-                "description": "Repeat mode for 'repeat' action: 'none', 'all', 'one'."
+                "description": "Repeat mode for 'repeat' action.",
+                "enum": ["none", "all", "one"]
             },
             "shuffle_enabled": {
                 "type": "boolean",
@@ -247,7 +252,9 @@ fn tsbot_schema() -> Value {
             },
             "volume_percent": {
                 "type": "integer",
-                "description": "Volume percentage (0-200) for 'volume' action."
+                "description": "Volume percentage for 'volume' action.",
+                "minimum": 0,
+                "maximum": 200
             },
             "fx_pan": {
                 "type": "number",

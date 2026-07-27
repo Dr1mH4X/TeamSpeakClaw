@@ -17,6 +17,21 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+pub(crate) fn required_u32(args: &Value, name: &str) -> Result<u32> {
+    let value = args
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Parameter '{}' must be a non-negative integer", name))?;
+    u32::try_from(value)
+        .map_err(|_| anyhow::anyhow!("Parameter '{}' exceeds the supported range", name))
+}
+
+pub(crate) fn is_skill_allowed(name: &str, allowed_skills: &[String]) -> bool {
+    allowed_skills
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == name)
+}
+
 // ─────────────────────────────────────────────
 // 平台类型枚举
 // ─────────────────────────────────────────────
@@ -49,6 +64,7 @@ pub struct NcExecutionContext {
     pub adapter: Arc<NapCatAdapter>,
     pub caller_id: i64,
     pub caller_name: String,
+    pub caller_groups: Vec<u32>,
     pub caller_group_id: Option<i64>,
     pub gate: Arc<PermissionGate>,
     pub config: Arc<AppConfig>,
@@ -97,7 +113,7 @@ impl UnifiedExecutionContext {
             caller_id: 0,
             caller_id_nc: ctx.caller_id,
             caller_name: ctx.caller_name.clone(),
-            caller_groups: vec![],
+            caller_groups: ctx.caller_groups.clone(),
             caller_channel_group_id: 0,
             nc_group_id: ctx.caller_group_id,
             gate: ctx.gate.clone(),
@@ -126,6 +142,21 @@ impl UnifiedExecutionContext {
             caller_name: self.caller_name.clone(),
             caller_groups: self.caller_groups.clone(),
             caller_channel_group_id: self.caller_channel_group_id,
+            gate: self.gate.clone(),
+            config: self.config.clone(),
+        })
+    }
+
+    pub fn to_nc_ctx(&self) -> Result<NcExecutionContext> {
+        Ok(NcExecutionContext {
+            adapter: self
+                .nc_adapter
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("NapCat adapter not available"))?,
+            caller_id: self.caller_id_nc,
+            caller_name: self.caller_name.clone(),
+            caller_groups: self.caller_groups.clone(),
+            caller_group_id: self.nc_group_id,
             gate: self.gate.clone(),
             config: self.config.clone(),
         })
@@ -171,13 +202,12 @@ pub trait Skill: Send + Sync {
         ))
     }
 
-    /// 统一执行（支持跨平台，默认为 nil 表示不支持）
-    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
-        let _ = args;
-        Err(anyhow::anyhow!(
-            "Skill '{}' does not support unified execution",
-            self.name()
-        ))
+    /// 统一执行，默认分派到当前平台的原生实现
+    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        match ctx.platform {
+            Platform::TeamSpeak => self.execute(args, &ctx.to_ts_ctx()?).await,
+            Platform::NapCat => self.execute_nc(args, &ctx.to_nc_ctx()?).await,
+        }
     }
 
     /// 是否应该注册此 skill，默认 true。覆盖返回 false 可阻止注册。
@@ -220,30 +250,36 @@ impl SkillRegistry {
     }
 
     pub fn list_skills(&self) -> Vec<String> {
-        self.skills.iter().map(|s| s.key().clone()).collect()
+        let mut skills: Vec<_> = self
+            .skills
+            .iter()
+            .map(|skill| skill.key().clone())
+            .collect();
+        skills.sort_unstable();
+        skills
     }
 
     pub async fn execute_skill(
         &self,
         call: &ToolCall,
         exec_ctx: ExecutionContext,
+        allowed_skills: &[String],
         nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> String {
+        if !is_skill_allowed(&call.name, allowed_skills) {
+            warn!(skill = %call.name, "Skill execution denied by ACL");
+            return "Skill execution denied".to_string();
+        }
+
         if let Some(skill) = self.get(&call.name) {
             let ts_adapter = Some(exec_ctx.adapter.clone());
             let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
                 .with_cross_adapters(ts_adapter, nc_adapter);
 
-            let args = call.arguments.clone();
-            let result = match skill.execute_unified(args.clone(), &unified_ctx).await {
-                Ok(val) => Ok(val),
-                Err(unified_err) => {
-                    debug!(skill = %call.name, error = %unified_err, "Falling back to TS execution");
-                    skill.execute(args, &exec_ctx).await
-                }
-            };
-
-            match result {
+            match skill
+                .execute_unified(call.arguments.clone(), &unified_ctx)
+                .await
+            {
                 Ok(val) => val.to_string(),
                 Err(e) => {
                     error!(skill = %call.name, error = %e, "Skill execution failed");
@@ -257,23 +293,27 @@ impl SkillRegistry {
     }
 
     pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<Value> {
-        self.skills
+        let mut schemas: Vec<_> = self
+            .skills
             .iter()
-            .filter(|s| {
-                allowed_skills.contains(&"*".to_string())
-                    || allowed_skills.contains(&s.key().clone())
-            })
-            .map(|s| {
+            .filter(|skill| is_skill_allowed(skill.key(), allowed_skills))
+            .map(|skill| {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": s.name(),
-                        "description": s.description(),
-                        "parameters": s.parameters()
+                        "name": skill.name(),
+                        "description": skill.description(),
+                        "parameters": skill.parameters()
                     }
                 })
             })
-            .collect()
+            .collect();
+        schemas.sort_unstable_by(|left, right| {
+            left["function"]["name"]
+                .as_str()
+                .cmp(&right["function"]["name"].as_str())
+        });
+        schemas
     }
 }
 
@@ -282,12 +322,115 @@ impl SkillRegistry {
 // ─────────────────────────────────────────────
 
 static DEFAULT_SKILLS: &[(&str, SkillFactory)] = &[
-    ("poke",         |_| Box::new(communication::PokeClient) as Box<dyn Skill>),
-    ("send_message", |_| Box::new(communication::SendMessage) as Box<dyn Skill>),
-    ("kick",         |_| Box::new(moderation::KickClient) as Box<dyn Skill>),
-    ("ban",          |_| Box::new(moderation::BanClient) as Box<dyn Skill>),
-    ("move",         |_| Box::new(moderation::MoveClient) as Box<dyn Skill>),
-    ("client_info",  |_| Box::new(information::GetClientInfo) as Box<dyn Skill>),
-    ("web_search",   |_| Box::new(web_search::WebSearch) as Box<dyn Skill>),
-    ("music",       |ctx| Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Skill>),
+    ("poke_client", |_| {
+        Box::new(communication::PokeClient) as Box<dyn Skill>
+    }),
+    ("send_message", |_| {
+        Box::new(communication::SendMessage) as Box<dyn Skill>
+    }),
+    ("kick_client", |_| {
+        Box::new(moderation::KickClient) as Box<dyn Skill>
+    }),
+    ("ban_client", |_| {
+        Box::new(moderation::BanClient) as Box<dyn Skill>
+    }),
+    ("move_client", |_| {
+        Box::new(moderation::MoveClient) as Box<dyn Skill>
+    }),
+    ("get_client_info", |_| {
+        Box::new(information::GetClientInfo) as Box<dyn Skill>
+    }),
+    ("web_search", |_| {
+        Box::new(web_search::WebSearch) as Box<dyn Skill>
+    }),
+    ("music_control", |ctx| {
+        Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Skill>
+    }),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AclConfig;
+    use serde_json::json;
+
+    struct TestSkill(&'static str);
+
+    #[async_trait]
+    impl Skill for TestSkill {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn description(&self) -> &'static str {
+            "test"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ExecutionContext) -> Result<Value> {
+            Ok(json!("ts"))
+        }
+    }
+
+    fn unified_context(platform: Platform) -> UnifiedExecutionContext {
+        UnifiedExecutionContext {
+            platform,
+            ts_adapter: None,
+            nc_adapter: None,
+            caller_id: 1,
+            caller_id_nc: 2,
+            caller_name: "test".to_string(),
+            caller_groups: vec![],
+            caller_channel_group_id: 0,
+            nc_group_id: None,
+            gate: Arc::new(PermissionGate::new(AclConfig::default())),
+            config: Arc::new(AppConfig::default()),
+        }
+    }
+
+    #[test]
+    fn required_u32_rejects_overflow() {
+        let args = json!({"id": u64::from(u32::MAX) + 1});
+        assert!(required_u32(&args, "id").is_err());
+    }
+
+    #[test]
+    fn tool_schemas_are_filtered_and_sorted() {
+        let registry = SkillRegistry::default();
+        registry.register(Box::new(TestSkill("zeta")));
+        registry.register(Box::new(TestSkill("alpha")));
+
+        let schemas = registry.to_tool_schemas(&["*".to_string()]);
+        let names: Vec<_> = schemas
+            .iter()
+            .map(|schema| schema["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["alpha", "zeta"]);
+
+        let schemas = registry.to_tool_schemas(&["zeta".to_string()]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "zeta");
+        assert!(is_skill_allowed("zeta", &["zeta".to_string()]));
+        assert!(!is_skill_allowed("alpha", &["zeta".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn unified_execution_uses_platform_native_context() {
+        let skill = TestSkill("test");
+
+        let ts_error = skill
+            .execute_unified(json!({}), &unified_context(Platform::TeamSpeak))
+            .await
+            .unwrap_err();
+        assert_eq!(ts_error.to_string(), "TeamSpeak adapter not available");
+
+        let nc_error = skill
+            .execute_unified(json!({}), &unified_context(Platform::NapCat))
+            .await
+            .unwrap_err();
+        assert_eq!(nc_error.to_string(), "NapCat adapter not available");
+    }
+}

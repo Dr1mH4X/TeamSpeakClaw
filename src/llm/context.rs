@@ -1,28 +1,27 @@
-use dashmap::DashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::Mutex;
 
 /// 会话来源
 #[derive(Debug, Clone)]
 pub enum SessionSource {
     /// TeamSpeak 客户端
-    TeamSpeak { clid: u32 },
+    TeamSpeak { uid: String },
     /// NapCat 私聊
     NapCatPrivate { user_id: i64 },
     /// NapCat 群聊
     NapCatGroup { group_id: i64 },
     /// Headless 模式
-    Headless { caller_id: u32 },
+    Headless { uid: String },
 }
 
 impl fmt::Display for SessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SessionSource::TeamSpeak { clid } => write!(f, "sq:{}", clid),
+            SessionSource::TeamSpeak { uid } => write!(f, "sq:{}", uid),
             SessionSource::NapCatPrivate { user_id } => write!(f, "nc:private:{}", user_id),
             SessionSource::NapCatGroup { group_id } => write!(f, "nc:group:{}", group_id),
-            SessionSource::Headless { caller_id } => write!(f, "headless:{}", caller_id),
+            SessionSource::Headless { uid } => write!(f, "headless:{}", uid),
         }
     }
 }
@@ -36,21 +35,23 @@ pub struct ContextTurn {
 
 /// 上下文窗口管理器
 pub struct ContextWindow {
-    /// 会话历史，key = session_id
-    histories: Arc<DashMap<String, VecDeque<ContextTurn>>>,
-    /// 会话创建顺序（用于淘汰最旧会话）
-    session_order: Arc<std::sync::Mutex<VecDeque<String>>>,
+    state: Mutex<ContextState>,
     /// 最大对话轮数
     max_turns: usize,
     /// 最大会话数
     max_sessions: usize,
 }
 
+#[derive(Default)]
+struct ContextState {
+    histories: HashMap<String, VecDeque<ContextTurn>>,
+    session_order: VecDeque<String>,
+}
+
 impl ContextWindow {
     pub fn new(max_turns: usize, max_sessions: usize) -> Self {
         Self {
-            histories: Arc::new(DashMap::new()),
-            session_order: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            state: Mutex::new(ContextState::default()),
             max_turns,
             max_sessions,
         }
@@ -68,25 +69,25 @@ impl ContextWindow {
         }
 
         let session_id = source.to_string();
+        let mut state = self.state.lock().expect("context window lock poisoned");
 
-        // 检查是否需要淘汰旧会话
-        if self.max_sessions > 0 {
-            let mut order = self.session_order.lock().unwrap();
-            if !order.contains(&session_id) {
-                // 新会话，检查是否超过限制
-                while order.len() >= self.max_sessions {
-                    if let Some(old_id) = order.pop_front() {
-                        self.histories.remove(&old_id);
-                    }
-                }
-                order.push_back(session_id.clone());
+        if self.max_sessions > 0 && !state.histories.contains_key(&session_id) {
+            while state.histories.len() >= self.max_sessions {
+                let old_id = state
+                    .session_order
+                    .pop_front()
+                    .expect("context session order is inconsistent");
+                state
+                    .histories
+                    .remove(&old_id)
+                    .expect("context session history is inconsistent");
             }
+            state.session_order.push_back(session_id.clone());
         }
 
-        let mut entry = self.histories.entry(session_id).or_default();
+        let entry = state.histories.entry(session_id).or_default();
         entry.push_back(turn);
 
-        // 裁剪超出限制的旧对话
         while entry.len() > self.max_turns {
             entry.pop_front();
         }
@@ -95,9 +96,68 @@ impl ContextWindow {
     /// 获取会话历史
     pub fn get(&self, source: &SessionSource) -> Vec<ContextTurn> {
         let session_id = source.to_string();
-        self.histories
+        self.state
+            .lock()
+            .expect("context window lock poisoned")
+            .histories
             .get(&session_id)
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn turn(value: usize) -> ContextTurn {
+        ContextTurn {
+            user: format!("user-{value}"),
+            assistant: format!("assistant-{value}"),
+        }
+    }
+
+    #[test]
+    fn keeps_only_the_configured_turn_count() {
+        let context = ContextWindow::new(2, 10);
+        let source = SessionSource::TeamSpeak {
+            uid: "uid-1".to_string(),
+        };
+
+        context.push(&source, turn(1));
+        context.push(&source, turn(2));
+        context.push(&source, turn(3));
+
+        let history = context.get(&source);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].user, "user-2");
+        assert_eq!(history[1].user, "user-3");
+    }
+
+    #[test]
+    fn concurrent_writes_respect_the_session_limit() {
+        let context = Arc::new(ContextWindow::new(1, 4));
+        let mut threads = Vec::new();
+
+        for caller_id in 0..64 {
+            let context = context.clone();
+            threads.push(std::thread::spawn(move || {
+                context.push(
+                    &SessionSource::Headless {
+                        uid: format!("uid-{caller_id}"),
+                    },
+                    turn(caller_id as usize),
+                );
+            }));
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let state = context.state.lock().unwrap();
+        assert_eq!(state.histories.len(), 4);
+        assert_eq!(state.histories.len(), state.session_order.len());
     }
 }

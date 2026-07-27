@@ -1,4 +1,4 @@
-use crate::skills::{ExecutionContext, Platform, Skill, UnifiedExecutionContext};
+use crate::skills::{required_u32, ExecutionContext, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -24,10 +24,7 @@ impl Skill for GetClientInfo {
         })
     }
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let clid = args["clid"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-            as u32;
+        let clid = required_u32(&args, "clid")?;
 
         let mut info = ctx.adapter.get_client_info(clid).await?;
 
@@ -105,10 +102,7 @@ impl Skill for GetClientInfo {
                 return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
-                let clid = args["clid"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: clid"))?
-                    as u32;
+                let clid = required_u32(&args, "clid")?;
 
                 let ts_adapter = ctx
                     .ts_adapter
@@ -118,7 +112,7 @@ impl Skill for GetClientInfo {
                 let clients = ts_adapter.list_clients().await?;
                 let client = clients
                     .iter()
-                    .find(|c| c.id as u32 == clid)
+                    .find(|c| u32::try_from(c.id).ok() == Some(clid))
                     .ok_or_else(|| {
                         anyhow::anyhow!("Client {} is not online or does not exist", clid)
                     })?;

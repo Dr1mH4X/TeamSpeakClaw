@@ -16,6 +16,20 @@ Contains basic configurations for connecting to the TeamSpeak server, LLM provid
 
 **View full configuration example**: [settings.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/settings.toml)
 
+### LLM Configuration
+
+The `[llm]` section configures an OpenAI-compatible Chat Completions endpoint:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `api_key` | string | `""` | API key; may be empty for unauthenticated local services |
+| `base_url` | string | `https://api.openai.com/v1` | API base URL; only HTTP and HTTPS are supported |
+| `model` | string | `gpt-4o` | Model name |
+| `omni_model` | bool | `false` | Whether to process voice directly with a multimodal model |
+| `max_context_turns` | integer | `0` | Maximum conversation turns retained per session; `0` disables context |
+| `max_context_sessions` | integer | `1000` | Maximum retained sessions; `0` means unlimited |
+| `max_concurrent_requests` | integer | `4` | Global concurrent LLM request limit; must be greater than `0` |
+
 ### NapCat Configuration Details
 
 The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11 protocol implementation).
@@ -52,7 +66,7 @@ The `[music_backend]` section controls which backend is used for music functiona
 
 | Value | Description |
 |---|---|---|
-| `ts3audiobot` | (Default) Controls TS3AudioBot via TS private messages. Ensure the music bot's nickname is `TS3AudioBot`. |
+| `ts3audiobot` | (Example configuration) Controls TS3AudioBot via TS private messages. Ensure the music bot's nickname is `TS3AudioBot`. |
 | `tsmusicbot` | Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. |
 | `tsbot_backend` | Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `base_url`. |
 
@@ -84,9 +98,9 @@ Controls which user groups can use which features. **All matching rules' allowed
 | `kick_client` | Kick a user |
 | `ban_client` | Ban a user |
 | `move_client` | Move a user to a specified channel |
-| `get_client_list` | Get online user list |
 | `get_client_info` | Get detailed user info |
 | `music_control` | Music control |
+| `web_search` | Search the web for current information |
 
 ### NapCat and Cross-platform Behavior Notes
 
