@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
@@ -14,10 +15,17 @@ pub struct LlmConfig {
     /// 最大会话数（0 表示不限制）
     #[serde(default = "default_max_context_sessions")]
     pub max_context_sessions: usize,
+    /// 最大并发 LLM 请求数
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
 }
 
 fn default_max_context_sessions() -> usize {
     1000
+}
+
+fn default_max_concurrent_requests() -> usize {
+    4
 }
 
 impl Default for LlmConfig {
@@ -29,6 +37,7 @@ impl Default for LlmConfig {
             omni_model: false,
             max_context_turns: 0,
             max_context_sessions: 1000,
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }

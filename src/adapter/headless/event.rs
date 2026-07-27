@@ -24,6 +24,19 @@ fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
     anyhow!("{op} failed: {err}")
 }
 
+fn checked_client_id(clid: u32) -> Result<i32> {
+    i32::try_from(clid).map_err(|_| anyhow!("TeamSpeak client ID out of range: {clid}"))
+}
+
+fn parse_client_channel_group_id(info: &std::collections::HashMap<String, String>) -> Result<u32> {
+    let value = info
+        .get("client_channel_group_id")
+        .ok_or_else(|| anyhow!("clientinfo missing client_channel_group_id"))?;
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid client_channel_group_id '{value}': {error}"))
+}
+
 /// 封装 tsclient-rs::Client，提供管理命令和事件订阅。
 /// 共享的 `Arc<Client>` 可通过 `get_client()` 给 voice 模块使用。
 pub struct TsAdapter {
@@ -109,12 +122,14 @@ impl TsAdapter {
                     }
 
                     let clid = client.client_id();
+                    let bot_clid = u32::try_from(clid)
+                        .map_err(|_| anyhow!("invalid TeamSpeak bot client ID: {clid}"))?;
                     let client = Arc::new(client);
 
                     return Ok(Arc::new(Self {
                         client,
                         event_tx,
-                        bot_clid: std::sync::atomic::AtomicU32::new(clid as u32),
+                        bot_clid: std::sync::atomic::AtomicU32::new(bot_clid),
                     }));
                 }
                 Ok(Err(e)) => {
@@ -139,15 +154,27 @@ impl TsAdapter {
             let tx = tx.clone();
             client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
                 if let tsclient_rs::Event::TextMessage(ref msg) = event {
+                    let target_mode = match msg.target_mode {
+                        1 => TextMessageTarget::Private,
+                        2 => TextMessageTarget::Channel,
+                        3 => TextMessageTarget::Server,
+                        mode => {
+                            warn!(target_mode = mode, "忽略未知类型的 TeamSpeak 文本消息");
+                            return;
+                        }
+                    };
+                    let Ok(invoker_id) = u32::try_from(msg.invoker_id) else {
+                        warn!(
+                            invoker_id = msg.invoker_id,
+                            "忽略调用者 ID 无效的 TeamSpeak 文本消息"
+                        );
+                        return;
+                    };
                     let _ = tx.send(TsEvent::TextMessage(TextMessageEvent {
-                        target_mode: match msg.target_mode {
-                            1 => TextMessageTarget::Private,
-                            2 => TextMessageTarget::Channel,
-                            _ => TextMessageTarget::Server,
-                        },
+                        target_mode,
                         invoker_name: msg.invoker_name.clone(),
                         invoker_uid: msg.invoker_uid.clone(),
-                        invoker_id: msg.invoker_id as u32,
+                        invoker_id,
                         invoker_groups: msg.invoker_groups.clone(),
                         message: msg.message.clone(),
                     }));
@@ -227,7 +254,7 @@ impl TsAdapter {
     }
 
     pub async fn poke(&self, clid: u32, msg: &str) -> Result<()> {
-        tsclient_rs::poke(&self.client, clid as i32, msg)
+        tsclient_rs::poke(&self.client, checked_client_id(clid)?, msg)
             .await
             .map_err(|e| anyhow!("poke failed: {e}"))
     }
@@ -235,7 +262,7 @@ impl TsAdapter {
     pub async fn kick(&self, clid: u32, reason: &str) -> Result<()> {
         tsclient_rs::clientKick(
             &self.client,
-            clid as i32,
+            checked_client_id(clid)?,
             tsclient_rs::KickReason::Server,
             reason,
         )
@@ -244,15 +271,20 @@ impl TsAdapter {
     }
 
     pub async fn ban(&self, clid: u32, time_secs: u64, reason: &str) -> Result<()> {
-        tsclient_rs::banClient(&self.client, clid as i32, time_secs, reason)
+        tsclient_rs::banClient(&self.client, checked_client_id(clid)?, time_secs, reason)
             .await
             .map_err(|e| anyhow!("banClient failed: {e}"))
     }
 
     pub async fn move_client(&self, clid: u32, channel_id: u32) -> Result<()> {
-        tsclient_rs::clientMove(&self.client, clid as i32, channel_id as u64, "")
-            .await
-            .map_err(|e| anyhow!("clientMove failed: {e}"))
+        tsclient_rs::clientMove(
+            &self.client,
+            checked_client_id(clid)?,
+            u64::from(channel_id),
+            "",
+        )
+        .await
+        .map_err(|e| anyhow!("clientMove failed: {e}"))
     }
 
     pub async fn list_channels(&self) -> Result<Vec<tsclient_rs::ChannelInfo>> {
@@ -271,9 +303,14 @@ impl TsAdapter {
         &self,
         clid: u32,
     ) -> Result<std::collections::HashMap<String, String>> {
-        tsclient_rs::getClientInfo(&self.client, clid as i32)
+        tsclient_rs::getClientInfo(&self.client, checked_client_id(clid)?)
             .await
             .map_err(|e| anyhow!("getClientInfo failed: {e}"))
+    }
+
+    pub async fn get_client_channel_group_id(&self, clid: u32) -> Result<u32> {
+        let info = self.get_client_info(clid).await?;
+        parse_client_channel_group_id(&info)
     }
 
     pub async fn quit(&self) -> Result<()> {
@@ -304,4 +341,29 @@ pub enum TextMessageTarget {
     Private,
     Channel,
     Server,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_client_channel_group_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn parses_nonzero_client_channel_group_id() {
+        let info = HashMap::from([("client_channel_group_id".to_string(), "42".to_string())]);
+
+        assert_eq!(parse_client_channel_group_id(&info).unwrap(), 42);
+    }
+
+    #[test]
+    fn rejects_missing_client_channel_group_id() {
+        assert!(parse_client_channel_group_id(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_client_channel_group_id() {
+        let info = HashMap::from([("client_channel_group_id".to_string(), "invalid".to_string())]);
+
+        assert!(parse_client_channel_group_id(&info).is_err());
+    }
 }

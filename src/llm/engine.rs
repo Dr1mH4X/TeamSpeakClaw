@@ -7,10 +7,12 @@ use crate::llm::tool_loop::{
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 pub struct LlmEngine {
     provider: Box<dyn LlmProvider>,
     context: ContextWindow,
+    request_limit: Semaphore,
 }
 
 impl LlmEngine {
@@ -18,7 +20,12 @@ impl LlmEngine {
         let cfg = &config;
         let provider = Box::new(OpenAiProvider::new(cfg.llm.clone()));
         let context = ContextWindow::new(cfg.llm.max_context_turns, cfg.llm.max_context_sessions);
-        Self { provider, context }
+        let request_limit = Semaphore::new(cfg.llm.max_concurrent_requests);
+        Self {
+            provider,
+            context,
+            request_limit,
+        }
     }
 
     pub async fn run_tool_loop(
@@ -28,6 +35,11 @@ impl LlmEngine {
         executor: &dyn ToolExecutor,
         callbacks: Option<&StreamCallbacks>,
     ) -> Result<ToolLoopResult, ToolLoopError> {
+        let _permit = self
+            .request_limit
+            .acquire()
+            .await
+            .map_err(|error| anyhow::anyhow!("LLM request limit closed: {error}"))?;
         run_tool_loop(messages, tools, self.provider.as_ref(), executor, callbacks).await
     }
 
