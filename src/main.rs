@@ -12,12 +12,14 @@ use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info};
 
+use crate::adapter::reconnect::{reconnect_delay, MAX_RECONNECT_ATTEMPTS};
+use crate::adapter::TsAdapter;
 use crate::cli::Args;
+use crate::config::{AppConfig, PromptsConfig};
+use crate::llm::LlmEngine;
+use crate::permission::PermissionGate;
+use crate::router::EventRouter;
 use crate::skills::SkillRegistry;
-use crate::{
-    adapter::TsAdapter, config::AppConfig, llm::LlmEngine, permission::PermissionGate,
-    router::EventRouter,
-};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,6 +37,38 @@ async fn main() -> Result<()> {
     let registry = Arc::new(SkillRegistry::with_defaults(config.clone()));
     let llm = Arc::new(LlmEngine::new(config.clone()));
 
+    for attempt in 0..MAX_RECONNECT_ATTEMPTS {
+        match run_instance(
+            config.clone(),
+            prompts.clone(),
+            gate.clone(),
+            registry.clone(),
+            llm.clone(),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt == MAX_RECONNECT_ATTEMPTS - 1 {
+                    error!(
+                        "All {MAX_RECONNECT_ATTEMPTS} reconnect attempts exhausted. Last error: {e}"
+                    );
+                    return Err(e);
+                }
+            }
+        }
+        tokio::time::sleep(reconnect_delay(attempt)).await;
+    }
+    unreachable!()
+}
+
+async fn run_instance(
+    config: Arc<AppConfig>,
+    prompts: Arc<PromptsConfig>,
+    gate: Arc<PermissionGate>,
+    registry: Arc<SkillRegistry>,
+    llm: Arc<LlmEngine>,
+) -> Result<()> {
     let adapter = TsAdapter::connect(config.clone()).await?;
 
     let nc_adapter = adapter::napcat::connect_if_enabled(config.clone()).await?;

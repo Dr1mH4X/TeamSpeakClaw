@@ -78,6 +78,9 @@ impl EventRouter {
                         this.handle_message(msg).await;
                     });
                 }
+                Ok(TsEvent::Disconnected) => {
+                    return Err(anyhow::anyhow!("TS connection lost"));
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!(skipped, "TS event router lagged; skipped buffered events");
                 }

@@ -1,3 +1,5 @@
+pub(crate) mod reconnect;
+
 pub mod headless;
 pub mod napcat;
 

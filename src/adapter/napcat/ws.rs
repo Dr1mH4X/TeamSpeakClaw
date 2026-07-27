@@ -55,12 +55,8 @@ pub struct NapCatAdapter {
 
 impl NapCatAdapter {
     pub async fn connect(config: NapCatConfig) -> Result<Arc<Self>> {
-        const MAX_RETRIES: u32 = 10;
-        const BASE_DELAY_MS: u64 = 1000;
-
-        let mut delay = Duration::from_millis(BASE_DELAY_MS);
         let mut result = None;
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
             match Self::try_connect(config.clone()).await {
                 Ok(r) => {
                     result = Some(r);
@@ -70,16 +66,21 @@ impl NapCatAdapter {
                     warn!(
                         "[{}/{}] NapCat connect failed: {}",
                         attempt + 1,
-                        MAX_RETRIES,
+                        crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS,
                         e
                     );
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(60));
+                    tokio::time::sleep(
+                        crate::adapter::reconnect::reconnect_delay(attempt),
+                    )
+                    .await;
                 }
             }
         }
         let (adapter, reconnect_rx) = result.ok_or_else(|| {
-            anyhow::anyhow!("NapCat: max reconnect attempts reached ({MAX_RETRIES})")
+            anyhow::anyhow!(
+                "NapCat: max reconnect attempts reached ({})",
+                crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS
+            )
         })?;
 
         let weak = Arc::downgrade(&adapter);
@@ -95,8 +96,7 @@ impl NapCatAdapter {
             *adapter.writer.lock().await = None;
             drop(adapter);
 
-            let mut delay = Duration::from_secs(1);
-            let mut attempt = 1u32;
+            let mut attempt = 0u32;
             loop {
                 let Some(adapter) = weak.upgrade() else {
                     return;
@@ -110,12 +110,24 @@ impl NapCatAdapter {
                         break;
                     }
                     Err(e) => {
-                        warn!("[{attempt}] NapCat reconnect failed: {e}");
-                        if !wait_for_retry_or_closed(&mut rx, delay).await {
+                        warn!(
+                            "[{}/{}] NapCat reconnect failed: {}",
+                            attempt + 1,
+                            crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS,
+                            e
+                        );
+                        attempt += 1;
+                        if attempt >= crate::adapter::reconnect::MAX_RECONNECT_ATTEMPTS {
                             return;
                         }
-                        delay = (delay * 2).min(Duration::from_secs(60));
-                        attempt = attempt.saturating_add(1);
+                        if !wait_for_retry_or_closed(
+                            &mut rx,
+                            crate::adapter::reconnect::reconnect_delay(attempt - 1),
+                        )
+                        .await
+                        {
+                            return;
+                        }
                     }
                 }
             }
