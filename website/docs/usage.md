@@ -115,12 +115,6 @@ TeamSpeakClaw 支持三种音乐后端：
 - **戳一戳** (poke_client): "戳一下 UserA"
 - **发送消息** (send_message): "给 UserA 发私信说你好"
 
-#### `send_message` 跨平台路由说明
-
-- TeamSpeak 场景：支持 `mode=private|channel|server`。
-- NapCat 场景：默认走 NapCat 原生发送，支持 `mode=private|group`。
-- 若希望从 NapCat 显式转发到 TeamSpeak，请传入 `ts_route=true`，此时支持 `mode=private|channel|server`（`private` 需 `clid`）。
-
 ### ℹ️ 信息查询
 
 - **查询用户信息** (get_client_info): "UserA 的详细信息"

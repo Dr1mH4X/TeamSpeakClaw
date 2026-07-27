@@ -65,7 +65,7 @@ sidebar_position: 3
 `[music_backend]` 区段控制音乐功能使用哪个后端：
 
 | 值 | 说明 |
-|---|---|---|
+|---|---|
 | `ts3audiobot` | （配置示例）通过 TS 私信控制 TS3AudioBot，需确保音乐机器人昵称为 `TS3AudioBot` |
 | `tsmusicbot` | 通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) |
 | `tsbot_backend` | 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)，需设置 `base_url` |
@@ -106,7 +106,6 @@ sidebar_position: 3
 
 - `enabled = false` 时，程序仅运行 TeamSpeak 路由，不会因 NapCat 分支提前退出。
 - 群聊受 `listen_groups` 与 trusted 规则影响；私聊仅接受 `trusted_users` 列表中的用户。
-- `send_message` 在 NapCat 上默认走 NapCat 发送；如需显式走 TeamSpeak，请在工具参数里传 `ts_route=true`。
 
 ### NapCat 权限映射（ACL）
 
