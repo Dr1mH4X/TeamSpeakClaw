@@ -24,24 +24,27 @@ src/
 ├── adapter/
 │   ├── reconnect.rs         # Reconnection constants & helpers
 │   ├── headless.rs          # gRPC voice bridge root
-│   ├── headless/            # gRPC voice bridge (actor, event, speech, voice_service)
+│   ├── headless/            # gRPC voice bridge (actor, event, speech, text_util, voice_service)
 │   ├── napcat.rs            # OneBot 11 WebSocket root
 │   └── napcat/              # OneBot 11 WebSocket (api, ws, event, types)
 ├── llm.rs                   # OpenAI-compatible LLM engine, context, tool loop
 ├── llm/                     # Sub-modules (context, engine, provider, tool_loop)
 ├── permission.rs            # ACL-based permission gate
 ├── permission/              # Sub-modules (gate)
-└── skills.rs                # Skill system root
-└── skills/                  # Skill system (music, moderation, information, ...)
-    ├── music.rs             # Music skill root
-    └── music/               # Music backends (ts3audiobot, tsbot_http, tsmusicbot)
+├── skills.rs                # Skill system root
+├── skills/                  # Skill system (music, moderation, information, ...)
+│   ├── music.rs             # Music skill root
+│   └── music/               # Music backends (ts3audiobot, tsbot_http, tsmusicbot)
+└── test/                    # Integration tests included via include!()
+    └── text_util.rs         # split_message tests
 ```
 
 ## Critical Code Paths
 
-- **Audio/STT dual path**: `voice_router.rs` has `handle_audio_event` (separate STT → text LLM) and `handle_omni_audio_event` (raw audio to multimodal LLM). Controlled by `llm.omni_model` config. Both need changes when modifying audio/STT logic.
-- **Music bot filter**: `voice_router.rs:271-275` skips audio frames from `music_backend.musicbot_name` so they never reach STT.
-- **Voice vs text routing**: When headless STT or TTS is enabled, `ts_router.rs:236-238` skips handling text messages (they're handled by `voice_router.rs` instead).
+- `voice_router.rs`: audio/STT dual path, music bot audio filter
+- `ts_router.rs:236-238`: skips text messages when STT/TTS enabled
+- `text_util.rs:split_message()` + `MAX_MESSAGE_BYTES`: splits long messages at 8192-byte TS3 limit (utf-8 safe, whitespace-preferred)
+- `event.rs:send_text_message()` / `actor.rs:notice_rx`: two send paths both go through split_message
 
 ## Build Dependencies
 
