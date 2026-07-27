@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_slog::TracingSlogDrain;
 use tracing_subscriber::{
-    fmt::{self, time::LocalTime},
+    fmt::{self, format::Writer, time::FormatTime},
     layer::SubscriberExt,
     util::SubscriberInitExt,
     EnvFilter, Layer,
@@ -44,6 +44,14 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
     }
 }
 
+struct CustomTime;
+
+impl FormatTime for CustomTime {
+    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
+
 pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
     let noise_directives = [
         "h2=off",
@@ -62,7 +70,7 @@ pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
     let console_layer = fmt::layer()
         .with_target(true)
         .compact()
-        .with_timer(LocalTime::rfc_3339())
+        .with_timer(CustomTime)
         .with_filter(console_filter);
 
     let log_dir: PathBuf = crate::config::exe_dir().join("logs");
@@ -82,7 +90,7 @@ pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
     let file_layer = fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_timer(LocalTime::rfc_3339())
+        .with_timer(CustomTime)
         .with_filter(file_filter);
 
     tracing_subscriber::registry()
