@@ -44,11 +44,13 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
     }
 }
 
+const TIMESTAMP_FMT: &str = "%Y-%m-%d %H:%M:%S";
+
 struct CustomTime;
 
 impl FormatTime for CustomTime {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+        write!(w, "{}", chrono::Local::now().format(TIMESTAMP_FMT))
     }
 }
 
