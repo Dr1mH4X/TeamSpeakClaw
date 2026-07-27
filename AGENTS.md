@@ -22,6 +22,7 @@ src/
 ├── router/                  # Sub-modules (ts_router, nc_router, voice_router, unified)
 ├── adapter.rs               # Re-exports TsAdapter, TsEvent (from headless)
 ├── adapter/
+│   ├── reconnect.rs         # Reconnection constants & helpers
 │   ├── headless.rs          # gRPC voice bridge root
 │   ├── headless/            # gRPC voice bridge (actor, event, speech, voice_service)
 │   ├── napcat.rs            # OneBot 11 WebSocket root
