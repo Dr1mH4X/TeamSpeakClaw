@@ -10,7 +10,7 @@ use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{ReplyPolicy, UnifiedInboundEvent, strip_trigger_prefix};
 use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use serde_json::json;
@@ -322,13 +322,7 @@ impl NcRouter {
     }
 
     fn strip_prefix<'a>(&self, text: &'a str) -> &'a str {
-        let nc = &self.config.napcat;
-        for p in &nc.trigger_prefixes {
-            if let Some(rest) = text.strip_prefix(p.as_str()) {
-                return rest.trim();
-            }
-        }
-        text
+        strip_trigger_prefix(text, &self.config.napcat.trigger_prefixes).unwrap_or(text)
     }
 
     /// 执行单个工具调用，返回结果字符串
@@ -410,7 +404,7 @@ impl NcRouter {
                             json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
                         })
                         .collect();
-                    info!("Fetched {} online clients for LLM context", clients.len());
+                    debug!("Fetched {} online clients for LLM context", clients.len());
                     format!(
                         "\nOnline: {}",
                         serde_json::to_string(&arr).unwrap_or_default()

@@ -150,7 +150,7 @@ impl Skill for SendMessage {
 
         Ok(json!({
             "status": "ok",
-            "message": format!("Message sent successfully in {} mode", mode)
+            "message": format!("Message sent in {} mode: {}", mode, msg)
         }))
     }
 
@@ -273,7 +273,7 @@ impl Skill for SendMessage {
                             nc_adapter.send_private(target, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
-                                "message": "Private message sent",
+                                "message": format!("Private message sent: {}", msg),
                                 "platform": "napcat",
                                 "routed_by": "default"
                             }))
@@ -288,7 +288,7 @@ impl Skill for SendMessage {
                             nc_adapter.send_group(group_id, &segs).await?;
                             Ok(json!({
                                 "status": "ok",
-                                "message": "Group message sent",
+                                "message": format!("Group message sent: {}", msg),
                                 "platform": "napcat",
                                 "routed_by": "default"
                             }))
