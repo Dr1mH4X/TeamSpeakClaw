@@ -49,8 +49,8 @@ pub async fn ts3_actor(
             let (msg_content, should_trigger_llm) = if target_mode == 1 && respond_private {
                 (raw_content, true)
             } else {
-                match bot_trigger_prefixes.iter().find(|p| raw_content.starts_with(p.as_str())) {
-                    Some(prefix) => (raw_content[prefix.len()..].trim().to_string(), true),
+                match crate::router::strip_trigger_prefix(&raw_content, &bot_trigger_prefixes) {
+                    Some(stripped) => (stripped.to_string(), true),
                     None => (raw_content, false),
                 }
             };
