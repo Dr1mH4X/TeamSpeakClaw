@@ -410,7 +410,7 @@ impl NcRouter {
                             json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
                         })
                         .collect();
-                    info!("Fetched {} online clients for LLM context", clients.len());
+                    debug!("Fetched {} online clients for LLM context", clients.len());
                     format!(
                         "\nOnline: {}",
                         serde_json::to_string(&arr).unwrap_or_default()
