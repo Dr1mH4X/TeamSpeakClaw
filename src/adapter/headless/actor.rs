@@ -1,9 +1,8 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -25,52 +24,8 @@ pub async fn ts3_actor(
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
 
     let mut send_tick = tokio::time::interval(Duration::from_millis(20));
-    let client_names = Arc::new(DashMap::<i32, String>::new());
 
-    let enter_names = client_names.clone();
-    client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
-        if let tsclient_rs::Event::ClientEnter(client) = event {
-            enter_names.insert(client.id, client.nickname);
-        }
-    }));
-
-    let leave_names = client_names.clone();
-    client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
-        if let tsclient_rs::Event::ClientLeave(client) = event {
-            leave_names.remove(&client.id);
-        }
-    }));
-
-    // voice data → AudioFrameEvent
-    let events_tx_v = events_tx.clone();
-    let voice_names = client_names.clone();
-    client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
-        if let tsclient_rs::Event::VoiceData(ref vd) = event {
-            let Ok(from_client_id) = u32::try_from(vd.client_id) else {
-                warn!(
-                    client_id = vd.client_id,
-                    "忽略调用者 ID 无效的 TeamSpeak 音频帧"
-                );
-                return;
-            };
-            let from_client_name = voice_names
-                .get(&vd.client_id)
-                .map(|name| name.clone())
-                .unwrap_or_default();
-            let _ = events_tx_v.send(voicev1::Event {
-                unix_ms: now_unix_ms(),
-                payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
-                    from_client_id,
-                    from_client_name,
-                    codec: vd.codec,
-                    is_whisper: false,
-                    frame: vd.data.to_vec(),
-                })),
-            });
-        }
-    }));
-
-    // text message → ChatEvent (for TTS via voice_router)
+    // 先注册 text handler，避免丢消息
     let events_tx_t = events_tx.clone();
     let respond_private = bot_respond_to_private;
     let reply_mode = bot_default_reply_mode.clone();
@@ -123,14 +78,45 @@ pub async fn ts3_actor(
         }
     }));
 
-    match tsclient_rs::listClients(&client).await {
-        Ok(clients) => {
-            for client in clients {
-                client_names.insert(client.id, client.nickname);
+    // 启动时 listClients 一次，填充 name 映射供 voice handler 使用
+    let client_names: Arc<HashMap<i32, String>> = Arc::new(
+        match tsclient_rs::listClients(&client).await {
+            Ok(clients) => clients.into_iter().map(|c| (c.id, c.nickname)).collect(),
+            Err(e) => {
+                warn!("初始化 TeamSpeak 客户端名称失败: {e}");
+                HashMap::new()
             }
+        },
+    );
+
+    // voice data → AudioFrameEvent
+    let events_tx_v = events_tx.clone();
+    let voice_names = client_names;
+    client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
+        if let tsclient_rs::Event::VoiceData(ref vd) = event {
+            let Ok(from_client_id) = u32::try_from(vd.client_id) else {
+                warn!(
+                    client_id = vd.client_id,
+                    "忽略调用者 ID 无效的 TeamSpeak 音频帧"
+                );
+                return;
+            };
+            let from_client_name = voice_names
+                .get(&vd.client_id)
+                .cloned()
+                .unwrap_or_default();
+            let _ = events_tx_v.send(voicev1::Event {
+                unix_ms: now_unix_ms(),
+                payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
+                    from_client_id,
+                    from_client_name,
+                    codec: vd.codec,
+                    is_whisper: false,
+                    frame: vd.data.to_vec(),
+                })),
+            });
         }
-        Err(e) => warn!("初始化 TeamSpeak 客户端名称缓存失败: {e}"),
-    }
+    }));
 
     loop {
         tokio::select! {
