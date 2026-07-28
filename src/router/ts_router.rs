@@ -10,7 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct SqExecutor<'a> {
     router: &'a EventRouter,
@@ -199,7 +199,7 @@ impl EventRouter {
                     .find(|c| c.id as u32 == event.invoker_id)
                     .map(|c| c.channel_id)
                     .unwrap_or(0);
-                info!("Fetched {} online clients for LLM context", clients.len());
+                debug!("Fetched {} online clients for LLM context", clients.len());
                 (
                     serde_json::to_string(&arr).unwrap_or_default(),
                     invoker_chan,
