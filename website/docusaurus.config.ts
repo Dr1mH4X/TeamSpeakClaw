@@ -79,7 +79,7 @@ const config: Config = {
           position: "left",
           label: "文档",
         },
-        { href: "https://dreamhax.cc", label: "博客", position: "left" },
+        { href: "https://blog.dreamhax.cc", label: "博客", position: "left" },
         {
           type: "localeDropdown",
           position: "right",
