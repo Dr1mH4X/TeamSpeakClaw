@@ -1,9 +1,11 @@
 mod nc_router;
+mod trigger;
 mod ts_router;
 mod unified;
 mod voice_router;
 
 pub use nc_router::NcRouter;
+pub use trigger::strip_trigger_prefix;
 pub use ts_router::EventRouter;
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 pub use voice_router::VoiceRouter;

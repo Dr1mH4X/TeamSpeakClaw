@@ -2,6 +2,7 @@ use crate::adapter::napcat::event::{GroupMessageEvent, PrivateMessageEvent};
 use crate::adapter::napcat::types::segments_to_text;
 use crate::adapter::{TextMessageEvent, TextMessageTarget};
 use crate::config::AppConfig;
+use crate::router::strip_trigger_prefix;
 
 #[derive(Debug, Clone)]
 pub enum InboundSource {
@@ -49,8 +50,8 @@ impl UnifiedInboundEvent {
         let (text, should_trigger_llm) = if is_private && config.bot.respond_to_private {
             (msg_content.to_string(), true)
         } else {
-            match config.bot.trigger_prefixes.iter().find(|p| msg_content.starts_with(p.as_str())) {
-                Some(prefix) => (msg_content[prefix.len()..].trim().to_string(), true),
+            match strip_trigger_prefix(msg_content, &config.bot.trigger_prefixes) {
+                Some(stripped) => (stripped.to_string(), true),
                 None => (msg_content.to_string(), false),
             }
         };
