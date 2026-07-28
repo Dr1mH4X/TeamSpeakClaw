@@ -40,7 +40,7 @@ export default function Home(): React.JSX.Element {
       title={translate({ id: "homepage.title", message: "首页" })}
       description={translate({
         id: "homepage.description",
-        message: "极简 TS3 机器人",
+        message: "TeamSpeak Agent",
       })}
     >
       <HomepageHeader />
@@ -79,7 +79,7 @@ export default function Home(): React.JSX.Element {
               }
               description={
                 <Translate id="homepage.features.cloudMusic.description">
-                  无缝集成 TSMusicBot 和 NeteaseTSBot 等外部音乐机器人。
+                  无缝集成 TSMusicBot 等外部音乐机器人。
                 </Translate>
               }
             />
