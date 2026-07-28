@@ -45,11 +45,15 @@ pub async fn ts3_actor(
                 );
                 return;
             };
-            let msg_content = msg.message.trim().to_string();
-            let should_trigger_llm = (target_mode == 1 && respond_private)
-                || bot_trigger_prefixes
-                    .iter()
-                    .any(|prefix| msg_content.starts_with(prefix));
+            let raw_content = msg.message.trim().to_string();
+            let (msg_content, should_trigger_llm) = if target_mode == 1 && respond_private {
+                (raw_content, true)
+            } else {
+                match crate::router::strip_trigger_prefix(&raw_content, &bot_trigger_prefixes) {
+                    Some(stripped) => (stripped.to_string(), true),
+                    None => (raw_content, false),
+                }
+            };
             let (reply_target_mode, reply_target_client_id) = if target_mode == 1 {
                 (1, invoker_client_id)
             } else {
