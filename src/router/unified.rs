@@ -45,12 +45,15 @@ impl UnifiedInboundEvent {
         }
 
         let is_private = event.target_mode == TextMessageTarget::Private;
-        let should_trigger_llm = is_private && config.bot.respond_to_private
-            || config
-                .bot
-                .trigger_prefixes
-                .iter()
-                .any(|prefix| msg_content.starts_with(prefix));
+
+        let (text, should_trigger_llm) = if is_private && config.bot.respond_to_private {
+            (msg_content.to_string(), true)
+        } else {
+            match config.bot.trigger_prefixes.iter().find(|p| msg_content.starts_with(p.as_str())) {
+                Some(prefix) => (msg_content[prefix.len()..].trim().to_string(), true),
+                None => (msg_content.to_string(), false),
+            }
+        };
 
         let reply_policy = if is_private {
             ReplyPolicy::TeamSpeak {
@@ -78,7 +81,7 @@ impl UnifiedInboundEvent {
             source: InboundSource::TeamSpeakText,
             sender_id: event.invoker_id.to_string(),
             sender_name: event.invoker_name.clone(),
-            text: msg_content.to_string(),
+            text,
             should_trigger_llm,
             should_respond: should_trigger_llm,
             reply_policy,
