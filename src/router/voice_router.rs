@@ -411,8 +411,11 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
+        if !chat.should_trigger_llm {
+            return Ok(());
+        }
         let ctx = self.resolve_caller_from_chat(&chat).await?;
-        if self.should_ignore_chat(&chat, ctx.caller_id) || !chat.should_trigger_llm {
+        if self.should_ignore_chat(&chat, ctx.caller_id) {
             return Ok(());
         }
         let Some(clean_text) = preprocess_text_message(&chat.message) else {
@@ -723,7 +726,7 @@ impl VoiceRouter {
                     .iter()
                     .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
                     .collect();
-                info!("Fetched {} online clients for LLM context", clients.len());
+                debug!("Fetched {} online clients for LLM context", clients.len());
                 serde_json::to_string(&arr).unwrap_or_default()
             }
             Err(e) => {
