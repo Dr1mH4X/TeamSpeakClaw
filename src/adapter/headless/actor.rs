@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,6 +10,22 @@ use tracing::warn;
 use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::now_unix_ms;
+
+/// 客户端目录：clid -> (uid, nickname)，随 listClients 周期刷新
+type ClientDirectory = Arc<Mutex<HashMap<i32, (String, String)>>>;
+
+async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient_rs::Client) {
+    match tsclient_rs::listClients(client).await {
+        Ok(clients) => {
+            let mut dir = directory.lock().expect("client directory poisoned");
+            dir.clear();
+            for c in clients {
+                dir.insert(c.id, (c.uid, c.nickname));
+            }
+        }
+        Err(e) => warn!("刷新 TeamSpeak 客户端目录失败: {e}"),
+    }
+}
 
 pub async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
@@ -85,19 +101,13 @@ pub async fn ts3_actor(
     // text handler 注册完成后置位 actor 就绪，避免文本被过早路由到 bridge 而丢失
     bridge_state.set_actor_ready(true);
 
-    // 启动时 listClients 一次，填充 name 映射供 voice handler 使用
-    let client_names: Arc<HashMap<i32, String>> =
-        Arc::new(match tsclient_rs::listClients(&client).await {
-            Ok(clients) => clients.into_iter().map(|c| (c.id, c.nickname)).collect(),
-            Err(e) => {
-                warn!("初始化 TeamSpeak 客户端名称失败: {e}");
-                HashMap::new()
-            }
-        });
+    // 建立客户端目录：clid -> (uid, nickname)，供 voice handler 与周期刷新使用
+    let client_directory: ClientDirectory = Arc::new(Mutex::new(HashMap::new()));
+    refresh_client_directory(&client_directory, &client).await;
 
     // voice data → AudioFrameEvent
     let events_tx_v = events_tx.clone();
-    let voice_names = client_names;
+    let voice_directory = client_directory.clone();
     client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::VoiceData(ref vd) = event {
             let Ok(from_client_id) = u32::try_from(vd.client_id) else {
@@ -107,12 +117,18 @@ pub async fn ts3_actor(
                 );
                 return;
             };
-            let from_client_name = voice_names.get(&vd.client_id).cloned().unwrap_or_default();
+            let (from_client_uid, from_client_name) = voice_directory
+                .lock()
+                .expect("client directory poisoned")
+                .get(&vd.client_id)
+                .cloned()
+                .unwrap_or_default();
             let _ = events_tx_v.send(voicev1::Event {
                 unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
                     from_client_name,
+                    from_client_uid,
                     codec: vd.codec,
                     is_whisper: false,
                     frame: vd.data.to_vec(),
@@ -121,10 +137,18 @@ pub async fn ts3_actor(
         }
     }));
 
+    // 周期刷新客户端目录，保证 clid 复用后 UID 不陈旧
+    let mut directory_refresh_tick = tokio::time::interval(Duration::from_secs(60));
+    directory_refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             _ = shutdown_token.cancelled() => {
                 break;
+            }
+
+            _ = directory_refresh_tick.tick() => {
+                refresh_client_directory(&client_directory, &client).await;
             }
 
             pkt = audio_rx.recv() => {
