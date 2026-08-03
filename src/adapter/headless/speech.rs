@@ -8,7 +8,7 @@ use audiopus::{Channels, SampleRate};
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::Value;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::config::AppConfig;
 use base64::Engine;
@@ -18,6 +18,7 @@ use super::tsbot::voice::v1 as voicev1;
 pub struct SpeechChunk {
     pub speaker_client_id: u32,
     pub speaker_name: String,
+    pub speaker_uid: String,
     pub pcm16_mono_16k: Vec<i16>,
 }
 
@@ -28,6 +29,8 @@ struct SpeakerState {
     speech_ms: u64,
     silence_ms: u64,
     last_seen: Instant,
+    /// 该 clid 当前的 UID；非空且与事件 UID 不一致时清空状态，防止 clid 复用串音
+    uid: String,
 }
 
 pub struct OpusSttPipeline {
@@ -66,6 +69,11 @@ impl OpusSttPipeline {
         });
     }
 
+    /// clid 复用且 UID 变化时，必须清空旧 decoder 与 PCM 防止串音
+    fn should_reset_for_identity_change(state_uid: &str, event_uid: &str) -> bool {
+        !event_uid.is_empty() && state_uid != event_uid
+    }
+
     pub fn process_audio_frame(
         &mut self,
         event: &voicev1::AudioFrameEvent,
@@ -95,6 +103,7 @@ impl OpusSttPipeline {
                     speech_ms: 0,
                     silence_ms: 0,
                     last_seen: now,
+                    uid: event.from_client_uid.clone(),
                 },
             );
         }
@@ -102,6 +111,24 @@ impl OpusSttPipeline {
             .speakers
             .get_mut(&event.from_client_id)
             .ok_or_else(|| anyhow!("speaker state missing"))?;
+
+        // clid 复用但 UID 变化时，清空旧 decoder 与 PCM，避免串音
+        if Self::should_reset_for_identity_change(&state.uid, &event.from_client_uid) {
+            warn!(
+                clid = event.from_client_id,
+                old_uid = %state.uid,
+                new_uid = %event.from_client_uid,
+                "speaker identity changed; resetting decoder and buffer"
+            );
+            state.decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo)
+                .map_err(|e| anyhow!("opus decoder re-init failed: {e}"))?;
+            state.pcm16_mono_16k.clear();
+            state.speaking = false;
+            state.speech_ms = 0;
+            state.silence_ms = 0;
+            state.uid = event.from_client_uid.clone();
+        }
+
         state.last_seen = now;
 
         let mut decoded = vec![0i16; 5760 * 2];
@@ -168,6 +195,7 @@ impl OpusSttPipeline {
         let chunk = SpeechChunk {
             speaker_client_id: event.from_client_id,
             speaker_name: event.from_client_name.clone(),
+            speaker_uid: event.from_client_uid.clone(),
             pcm16_mono_16k: std::mem::take(&mut state.pcm16_mono_16k),
         };
         state.speaking = false;
@@ -631,7 +659,7 @@ pub fn is_speakable(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_speech_api_key;
+    use super::{resolve_speech_api_key, OpusSttPipeline};
 
     #[test]
     fn explicit_speech_endpoint_does_not_inherit_llm_key() {
@@ -652,5 +680,20 @@ mod tests {
             resolve_speech_api_key("speech-secret", "https://speech.example/v1", "llm-secret"),
             "speech-secret"
         );
+    }
+
+    #[test]
+    fn same_uid_does_not_reset_speaker_state() {
+        assert!(!OpusSttPipeline::should_reset_for_identity_change("uid-a", "uid-a"));
+    }
+
+    #[test]
+    fn uid_change_resets_speaker_state() {
+        assert!(OpusSttPipeline::should_reset_for_identity_change("uid-a", "uid-b"));
+    }
+
+    #[test]
+    fn empty_event_uid_never_resets_speaker_state() {
+        assert!(!OpusSttPipeline::should_reset_for_identity_change("uid-a", ""));
     }
 }
