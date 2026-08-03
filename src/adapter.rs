@@ -184,7 +184,7 @@ async fn run_connected_session(
         voice_bridge_state.clone(),
     );
 
-    let headless_runtime = headless::Runtime::start(
+    let headless_runtime = match headless::Runtime::start(
         context.config.clone(),
         context.prompts.clone(),
         context.gate.clone(),
@@ -192,22 +192,79 @@ async fn run_connected_session(
         context.registry.clone(),
         adapter.clone(),
         voice_bridge_state,
-    );
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            error!("Headless runtime failed to start: {error}");
+            napcat_shutdown.cancel();
+            disconnect_adapter(&adapter).await;
+            return SessionCompletion::initialization(Err(error));
+        }
+    };
 
-    let result = crate::router::run_routers(
+    // 路由期间同时观察 NapCat supervisor 与 headless 组件的异常退出
+    let nc_supervisor_status = nc_adapter.as_ref().map(|adapter| adapter.supervisor_status());
+    let routers = crate::router::run_routers(
         context,
         adapter.clone(),
         ts_router,
         nc_adapter.clone(),
         shutdown,
-    )
-    .await;
+    );
+    tokio::pin!(routers);
+
+    let result = tokio::select! {
+        biased;
+        result = &mut routers => result,
+        nc_exit = wait_nc_supervisor_failure(nc_supervisor_status) => {
+            warn!("NapCat supervisor exited unexpectedly ({nc_exit:?}); ending session to trigger reconnection");
+            Ok(RouterExit::TeamSpeakDisconnected)
+        }
+        component = wait_headless_failure(headless_runtime.failure_receiver()) => {
+            error!("Headless component {component} failed; ending session to trigger reconnection");
+            Err(anyhow::anyhow!("headless component {component} failed"))
+        }
+    };
 
     shutdown_napcat(nc_adapter.as_deref(), &napcat_shutdown).await;
     headless_runtime.shutdown().await;
     disconnect_adapter(&adapter).await;
 
     SessionCompletion::running(result)
+}
+
+/// 等待 NapCat supervisor 异常退出信号；NapCat 禁用时永不触发
+async fn wait_nc_supervisor_failure(
+    status: Option<watch::Receiver<Option<napcat::ConnectionExit>>>,
+) -> napcat::ConnectionExit {
+    let Some(mut status) = status else {
+        return std::future::pending::<napcat::ConnectionExit>().await;
+    };
+    loop {
+        if let Some(exit) = *status.borrow() {
+            return exit;
+        }
+        match status.changed().await {
+            Ok(()) => {}
+            // 通道关闭（sender 随 adapter 销毁）视为异常退出，fail-closed
+            Err(_) => return napcat::ConnectionExit::Disconnected,
+        }
+    }
+}
+
+/// 等待 headless 组件失败信号；正常状态或通道关闭视为无失败
+async fn wait_headless_failure(mut status: watch::Receiver<Option<&'static str>>) -> &'static str {
+    loop {
+        if let Some(component) = *status.borrow() {
+            return component;
+        }
+        match status.changed().await {
+            Ok(()) => {}
+            Err(_) => return "headless runtime",
+        }
+    }
 }
 
 struct SessionCompletion {
@@ -316,9 +373,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        wait_for_initialization, wait_with_timeout, InitializationWait, SessionCompletion,
-        TimedWait,
+        wait_for_initialization, wait_headless_failure, wait_nc_supervisor_failure,
+        wait_with_timeout, InitializationWait, SessionCompletion, TimedWait,
     };
+    use crate::adapter::napcat::ConnectionExit;
     use crate::router::RouterExit;
     use std::future::pending;
     use std::time::Duration;
@@ -368,5 +426,47 @@ mod tests {
         let outcome = wait_with_timeout(pending::<()>(), Duration::from_millis(1)).await;
 
         assert!(matches!(outcome, TimedWait::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn nc_supervisor_abnormal_signal_wakes_observation() {
+        let (tx, rx) = watch::channel(None);
+        tx.send(Some(ConnectionExit::Disconnected)).unwrap();
+
+        let exit = wait_nc_supervisor_failure(Some(rx)).await;
+
+        assert_eq!(exit, ConnectionExit::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn nc_supervisor_clean_shutdown_never_wakes_observation() {
+        let (tx, rx) = watch::channel(None);
+        let observation = tokio::spawn(wait_nc_supervisor_failure(Some(rx)));
+
+        tx.send(None).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(!observation.is_finished());
+        observation.abort();
+    }
+
+    #[tokio::test]
+    async fn nc_supervisor_observation_is_inert_when_napcat_disabled() {
+        let observation = tokio::spawn(wait_nc_supervisor_failure(None));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(!observation.is_finished());
+        observation.abort();
+    }
+
+    #[tokio::test]
+    async fn headless_component_failure_wakes_observation() {
+        let (tx, rx) = watch::channel(None);
+        tx.send(Some("headless service")).unwrap();
+
+        let component = wait_headless_failure(rx).await;
+
+        assert_eq!(component, "headless service");
     }
 }

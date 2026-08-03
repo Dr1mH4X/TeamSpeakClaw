@@ -18,7 +18,7 @@ use std::sync::{
     Arc, Weak,
 };
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{
     connect_async_tls_with_config,
@@ -38,9 +38,14 @@ type WsStream = futures_util::stream::SplitStream<WsConnection>;
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionExit {
+pub(crate) enum ConnectionExit {
     Cancelled,
     Disconnected,
+}
+
+/// 将 connection_loop 的失败标记映射为 supervisor 退出信号：正常退出为 None，异常退出为 Some
+fn supervisor_exit_signal(failed: bool) -> Option<ConnectionExit> {
+    failed.then_some(ConnectionExit::Disconnected)
 }
 
 fn parse_ws_url(value: &str) -> Result<url::Url> {
@@ -91,6 +96,8 @@ pub struct NapCatAdapter {
     active_generation: AtomicU64,
     last_signaled_generation: AtomicU64,
     runtime_task: Mutex<Option<JoinHandle<()>>>,
+    /// supervisor 退出状态通道：None 表示正常（运行中或正常关闭），Some 表示异常退出
+    supervisor_tx: watch::Sender<Option<ConnectionExit>>,
 }
 
 impl NapCatAdapter {
@@ -134,6 +141,7 @@ impl NapCatAdapter {
         let (sink, stream) = ws_stream.split();
         let (event_tx, _) = broadcast::channel::<NcEvent>(256);
         let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel::<u64>();
+        let (supervisor_tx, _) = watch::channel(None);
 
         let adapter = Arc::new(Self {
             writer: Mutex::new(Some(sink)),
@@ -146,6 +154,7 @@ impl NapCatAdapter {
             active_generation: AtomicU64::new(1),
             last_signaled_generation: AtomicU64::new(0),
             runtime_task: Mutex::new(None),
+            supervisor_tx,
         });
 
         let weak = Arc::downgrade(&adapter);
@@ -171,6 +180,8 @@ impl NapCatAdapter {
     ) {
         let mut retry = ReconnectState::default();
         retry.record_session_started();
+        // 标记 supervisor 是否异常退出（重连耗尽/状态失败），用于向上层上报
+        let mut failed = false;
 
         'runtime: loop {
             match Self::reader_loop(&weak, &mut stream, &mut reconnect_rx, generation, &shutdown)
@@ -205,6 +216,7 @@ impl NapCatAdapter {
                             Ok(generation) => generation,
                             Err(error) => {
                                 error!("NapCat reconnect state failed: {error}");
+                                failed = true;
                                 break 'runtime;
                             }
                         };
@@ -227,6 +239,7 @@ impl NapCatAdapter {
                         }
                         RetryDecision::Exhausted => {
                             error!("NapCat runtime reconnect state exhausted unexpectedly");
+                            failed = true;
                             break 'runtime;
                         }
                     },
@@ -236,6 +249,7 @@ impl NapCatAdapter {
 
         if let Some(adapter) = weak.upgrade() {
             adapter.mark_disconnected(generation).await;
+            adapter.report_supervisor_exit(failed);
         }
     }
 
@@ -540,6 +554,16 @@ impl NapCatAdapter {
         self.event_tx.subscribe()
     }
 
+    /// 上报 supervisor 退出状态：异常退出置位失败信号，正常关闭复位
+    fn report_supervisor_exit(&self, failed: bool) {
+        let _ = self.supervisor_tx.send(supervisor_exit_signal(failed));
+    }
+
+    /// 获取 supervisor 退出状态观察通道，供上层会话观察异常退出
+    pub(crate) fn supervisor_status(&self) -> watch::Receiver<Option<ConnectionExit>> {
+        self.supervisor_tx.subscribe()
+    }
+
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
         let generation = self.active_generation.load(Ordering::Acquire);
@@ -665,5 +689,34 @@ mod tests {
             parse_ws_url(&format!("://user:{secret}@host/path?access_token={secret}")).unwrap_err();
 
         assert!(!error.to_string().contains(secret));
+    }
+
+    #[test]
+    fn supervisor_exit_signal_maps_normal_and_abnormal_exit() {
+        assert_eq!(supervisor_exit_signal(false), None);
+        assert_eq!(
+            supervisor_exit_signal(true),
+            Some(ConnectionExit::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_status_channel_observes_abnormal_exit() {
+        let (tx, mut rx) = watch::channel(None::<ConnectionExit>);
+
+        tx.send(Some(ConnectionExit::Disconnected)).unwrap();
+
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow_and_update(), Some(ConnectionExit::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn supervisor_status_resets_to_normal_on_clean_shutdown() {
+        let (tx, mut rx) = watch::channel(Some(ConnectionExit::Disconnected));
+
+        tx.send(None).unwrap();
+
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow_and_update(), None);
     }
 }
