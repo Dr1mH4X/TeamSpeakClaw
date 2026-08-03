@@ -36,6 +36,7 @@ type WsConnection =
 type WsSink = futures_util::stream::SplitSink<WsConnection, Message>;
 type WsStream = futures_util::stream::SplitStream<WsConnection>;
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionExit {
@@ -483,6 +484,9 @@ impl NapCatAdapter {
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => Err(anyhow!("NapCat connection cancelled")),
+            _ = tokio::time::sleep(WS_HANDSHAKE_TIMEOUT) => {
+                Err(anyhow!("NapCat WebSocket handshake timed out after {}s", WS_HANDSHAKE_TIMEOUT.as_secs()))
+            }
             result = connect_async_tls_with_config(request, None, false, None) => {
                 let (ws_stream, _) = result
                     .map_err(|_| anyhow!("NapCat WebSocket handshake failed"))?;

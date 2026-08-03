@@ -114,6 +114,24 @@ pub async fn ts3_actor(
     let client_directory: ClientDirectory = Arc::new(Mutex::new(HashMap::new()));
     refresh_client_directory(&client_directory, &client).await;
 
+    // 进出频道通知即时更新目录，消除 clid 复用时的陈旧 UID 窗口
+    {
+        let enter_directory = client_directory.clone();
+        client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
+            if let tsclient_rs::Event::ClientEnter(ref info) = event {
+                let mut dir = enter_directory.lock().expect("client directory poisoned");
+                dir.insert(info.id, (info.uid.clone(), info.nickname.clone()));
+            }
+        }));
+        let leave_directory = client_directory.clone();
+        client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
+            if let tsclient_rs::Event::ClientLeave(ref info) = event {
+                let mut dir = leave_directory.lock().expect("client directory poisoned");
+                dir.remove(&info.id);
+            }
+        }));
+    }
+
     // voice data → AudioFrameEvent
     let audio_tx_v = channels.audio_tx.clone();
     let voice_directory = client_directory.clone();

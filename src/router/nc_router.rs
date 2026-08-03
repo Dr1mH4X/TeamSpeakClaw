@@ -8,7 +8,7 @@ use crate::adapter::napcat::{
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnPermit};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
 use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
@@ -169,7 +169,7 @@ impl NcRouter {
         let source = SessionSource::NapCatPrivate {
             user_id: msg.user_id,
         };
-        let Ok(permit) = llm.try_reserve_turn(&source).await else {
+        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
             warn!(
                 user_id = msg.user_id,
                 "NC LLM turn queue full; dropping message"
@@ -178,6 +178,7 @@ impl NcRouter {
         };
 
         tasks.spawn(async move {
+            let session = llm.acquire_turn_session(&source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -187,7 +188,7 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_private(msg, permit).await;
+            router.handle_private(msg, capacity, session).await;
         });
     }
 
@@ -203,7 +204,7 @@ impl NcRouter {
         let source = SessionSource::NapCatGroup {
             group_id: msg.group_id,
         };
-        let Ok(permit) = llm.try_reserve_turn(&source).await else {
+        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
             warn!(
                 group_id = msg.group_id,
                 "NC LLM turn queue full; dropping message"
@@ -212,6 +213,7 @@ impl NcRouter {
         };
 
         tasks.spawn(async move {
+            let session = llm.acquire_turn_session(&source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -221,11 +223,17 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_group(msg, permit).await;
+            router.handle_group(msg, capacity, session).await;
         });
     }
 
-    async fn handle_private(&self, msg: PrivateMessageEvent, _turn: TurnPermit) {
+    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
+    async fn handle_private(
+        &self,
+        msg: PrivateMessageEvent,
+        _capacity: TurnCapacityPermit,
+        _session: TurnSessionGuard,
+    ) {
         let Some(unified_event) = UnifiedInboundEvent::from_nc_private(&msg) else {
             return;
         };
@@ -282,7 +290,13 @@ impl NcRouter {
             .save_turn(&source, stripped.to_string(), reply_text);
     }
 
-    async fn handle_group(&self, msg: GroupMessageEvent, _turn: TurnPermit) {
+    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
+    async fn handle_group(
+        &self,
+        msg: GroupMessageEvent,
+        _capacity: TurnCapacityPermit,
+        _session: TurnSessionGuard,
+    ) {
         let triggered = self.is_triggered(&msg.message);
         let Some(unified_event) = UnifiedInboundEvent::from_nc_group(&msg, triggered) else {
             return;
