@@ -179,14 +179,19 @@ pub async fn run(
     let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
     let (ts3_notice_tx, ts3_notice_rx) = mpsc::channel::<(i32, u32, String)>(50);
 
-    let (events_tx, _events_rx) = broadcast::channel::<voicev1::Event>(512);
+    // 控制事件（chat/log）与音频事件分离广播：音频洪峰不能挤掉聊天
+    let (control_tx, _) = broadcast::channel::<voicev1::Event>(256);
+    let (audio_tx, _) = broadcast::channel::<voicev1::Event>(1024);
 
     let actor_bridge_state = bridge_state.clone();
     let mut actor_task = tokio::spawn(actor::ts3_actor(
         client,
         ts3_audio_rx,
         ts3_notice_rx,
-        events_tx.clone(),
+        actor::ActorEventChannels {
+            control_tx: control_tx.clone(),
+            audio_tx: audio_tx.clone(),
+        },
         shutdown.clone(),
         config.clone(),
         actor_bridge_state,
@@ -195,7 +200,8 @@ pub async fn run(
     let svc = voice_service::VoiceServiceImpl::new(
         ts3_audio_tx,
         ts3_notice_tx,
-        events_tx,
+        control_tx,
+        audio_tx,
         config.bot_default_reply_mode.clone(),
     );
 
