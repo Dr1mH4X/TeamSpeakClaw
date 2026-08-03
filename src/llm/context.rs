@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// 会话来源
 #[derive(Debug, Clone)]
@@ -15,14 +16,48 @@ pub enum SessionSource {
     Headless { uid: String },
 }
 
+impl SessionSource {
+    /// 返回跨适配器唯一且稳定的会话键。
+    pub(crate) fn canonical_key(&self) -> String {
+        match self {
+            SessionSource::TeamSpeak { uid } => format!("sq:{uid}"),
+            SessionSource::NapCatPrivate { user_id } => format!("nc:private:{user_id}"),
+            SessionSource::NapCatGroup { group_id } => format!("nc:group:{group_id}"),
+            SessionSource::Headless { uid } => format!("headless:{uid}"),
+        }
+    }
+}
+
 impl fmt::Display for SessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SessionSource::TeamSpeak { uid } => write!(f, "sq:{}", uid),
-            SessionSource::NapCatPrivate { user_id } => write!(f, "nc:private:{}", user_id),
-            SessionSource::NapCatGroup { group_id } => write!(f, "nc:group:{}", group_id),
-            SessionSource::Headless { uid } => write!(f, "headless:{}", uid),
-        }
+        f.write_str(&self.canonical_key())
+    }
+}
+
+/// 为每个规范会话键提供独立的串行锁。
+#[derive(Default)]
+pub(crate) struct TurnCoordinator {
+    locks: AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+}
+
+impl TurnCoordinator {
+    /// 获取当前会话的独占轮次锁，并在取锁前清理失效条目。
+    pub(crate) async fn acquire(&self, source: &SessionSource) -> OwnedMutexGuard<()> {
+        let session_lock = {
+            let mut locks = self.locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+
+            let key = source.canonical_key();
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+
+        session_lock.lock_owned().await
     }
 }
 
@@ -109,7 +144,7 @@ impl ContextWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::time::Duration;
 
     fn turn(value: usize) -> ContextTurn {
         ContextTurn {
@@ -136,6 +171,28 @@ mod tests {
     }
 
     #[test]
+    fn canonical_keys_separate_adapter_namespaces() {
+        let teamspeak = SessionSource::TeamSpeak {
+            uid: "42".to_string(),
+        };
+        let headless = SessionSource::Headless {
+            uid: "42".to_string(),
+        };
+        let private = SessionSource::NapCatPrivate { user_id: 42 };
+        let group = SessionSource::NapCatGroup { group_id: 42 };
+
+        let keys = [
+            teamspeak.canonical_key(),
+            headless.canonical_key(),
+            private.canonical_key(),
+            group.canonical_key(),
+        ];
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+
+        assert_eq!(unique.len(), keys.len());
+    }
+
+    #[test]
     fn concurrent_writes_respect_the_session_limit() {
         let context = Arc::new(ContextWindow::new(1, 4));
         let mut threads = Vec::new();
@@ -159,5 +216,68 @@ mod tests {
         let state = context.state.lock().unwrap();
         assert_eq!(state.histories.len(), 4);
         assert_eq!(state.histories.len(), state.session_order.len());
+    }
+
+    #[tokio::test]
+    async fn same_session_turns_are_serialized() {
+        let coordinator = Arc::new(TurnCoordinator::default());
+        let source = SessionSource::TeamSpeak {
+            uid: "same-user".to_string(),
+        };
+        let first_guard = coordinator.acquire(&source).await;
+
+        let waiting_coordinator = coordinator.clone();
+        let waiting_source = source.clone();
+        let mut waiter =
+            tokio::spawn(async move { waiting_coordinator.acquire(&waiting_source).await });
+
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err());
+
+        drop(first_guard);
+        let second_guard = tokio::time::timeout(Duration::from_millis(200), &mut waiter)
+            .await
+            .expect("same-session waiter must continue after the first turn")
+            .expect("same-session waiter task must succeed");
+        drop(second_guard);
+    }
+
+    #[tokio::test]
+    async fn different_sessions_can_run_concurrently() {
+        let coordinator = TurnCoordinator::default();
+        let first_source = SessionSource::TeamSpeak {
+            uid: "first-user".to_string(),
+        };
+        let second_source = SessionSource::TeamSpeak {
+            uid: "second-user".to_string(),
+        };
+        let _first_guard = coordinator.acquire(&first_source).await;
+
+        let second_guard = tokio::time::timeout(
+            Duration::from_millis(200),
+            coordinator.acquire(&second_source),
+        )
+        .await
+        .expect("different sessions must not block each other");
+        drop(second_guard);
+    }
+
+    #[tokio::test]
+    async fn stale_session_locks_are_removed_on_next_acquire() {
+        let coordinator = TurnCoordinator::default();
+        let first_source = SessionSource::Headless {
+            uid: "expired".to_string(),
+        };
+        let second_source = SessionSource::Headless {
+            uid: "active".to_string(),
+        };
+
+        let first_guard = coordinator.acquire(&first_source).await;
+        assert_eq!(coordinator.locks.lock().await.len(), 1);
+        drop(first_guard);
+
+        let _second_guard = coordinator.acquire(&second_source).await;
+        assert_eq!(coordinator.locks.lock().await.len(), 1);
     }
 }
