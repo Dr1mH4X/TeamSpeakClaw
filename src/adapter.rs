@@ -205,7 +205,9 @@ async fn run_connected_session(
     };
 
     // 路由期间同时观察 NapCat supervisor 与 headless 组件的异常退出
-    let nc_supervisor_status = nc_adapter.as_ref().map(|adapter| adapter.supervisor_status());
+    let nc_supervisor_status = nc_adapter
+        .as_ref()
+        .map(|adapter| adapter.supervisor_status());
     let routers = crate::router::run_routers(
         context,
         adapter.clone(),

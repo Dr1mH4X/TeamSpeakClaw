@@ -2,19 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct AclConfig {
     pub rules: Vec<AclRule>,
     pub acl: AclSettings,
-}
-
-impl Default for AclConfig {
-    fn default() -> Self {
-        Self {
-            rules: vec![],
-            acl: AclSettings::default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

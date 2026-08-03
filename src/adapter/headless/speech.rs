@@ -92,22 +92,21 @@ impl OpusSttPipeline {
             return Ok(None);
         }
 
-        if !self.speakers.contains_key(&event.from_client_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.speakers.entry(event.from_client_id)
+        {
             let decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo)
                 .map_err(|e| anyhow!("opus decoder init failed: {e}"))?;
-            self.speakers.insert(
-                event.from_client_id,
-                SpeakerState {
-                    decoder,
-                    pcm16_mono_16k: Vec::new(),
-                    speaking: false,
-                    speech_ms: 0,
-                    silence_ms: 0,
-                    last_seen: now,
-                    uid: event.from_client_uid.clone(),
-                    name: event.from_client_name.clone(),
-                },
-            );
+            e.insert(SpeakerState {
+                decoder,
+                pcm16_mono_16k: Vec::new(),
+                speaking: false,
+                speech_ms: 0,
+                silence_ms: 0,
+                last_seen: now,
+                uid: event.from_client_uid.clone(),
+                name: event.from_client_name.clone(),
+            });
         }
         let state = self
             .speakers
@@ -359,7 +358,7 @@ impl OpenAiSpeechProvider {
 
         // MiMo TTS: uses /chat/completions with audio field
         if tts.provider == "mimo" {
-            return self.synthesize_mimo(text, &api_key).await;
+            return self.synthesize_mimo(text, api_key).await;
         }
 
         // OpenAI-compatible format
@@ -582,10 +581,6 @@ fn is_openai_compatible_provider(provider: &str) -> bool {
 pub fn detect_audio_format(data: &[u8]) -> &'static str {
     if data.len() >= 4 && &data[0..4] == b"RIFF" {
         "wav"
-    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
-        "mp3"
-    } else if data.len() >= 1 && data[0] == 0xFF {
-        "mp3"
     } else {
         "mp3"
     }
@@ -752,23 +747,33 @@ mod tests {
 
     #[test]
     fn same_uid_does_not_reset_speaker_state() {
-        assert!(!OpusSttPipeline::should_reset_for_identity_change("uid-a", "uid-a"));
+        assert!(!OpusSttPipeline::should_reset_for_identity_change(
+            "uid-a", "uid-a"
+        ));
     }
 
     #[test]
     fn uid_change_resets_speaker_state() {
-        assert!(OpusSttPipeline::should_reset_for_identity_change("uid-a", "uid-b"));
+        assert!(OpusSttPipeline::should_reset_for_identity_change(
+            "uid-a", "uid-b"
+        ));
     }
 
     #[test]
     fn empty_event_uid_never_resets_speaker_state() {
-        assert!(!OpusSttPipeline::should_reset_for_identity_change("uid-a", ""));
+        assert!(!OpusSttPipeline::should_reset_for_identity_change(
+            "uid-a", ""
+        ));
     }
 
     fn speaker_state(speech_ms: u64, speaking: bool, buffered: bool) -> SpeakerState {
         SpeakerState {
             decoder: Decoder::new(SampleRate::Hz48000, Channels::Stereo).unwrap(),
-            pcm16_mono_16k: if buffered { vec![0i16; 160] } else { Vec::new() },
+            pcm16_mono_16k: if buffered {
+                vec![0i16; 160]
+            } else {
+                Vec::new()
+            },
             speaking,
             speech_ms,
             silence_ms: 0,

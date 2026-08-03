@@ -67,7 +67,7 @@ async fn accumulate_stream(
         match event? {
             LlmStreamEvent::Token(token) => {
                 text.push_str(&token);
-                if let Some(ref cb) = callbacks {
+                if let Some(cb) = callbacks {
                     if let Some(ref on_token) = cb.on_text_token {
                         on_token(&token).await;
                     }
@@ -79,7 +79,7 @@ async fn accumulate_stream(
             } => {
                 finish_reason = fr.clone();
                 tool_calls = tc;
-                if let Some(ref cb) = callbacks {
+                if let Some(cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
                         on_end(&finish_reason).await;
                     }

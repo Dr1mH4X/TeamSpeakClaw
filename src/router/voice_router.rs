@@ -73,9 +73,12 @@ fn should_close_tts_turn(finish_reason: &str) -> bool {
 }
 
 /// 每轮 TTS 运行时：持有合成与上传任务，正常结束 join，取消时 abort
+/// 句段发送端共享句柄：None 表示该轮已关闭
+type TtsSentenceSender = Arc<std::sync::Mutex<Option<mpsc::Sender<(usize, String)>>>>;
+
 struct TtsTurnRuntime {
     callbacks: StreamCallbacks,
-    shared_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<(usize, String)>>>>,
+    shared_tx: TtsSentenceSender,
     synth_task: tokio::task::JoinHandle<()>,
     upload_task: tokio::task::JoinHandle<()>,
     trace_id: String,
@@ -213,10 +216,10 @@ impl VoiceRouter {
         let mut tasks = JoinSet::new();
 
         // 完整 utterance 的独立有界队列：满时丢弃最新完整语音段，聊天不受影响
-        let (audio_chunk_tx, mut audio_chunk_rx) =
-            tokio::sync::mpsc::channel::<(voicev1::AudioFrameEvent, SpeechChunk)>(
-                AUDIO_MAX_IN_FLIGHT,
-            );
+        let (audio_chunk_tx, mut audio_chunk_rx) = tokio::sync::mpsc::channel::<(
+            voicev1::AudioFrameEvent,
+            SpeechChunk,
+        )>(AUDIO_MAX_IN_FLIGHT);
 
         let drain_router = router.clone();
         tasks.spawn(async move {
@@ -817,7 +820,7 @@ impl VoiceRouter {
             Self::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
             Self::STREAM_TTS_MAX_CHARS,
         )));
-        let shared_tx = Arc::new(std::sync::Mutex::new(Some(sentence_tx)));
+        let shared_tx: TtsSentenceSender = Arc::new(std::sync::Mutex::new(Some(sentence_tx)));
 
         let on_text_token_shared = shared_tx.clone();
         let on_text_token_chunker = chunker.clone();
@@ -835,11 +838,7 @@ impl VoiceRouter {
                         .collect()
                 };
                 // 取出发送端副本，避免 std MutexGuard 跨 await 存活导致 future 非 Send
-                let tx = shared
-                    .lock()
-                    .expect("tts tx poisoned")
-                    .as_ref()
-                    .cloned();
+                let tx = shared.lock().expect("tts tx poisoned").as_ref().cloned();
                 if let Some(tx) = tx {
                     for (index, segment) in segments {
                         if tx.send((index, segment)).await.is_err() {
@@ -1104,12 +1103,17 @@ mod tests {
         tx.try_send((audio.clone(), chunk)).unwrap();
 
         // 队列满：最新 utterance 被拒绝而非等待
-        assert!(tx.try_send((audio, SpeechChunk {
-            speaker_client_id: 2,
-            speaker_name: "b".to_string(),
-            speaker_uid: "uid-b".to_string(),
-            pcm16_mono_16k: Vec::new(),
-        })).is_err());
+        assert!(tx
+            .try_send((
+                audio,
+                SpeechChunk {
+                    speaker_client_id: 2,
+                    speaker_name: "b".to_string(),
+                    speaker_uid: "uid-b".to_string(),
+                    pcm16_mono_16k: Vec::new(),
+                }
+            ))
+            .is_err());
 
         let (_, first) = rx.recv().await.unwrap();
         assert_eq!(first.speaker_client_id, 1);
@@ -1130,19 +1134,16 @@ mod tests {
 
         // 满通道：send 挂起而非丢帧
         let sender = tx.clone();
-        let pending = tokio::spawn(async move {
-            sender.send((2, "second".to_string())).await.is_ok()
-        });
+        let pending =
+            tokio::spawn(async move { sender.send((2, "second".to_string())).await.is_ok() });
         tokio::task::yield_now().await;
         assert!(!pending.is_finished());
 
         let _ = rx.recv().await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), pending)
-                .await
-                .expect("backpressured send must complete after space frees")
-                .unwrap()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(200), pending)
+            .await
+            .expect("backpressured send must complete after space frees")
+            .unwrap());
     }
 
     #[tokio::test]

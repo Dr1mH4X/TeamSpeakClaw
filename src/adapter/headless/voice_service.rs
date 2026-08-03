@@ -275,7 +275,7 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         let mode = match r.target_mode {
-            1 | 2 | 3 => r.target_mode,
+            1..=3 => r.target_mode,
             _ => self.default_reply_mode(),
         };
         let mut target = r.target_client_id;
@@ -346,13 +346,12 @@ impl VoiceService for VoiceServiceImpl {
         let cfg = req.into_inner();
         let include_audio = cfg.include_audio;
 
-        let control_stream = BroadcastStream::new(self.control_tx.subscribe()).filter_map(
-            move |r| {
+        let control_stream =
+            BroadcastStream::new(self.control_tx.subscribe()).filter_map(move |r| {
                 let include_chat = cfg.include_chat;
                 let include_log = cfg.include_log;
                 async move { map_subscribed_event(r, include_chat, include_log) }
-            },
-        );
+            });
 
         if !include_audio {
             return Ok(Response::new(
@@ -360,9 +359,8 @@ impl VoiceService for VoiceServiceImpl {
             ));
         }
 
-        let audio_stream = BroadcastStream::new(self.audio_tx.subscribe()).filter_map(|r| {
-            async move { map_audio_event(r).map(Ok) }
-        });
+        let audio_stream = BroadcastStream::new(self.audio_tx.subscribe())
+            .filter_map(|r| async move { map_audio_event(r).map(Ok) });
         let merged = futures::stream::select(control_stream, audio_stream);
         Ok(Response::new(
             Box::pin(merged) as Self::SubscribeEventsStream
@@ -380,11 +378,7 @@ mod tests {
 
     #[test]
     fn control_lag_becomes_resource_exhausted_status() {
-        let result = map_subscribed_event(
-            Err(BroadcastStreamRecvError::Lagged(7)),
-            true,
-            true,
-        );
+        let result = map_subscribed_event(Err(BroadcastStreamRecvError::Lagged(7)), true, true);
 
         let Some(Err(status)) = result else {
             panic!("control lag must produce a stream error");

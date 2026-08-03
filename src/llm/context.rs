@@ -66,7 +66,10 @@ impl TurnCoordinator {
     }
 
     /// 预留当前会话的轮次：容量满立即返回 busy；同会话严格按预留顺序排队。
-    pub(crate) async fn try_reserve(&self, source: &SessionSource) -> Result<TurnPermit, TurnQueueFull> {
+    pub(crate) async fn try_reserve(
+        &self,
+        source: &SessionSource,
+    ) -> Result<TurnPermit, TurnQueueFull> {
         let capacity = self
             .capacity
             .clone()
@@ -262,9 +265,8 @@ mod tests {
 
         let waiting_coordinator = coordinator.clone();
         let waiting_source = source.clone();
-        let mut waiter = tokio::spawn(async move {
-            waiting_coordinator.try_reserve(&waiting_source).await
-        });
+        let mut waiter =
+            tokio::spawn(async move { waiting_coordinator.try_reserve(&waiting_source).await });
 
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
             .await
@@ -348,13 +350,11 @@ mod tests {
         waiting.abort();
         drop(holder);
 
-        let successor = tokio::time::timeout(
-            Duration::from_millis(200),
-            coordinator.try_reserve(&source),
-        )
-        .await
-        .expect("cancelled waiter must not block successors")
-        .expect("capacity must be released");
+        let successor =
+            tokio::time::timeout(Duration::from_millis(200), coordinator.try_reserve(&source))
+                .await
+                .expect("cancelled waiter must not block successors")
+                .expect("capacity must be released");
         drop(successor);
     }
 }

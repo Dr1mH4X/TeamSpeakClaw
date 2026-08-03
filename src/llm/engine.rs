@@ -235,9 +235,11 @@ mod tests {
         let engine = engine.clone();
         let source = source.clone();
         let mut waiter = tokio::spawn(async move { engine.try_reserve_turn(&source).await });
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err()
+        );
 
         drop(first);
         let _second = tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiter)
