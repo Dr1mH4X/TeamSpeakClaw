@@ -83,15 +83,14 @@ pub async fn ts3_actor(
     }));
 
     // 启动时 listClients 一次，填充 name 映射供 voice handler 使用
-    let client_names: Arc<HashMap<i32, String>> = Arc::new(
-        match tsclient_rs::listClients(&client).await {
+    let client_names: Arc<HashMap<i32, String>> =
+        Arc::new(match tsclient_rs::listClients(&client).await {
             Ok(clients) => clients.into_iter().map(|c| (c.id, c.nickname)).collect(),
             Err(e) => {
                 warn!("初始化 TeamSpeak 客户端名称失败: {e}");
                 HashMap::new()
             }
-        },
-    );
+        });
 
     // voice data → AudioFrameEvent
     let events_tx_v = events_tx.clone();
@@ -105,10 +104,7 @@ pub async fn ts3_actor(
                 );
                 return;
             };
-            let from_client_name = voice_names
-                .get(&vd.client_id)
-                .cloned()
-                .unwrap_or_default();
+            let from_client_name = voice_names.get(&vd.client_id).cloned().unwrap_or_default();
             let _ = events_tx_v.send(voicev1::Event {
                 unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {

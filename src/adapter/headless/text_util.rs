@@ -39,9 +39,7 @@ pub fn split_message(msg: &str, max_bytes: usize) -> Vec<String> {
         // 在 end 之前找最近的空白符（最多回看 256 字节）
         let lookback_start = end.saturating_sub(256).max(start);
         if lookback_start < end {
-            if let Some(rel_pos) = msg[lookback_start..end]
-                .rfind(|c: char| c.is_whitespace())
-            {
+            if let Some(rel_pos) = msg[lookback_start..end].rfind(|c: char| c.is_whitespace()) {
                 let ws = lookback_start + rel_pos;
                 if ws > start {
                     chunks.push(msg[start..ws].to_string());
@@ -84,7 +82,10 @@ mod tests {
             assert!(c.len() <= 8, "chunk {i} len {} > 8", c.len());
         }
         let joined: String = r.concat();
-        let without_ws: String = joined.chars().filter(|c: &char| !c.is_whitespace()).collect();
+        let without_ws: String = joined
+            .chars()
+            .filter(|c: &char| !c.is_whitespace())
+            .collect();
         let expected: String = msg.chars().filter(|c: &char| !c.is_whitespace()).collect();
         assert_eq!(without_ws, expected);
     }
@@ -111,8 +112,14 @@ mod tests {
         let r: Vec<String> = split_message("hello world foo bar", 10);
         assert!(r.iter().all(|c: &String| c.len() <= 10));
         let joined: String = r.concat();
-        let without_ws: String = joined.chars().filter(|c: &char| !c.is_whitespace()).collect();
-        let expected: String = "hello world foo bar".chars().filter(|c: &char| !c.is_whitespace()).collect();
+        let without_ws: String = joined
+            .chars()
+            .filter(|c: &char| !c.is_whitespace())
+            .collect();
+        let expected: String = "hello world foo bar"
+            .chars()
+            .filter(|c: &char| !c.is_whitespace())
+            .collect();
         assert_eq!(without_ws, expected);
     }
 
@@ -122,7 +129,10 @@ mod tests {
         let r: Vec<String> = split_message(msg, 10);
         assert!(r.iter().all(|c: &String| c.len() <= 10), "chunks: {r:?}");
         let joined: String = r.concat();
-        let without_ws: String = joined.chars().filter(|c: &char| !c.is_whitespace()).collect();
+        let without_ws: String = joined
+            .chars()
+            .filter(|c: &char| !c.is_whitespace())
+            .collect();
         let expected: String = msg.chars().filter(|c: &char| !c.is_whitespace()).collect();
         assert_eq!(without_ws, expected);
     }
@@ -151,4 +161,3 @@ mod tests {
         assert_eq!(r.join(""), msg);
     }
 }
-

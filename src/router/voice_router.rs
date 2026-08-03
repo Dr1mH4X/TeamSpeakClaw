@@ -17,7 +17,7 @@ use crate::adapter::headless::speech::{
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
-use crate::adapter::headless::INTERNAL_GRPC_ADDR;
+use crate::adapter::headless::{VoiceBridgeState, INTERNAL_GRPC_ADDR};
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
@@ -90,6 +90,23 @@ struct SkillExecutor<'a> {
     allowed_skills: &'a [String],
 }
 
+struct VoiceBridgeReadyGuard {
+    bridge_state: VoiceBridgeState,
+}
+
+impl VoiceBridgeReadyGuard {
+    fn new(bridge_state: VoiceBridgeState) -> Self {
+        bridge_state.set_stream_ready(true);
+        Self { bridge_state }
+    }
+}
+
+impl Drop for VoiceBridgeReadyGuard {
+    fn drop(&mut self) {
+        self.bridge_state.set_stream_ready(false);
+    }
+}
+
 #[async_trait]
 impl ToolExecutor for SkillExecutor<'_> {
     async fn execute(&self, call: &ToolCall) -> String {
@@ -109,6 +126,7 @@ pub struct VoiceRouter {
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     session_locks: SessionLocks,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
+    bridge_state: VoiceBridgeState,
 }
 
 impl VoiceRouter {
@@ -123,6 +141,7 @@ impl VoiceRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
         ts_adapter: Arc<TsAdapter>,
+        bridge_state: VoiceBridgeState,
     ) -> Self {
         let speech_provider =
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
@@ -139,6 +158,7 @@ impl VoiceRouter {
             registry,
             ts_adapter,
             speech_provider,
+            bridge_state,
         }
     }
 
@@ -147,6 +167,7 @@ impl VoiceRouter {
     }
 
     pub async fn run(self) -> Result<()> {
+        self.bridge_state.set_stream_ready(false);
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
         let mut client = VoiceServiceClient::new(channel);
@@ -157,6 +178,7 @@ impl VoiceRouter {
             include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
         let mut stream = client.subscribe_events(req).await?.into_inner();
+        let ready_guard = VoiceBridgeReadyGuard::new(self.bridge_state.clone());
         let router = Arc::new(self);
         let audio_limit = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
         let mut tasks = JoinSet::new();
@@ -233,6 +255,7 @@ impl VoiceRouter {
             }
         };
 
+        drop(ready_guard);
         abort_managed_tasks(&mut tasks).await;
         result
     }
