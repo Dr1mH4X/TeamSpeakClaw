@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::{error, warn};
 
@@ -62,6 +62,30 @@ impl Drop for ChildKillOnDrop {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let _ = child.start_kill();
+        }
+    }
+}
+
+fn map_subscribed_event(
+    result: std::result::Result<voicev1::Event, BroadcastStreamRecvError>,
+    include_chat: bool,
+    include_log: bool,
+    include_audio: bool,
+) -> Option<std::result::Result<voicev1::Event, Status>> {
+    match result {
+        Ok(event) => {
+            let included = match event.payload.as_ref() {
+                Some(voicev1::event::Payload::Chat(_)) => include_chat,
+                Some(voicev1::event::Payload::Log(_)) => include_log,
+                Some(voicev1::event::Payload::Audio(_)) => include_audio,
+                None => false,
+            };
+            included.then_some(Ok(event))
+        }
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            Some(Err(Status::resource_exhausted(format!(
+                "voice event stream lagged by {skipped} messages"
+            ))))
         }
     }
 }
@@ -309,24 +333,7 @@ impl VoiceService for VoiceServiceImpl {
             let include_chat = cfg.include_chat;
             let include_log = cfg.include_log;
             let include_audio = cfg.include_audio;
-            async move {
-                match r {
-                    Ok(ev) => {
-                        let ok = match ev.payload {
-                            Some(voicev1::event::Payload::Chat(_)) => include_chat,
-                            Some(voicev1::event::Payload::Log(_)) => include_log,
-                            Some(voicev1::event::Payload::Audio(_)) => include_audio,
-                            None => false,
-                        };
-                        if ok {
-                            Some(Ok(ev))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None,
-                }
-            }
+            async move { map_subscribed_event(r, include_chat, include_log, include_audio) }
         });
         Ok(Response::new(
             Box::pin(stream) as Self::SubscribeEventsStream
@@ -336,4 +343,25 @@ impl VoiceService for VoiceServiceImpl {
     type SubscribeEventsStream = std::pin::Pin<
         Box<dyn tokio_stream::Stream<Item = std::result::Result<voicev1::Event, Status>> + Send>,
     >;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_lag_becomes_resource_exhausted_status() {
+        let result = map_subscribed_event(
+            Err(BroadcastStreamRecvError::Lagged(7)),
+            true,
+            true,
+            true,
+        );
+
+        let Some(Err(status)) = result else {
+            panic!("lag must produce a stream error");
+        };
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains('7'));
+    }
 }
