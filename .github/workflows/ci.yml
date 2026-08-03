@@ -10,9 +10,18 @@ on:
       - master
     paths:
       - ".github/workflows/**"
+      - ".cargo/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "examples/config/**"
+      - "proto/**"
       - "src/**"
+      - "tests/**"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
   pull_request:
     branches:
       - main
@@ -25,11 +34,14 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/reusable-quality.yml
+
   meta:
     uses: ./.github/workflows/reusable-meta.yml
 
   build:
-    needs: meta
+    needs: [quality, meta]
     uses: ./.github/workflows/reusable-build.yml
     with:
       version: ${{ needs.meta.outputs.version }}
