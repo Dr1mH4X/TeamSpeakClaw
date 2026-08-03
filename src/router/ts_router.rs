@@ -1,15 +1,19 @@
 use crate::adapter::napcat::NapCatAdapter;
+use crate::adapter::headless::{
+    should_route_text_through_bridge, voice_features_enabled, VoiceBridgeState,
+};
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::{broadcast, watch, Mutex};
 use tracing::{debug, error, info, warn};
 
 struct SqExecutor<'a> {
@@ -44,18 +48,37 @@ pub struct EventRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
+    voice_bridge_state: VoiceBridgeState,
+    subscriptions: Arc<Mutex<Option<TsSubscriptions>>>,
+}
+
+struct TsSubscriptions {
+    events: broadcast::Receiver<TsEvent>,
+    disconnected: watch::Receiver<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TsRouterExit {
+    Disconnected,
 }
 
 impl EventRouter {
     pub fn new_with_clients(
-        config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
+        context: RouterContext,
         adapter: Arc<TsAdapter>,
-        gate: Arc<PermissionGate>,
-        llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
+        event_rx: broadcast::Receiver<TsEvent>,
+        disconnect_rx: watch::Receiver<bool>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
+        voice_bridge_state: VoiceBridgeState,
     ) -> Self {
+        let RouterContext {
+            config,
+            prompts,
+            gate,
+            llm,
+            registry,
+        } = context;
+
         Self {
             config,
             prompts,
@@ -64,28 +87,34 @@ impl EventRouter {
             llm,
             registry,
             nc_adapter,
+            voice_bridge_state,
+            subscriptions: Arc::new(Mutex::new(Some(TsSubscriptions {
+                events: event_rx,
+                disconnected: disconnect_rx,
+            }))),
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
-        let mut rx = self.adapter.subscribe();
+    pub async fn run(&self) -> Result<TsRouterExit> {
+        let mut subscriptions = self
+            .subscriptions
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("TS event router already started"))?;
 
         loop {
-            match rx.recv().await {
-                Ok(TsEvent::TextMessage(msg)) => {
+            match receive_ts_event(&mut subscriptions.events, &mut subscriptions.disconnected)
+                .await?
+            {
+                TsEvent::TextMessage(msg) => {
                     let this = self.clone();
                     tokio::spawn(async move {
                         this.handle_message(msg).await;
                     });
                 }
-                Ok(TsEvent::Disconnected) => {
-                    return Err(anyhow::anyhow!("TS connection lost"));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "TS event router lagged; skipped buffered events");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(anyhow::anyhow!("TS event stream closed"));
+                TsEvent::Disconnected => {
+                    return Ok(TsRouterExit::Disconnected);
                 }
             }
         }
@@ -131,11 +160,11 @@ impl EventRouter {
             return;
         }
 
-        // 开启了语音桥接时，纯文本由 voice_router 处理
-        if self.config.headless.stt.enabled
-            || self.config.headless.tts.enabled
-            || self.config.llm.omni_model
-        {
+        // 订阅流健康时才由 voice_router 接管文本。
+        if should_route_text_through_bridge(
+            voice_features_enabled(&self.config),
+            self.voice_bridge_state.is_ready(),
+        ) {
             return;
         }
 
@@ -263,5 +292,80 @@ Online: {}"#,
                     .await;
             }
         }
+    }
+}
+
+async fn receive_ts_event(
+    event_rx: &mut broadcast::Receiver<TsEvent>,
+    disconnect_rx: &mut watch::Receiver<bool>,
+) -> Result<TsEvent> {
+    loop {
+        if *disconnect_rx.borrow() {
+            return Ok(TsEvent::Disconnected);
+        }
+
+        tokio::select! {
+            biased;
+            changed = disconnect_rx.changed() => {
+                changed.map_err(|_| anyhow::anyhow!("TS connection state stream closed"))?;
+                if *disconnect_rx.borrow_and_update() {
+                    return Ok(TsEvent::Disconnected);
+                }
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Ok(event) => return Ok(event),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "TS event router lagged; skipped buffered events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(anyhow::anyhow!("TS event stream closed"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receive_ts_event;
+    use crate::adapter::{TextMessageEvent, TextMessageTarget, TsEvent};
+    use tokio::sync::{broadcast, watch};
+
+    fn text_event(sequence: u32) -> TsEvent {
+        TsEvent::TextMessage(TextMessageEvent {
+            target_mode: TextMessageTarget::Private,
+            invoker_name: format!("user-{sequence}"),
+            invoker_uid: format!("uid-{sequence}"),
+            invoker_id: sequence,
+            invoker_groups: Vec::new(),
+            message: "test".to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn disconnect_state_survives_event_lag_before_first_poll() {
+        let (event_tx, _) = broadcast::channel(2);
+        let mut lag_probe = event_tx.subscribe();
+        let mut event_rx = event_tx.subscribe();
+        let (disconnect_tx, mut disconnect_rx) = watch::channel(false);
+
+        event_tx.send(TsEvent::Disconnected).unwrap();
+        disconnect_tx.send_replace(true);
+        for sequence in 1..=4 {
+            event_tx.send(text_event(sequence)).unwrap();
+        }
+
+        assert!(matches!(
+            lag_probe.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        assert!(matches!(
+            receive_ts_event(&mut event_rx, &mut disconnect_rx)
+                .await
+                .unwrap(),
+            TsEvent::Disconnected
+        ));
     }
 }
