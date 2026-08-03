@@ -9,22 +9,27 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/reusable-quality.yml
+
   meta:
     uses: ./.github/workflows/reusable-meta.yml
 
   build:
-    needs: meta
+    needs: [quality, meta]
     uses: ./.github/workflows/reusable-build.yml
     with:
       version: ${{ needs.meta.outputs.version }}
       is-release: true
 
   docker:
-    needs: meta
+    needs: [quality, meta]
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/reusable-docker.yml
     with:
       version: ${{ needs.meta.outputs.version }}
@@ -38,7 +43,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [meta, build, changelog, docker]
+    needs: [quality, meta, build, changelog, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write
