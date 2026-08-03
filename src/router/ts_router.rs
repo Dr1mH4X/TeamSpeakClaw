@@ -5,7 +5,7 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnPermit};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry};
@@ -115,7 +115,7 @@ impl EventRouter {
                     let source = SessionSource::TeamSpeak {
                         uid: msg.invoker_uid.clone(),
                     };
-                    let Ok(permit) = this.llm.try_reserve_turn(&source).await else {
+                    let Ok(capacity) = this.llm.try_reserve_turn_capacity() else {
                         warn!(
                             invoker = %msg.invoker_name,
                             "TS LLM turn queue full; dropping message"
@@ -123,7 +123,8 @@ impl EventRouter {
                         continue;
                     };
                     tasks.spawn(async move {
-                        this.handle_message(msg, permit).await;
+                        let session = this.llm.acquire_turn_session(&source).await;
+                        this.handle_message(msg, capacity, session).await;
                     });
                 }
                 TsEvent::Disconnected => {
@@ -155,7 +156,13 @@ impl EventRouter {
             .await
     }
 
-    async fn handle_message(&self, event: TextMessageEvent, _turn: TurnPermit) {
+    async fn handle_message(
+        &self,
+        event: TextMessageEvent,
+        // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
+        _capacity: TurnCapacityPermit,
+        _session: TurnSessionGuard,
+    ) {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }

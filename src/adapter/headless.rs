@@ -338,8 +338,8 @@ impl Runtime {
         let bridge_registry = registry.clone();
         let bridge_ts_adapter = ts_adapter.clone();
         let shutdown_for_bridge = shutdown.clone();
-        let bridge_state_for_router = bridge_state;
-        let bridge_handle = Some(tokio::spawn(async move {
+        let bridge_state_for_router = bridge_state.clone();
+        let bridge_task = tokio::spawn(async move {
             let mut attempt = 1u32;
             let _ = bridge_state_for_router.take_connected_since_retry();
             loop {
@@ -382,6 +382,19 @@ impl Runtime {
                 attempt = attempt.saturating_add(1);
             }
             bridge_state_for_router.set_stream_ready(false);
+        });
+        // 监控 bridge 任务 panic：panic 不可自愈，置失败信号让上层重建会话
+        let failed_tx_for_bridge = failed_tx.clone();
+        let bridge_state_watcher = bridge_state;
+        let bridge_handle = Some(tokio::spawn(async move {
+            let result = bridge_task.await;
+            if let Err(error) = result {
+                if error.is_panic() {
+                    bridge_state_watcher.set_stream_ready(false);
+                    let _ = failed_tx_for_bridge.send(Some("voice router"));
+                    error!("voice router task panicked; signaling session restart");
+                }
+            }
         }));
 
         Ok(Self {

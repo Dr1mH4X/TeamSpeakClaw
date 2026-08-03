@@ -79,7 +79,8 @@ fn map_subscribed_event(
             let included = match event.payload.as_ref() {
                 Some(voicev1::event::Payload::Chat(_)) => include_chat,
                 Some(voicev1::event::Payload::Log(_)) => include_log,
-                Some(voicev1::event::Payload::Audio(_)) => true,
+                // control 通道不承载音频事件；音频走独立广播
+                Some(voicev1::event::Payload::Audio(_)) => false,
                 None => false,
             };
             included.then_some(Ok(event))

@@ -251,8 +251,7 @@ impl OpusSttPipeline {
             for id in discard_ids {
                 if let Some(state) = self.speakers.get_mut(&id) {
                     state.pcm16_mono_16k.clear();
-                    state.uid.clear();
-                    state.name.clear();
+                    // 保留 uid/name：下次发声时与事件 uid 一致，避免虚假的"身份变化"重置
                 }
             }
         }

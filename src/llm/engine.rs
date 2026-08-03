@@ -59,13 +59,19 @@ impl LlmEngine {
         run_tool_loop(messages, tools, self.provider.as_ref(), executor, callbacks).await
     }
 
-    /// 预留当前会话的轮次：容量满（并发 + 排队）立即返回 TurnQueueFull。
-    /// 返回的许可必须持有到回复发送与历史保存结束。
-    pub async fn try_reserve_turn(
+    /// 同步获取容量占位（不等待）：事件循环内调用，满立即返回 TurnQueueFull。
+    pub fn try_reserve_turn_capacity(
+        &self,
+    ) -> Result<super::context::TurnCapacityPermit, TurnQueueFull> {
+        self.turn_coordinator.try_acquire_capacity()
+    }
+
+    /// 异步获取会话串行锁（任务内调用，等待期间事件循环不阻塞）。
+    pub async fn acquire_turn_session(
         &self,
         source: &SessionSource,
-    ) -> Result<super::context::TurnPermit, TurnQueueFull> {
-        self.turn_coordinator.try_reserve(source).await
+    ) -> super::context::TurnSessionGuard {
+        self.turn_coordinator.acquire_session(source).await
     }
 
     /// 校验单回合用户文本不超过 MAX_USER_TEXT_BYTES（UTF-8 字节数）。
@@ -221,31 +227,40 @@ mod tests {
         let engine = engine_with_history();
         let source = SessionSource::NapCatPrivate { user_id: 42 };
 
-        let permit = engine.try_reserve_turn(&source).await.unwrap();
+        let capacity = engine.try_reserve_turn_capacity().unwrap();
+        let session = engine.acquire_turn_session(&source).await;
 
-        drop(permit);
+        drop(capacity);
+        drop(session);
     }
 
     #[tokio::test]
     async fn turn_reservation_serializes_same_session() {
         let engine = Arc::new(engine_with_history());
         let source = SessionSource::NapCatPrivate { user_id: 42 };
-        let first = engine.try_reserve_turn(&source).await.unwrap();
+        let first_capacity = engine.try_reserve_turn_capacity().unwrap();
+        let first_session = engine.acquire_turn_session(&source).await;
 
         let engine = engine.clone();
         let source = source.clone();
-        let mut waiter = tokio::spawn(async move { engine.try_reserve_turn(&source).await });
+        let mut waiter = tokio::spawn(async move {
+            let capacity = engine.try_reserve_turn_capacity().unwrap();
+            let session = engine.acquire_turn_session(&source).await;
+            (capacity, session)
+        });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
                 .await
                 .is_err()
         );
 
-        drop(first);
-        let _second = tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiter)
+        drop(first_session);
+        drop(first_capacity);
+        let second = tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiter)
             .await
             .expect("same-session waiter must proceed after the first turn")
             .expect("waiter must succeed");
+        drop(second);
     }
 
     #[test]

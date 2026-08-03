@@ -38,15 +38,25 @@ impl fmt::Display for SessionSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnQueueFull;
 
-/// 已预留的轮次许可：持有期间同会话后续轮次被阻塞，容量占位
-pub(crate) struct TurnPermit {
+/// 容量占位许可：事件循环内同步获取，不等待
+pub(crate) struct TurnCapacityPermit {
     _capacity: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for TurnCapacityPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnCapacityPermit")
+    }
+}
+
+/// 会话串行锁 guard：在任务内异步获取，持有到回合结束
+pub(crate) struct TurnSessionGuard {
     _session: OwnedMutexGuard<()>,
 }
 
-impl std::fmt::Debug for TurnPermit {
+impl std::fmt::Debug for TurnSessionGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TurnPermit")
+        f.write_str("TurnSessionGuard")
     }
 }
 
@@ -65,17 +75,22 @@ impl TurnCoordinator {
         }
     }
 
-    /// 预留当前会话的轮次：容量满立即返回 busy；同会话严格按预留顺序排队。
-    pub(crate) async fn try_reserve(
-        &self,
-        source: &SessionSource,
-    ) -> Result<TurnPermit, TurnQueueFull> {
+    /// 同步获取容量占位：满立即返回 busy，不等待。
+    /// 供事件循环调用，保证循环不被轮次阻塞。
+    pub(crate) fn try_acquire_capacity(&self) -> Result<TurnCapacityPermit, TurnQueueFull> {
         let capacity = self
             .capacity
             .clone()
             .try_acquire_owned()
             .map_err(|_| TurnQueueFull)?;
+        Ok(TurnCapacityPermit {
+            _capacity: capacity,
+        })
+    }
 
+    /// 异步获取会话串行锁：同会话严格 FIFO，不同会话互不阻塞。
+    /// 在任务内调用，等待期间事件循环照常运转。
+    pub(crate) async fn acquire_session(&self, source: &SessionSource) -> TurnSessionGuard {
         let session_lock = {
             let mut locks = self.locks.lock().await;
             locks.retain(|_, lock| lock.strong_count() > 0);
@@ -90,11 +105,9 @@ impl TurnCoordinator {
             }
         };
 
-        let session = session_lock.lock_owned().await;
-        Ok(TurnPermit {
-            _capacity: capacity,
-            _session: session,
-        })
+        TurnSessionGuard {
+            _session: session_lock.lock_owned().await,
+        }
     }
 }
 
@@ -190,6 +203,16 @@ mod tests {
         }
     }
 
+    /// 测试辅助：两段式预留（容量 + 会话锁）
+    async fn reserve(
+        coordinator: &TurnCoordinator,
+        source: &SessionSource,
+    ) -> (TurnCapacityPermit, TurnSessionGuard) {
+        let capacity = coordinator.try_acquire_capacity().unwrap();
+        let session = coordinator.acquire_session(source).await;
+        (capacity, session)
+    }
+
     #[test]
     fn keeps_only_the_configured_turn_count() {
         let context = ContextWindow::new(2, 10);
@@ -261,12 +284,12 @@ mod tests {
         let source = SessionSource::TeamSpeak {
             uid: "same-user".to_string(),
         };
-        let first_guard = coordinator.try_reserve(&source).await.unwrap();
+        let first_guard = reserve(&coordinator, &source).await;
 
         let waiting_coordinator = coordinator.clone();
         let waiting_source = source.clone();
         let mut waiter =
-            tokio::spawn(async move { waiting_coordinator.try_reserve(&waiting_source).await });
+            tokio::spawn(async move { reserve(&waiting_coordinator, &waiting_source).await });
 
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
             .await
@@ -289,15 +312,14 @@ mod tests {
         let second_source = SessionSource::TeamSpeak {
             uid: "second-user".to_string(),
         };
-        let _first_guard = coordinator.try_reserve(&first_source).await.unwrap();
+        let _first_guard = reserve(&coordinator, &first_source).await;
 
         let second_guard = tokio::time::timeout(
             Duration::from_millis(200),
-            coordinator.try_reserve(&second_source),
+            reserve(&coordinator, &second_source),
         )
         .await
-        .expect("different sessions must not block each other")
-        .expect("capacity must be available");
+        .expect("different sessions must not block each other");
         drop(second_guard);
     }
 
@@ -311,11 +333,11 @@ mod tests {
             uid: "active".to_string(),
         };
 
-        let first_guard = coordinator.try_reserve(&first_source).await.unwrap();
+        let first_guard = reserve(&coordinator, &first_source).await;
         assert_eq!(coordinator.locks.lock().await.len(), 1);
         drop(first_guard);
 
-        let _second_guard = coordinator.try_reserve(&second_source).await.unwrap();
+        let _second_guard = reserve(&coordinator, &second_source).await;
         assert_eq!(coordinator.locks.lock().await.len(), 1);
     }
 
@@ -325,11 +347,11 @@ mod tests {
         let source = SessionSource::NapCatPrivate { user_id: 1 };
         let other = SessionSource::NapCatPrivate { user_id: 2 };
 
-        let first = coordinator.try_reserve(&source).await.unwrap();
-        let second = coordinator.try_reserve(&other).await.unwrap();
+        let first = reserve(&coordinator, &source).await;
+        let second = reserve(&coordinator, &other).await;
 
         assert_eq!(
-            coordinator.try_reserve(&source).await.unwrap_err(),
+            coordinator.try_acquire_capacity().unwrap_err(),
             TurnQueueFull
         );
         drop(first);
@@ -340,21 +362,20 @@ mod tests {
     async fn cancelled_waiter_releases_capacity_for_successors() {
         let coordinator = Arc::new(TurnCoordinator::new(1));
         let source = SessionSource::NapCatPrivate { user_id: 1 };
-        let holder = coordinator.try_reserve(&source).await.unwrap();
+        let holder = reserve(&coordinator, &source).await;
 
         let waiting = tokio::spawn({
             let coordinator = coordinator.clone();
             let source = source.clone();
-            async move { coordinator.try_reserve(&source).await }
+            async move { reserve(&coordinator, &source).await }
         });
         waiting.abort();
         drop(holder);
 
         let successor =
-            tokio::time::timeout(Duration::from_millis(200), coordinator.try_reserve(&source))
+            tokio::time::timeout(Duration::from_millis(200), reserve(&coordinator, &source))
                 .await
-                .expect("cancelled waiter must not block successors")
-                .expect("capacity must be released");
+                .expect("cancelled waiter must not block successors");
         drop(successor);
     }
 }

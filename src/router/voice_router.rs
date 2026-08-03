@@ -85,6 +85,9 @@ struct TtsTurnRuntime {
 }
 
 impl TtsTurnRuntime {
+    /// TTS 收尾超时：上游停滞（如 TS 发送背压）时防止 finish 无限挂起
+    const TTS_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
     fn callbacks(&self) -> Option<&StreamCallbacks> {
         Some(&self.callbacks)
     }
@@ -92,19 +95,38 @@ impl TtsTurnRuntime {
     /// 正常结束：关闭句段通道使合成任务发 EOS 后退出，再 join 上传任务
     async fn finish(self) {
         *self.shared_tx.lock().expect("tts tx poisoned") = None;
-        if let Err(error) = self.synth_task.await {
-            error!(
-                trace_id = %self.trace_id,
-                error = %error,
-                "tts synth task failed"
-            );
+        match tokio::time::timeout(Self::TTS_TEARDOWN_TIMEOUT, self.synth_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                error!(
+                    trace_id = %self.trace_id,
+                    error = %error,
+                    "tts synth task failed"
+                );
+            }
+            Err(_) => {
+                error!(
+                    trace_id = %self.trace_id,
+                    "tts synth task teardown timed out"
+                );
+                return;
+            }
         }
-        if let Err(error) = self.upload_task.await {
-            error!(
-                trace_id = %self.trace_id,
-                error = %error,
-                "tts upload task failed"
-            );
+        match tokio::time::timeout(Self::TTS_TEARDOWN_TIMEOUT, self.upload_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                error!(
+                    trace_id = %self.trace_id,
+                    error = %error,
+                    "tts upload task failed"
+                );
+            }
+            Err(_) => {
+                error!(
+                    trace_id = %self.trace_id,
+                    "tts upload task teardown timed out"
+                );
+            }
         }
     }
 
@@ -223,25 +245,55 @@ impl VoiceRouter {
 
         let drain_router = router.clone();
         tasks.spawn(async move {
-            let channel = match Channel::from_shared(format!("http://{INTERNAL_GRPC_ADDR}")) {
-                Ok(channel) => match channel.connect().await {
-                    Ok(channel) => channel,
-                    Err(error) => {
-                        error!("voice audio worker connect failed: {error}");
-                        return;
+            let mut client = None;
+            let mut connect_attempt = 1u32;
+            loop {
+                let Some((audio, chunk)) = audio_chunk_rx.recv().await else {
+                    break;
+                };
+                // 连接失败时重试，不永久退出；重试期间队列照常消费（不阻塞聊天）
+                if client.is_none() {
+                    let connect_result: anyhow::Result<Channel> =
+                        match Channel::from_shared(format!("http://{INTERNAL_GRPC_ADDR}")) {
+                            Ok(channel) => channel
+                                .connect()
+                                .await
+                                .map_err(|error| anyhow::anyhow!("connect failed: {error}")),
+                            Err(error) => Err(anyhow::anyhow!("invalid endpoint: {error}")),
+                        };
+                    match connect_result {
+                        Ok(channel) => {
+                            client = Some(VoiceServiceClient::new(channel));
+                            connect_attempt = 1;
+                        }
+                        Err(error) => {
+                            warn!(
+                                attempt = connect_attempt,
+                                error = %error,
+                                "voice audio worker connect failed; retrying"
+                            );
+                            let delay = crate::adapter::reconnect::reconnect_delay_for_attempt(
+                                connect_attempt,
+                            );
+                            tokio::time::sleep(delay).await;
+                            connect_attempt = connect_attempt.saturating_add(1);
+                            continue;
+                        }
                     }
-                },
-                Err(error) => {
-                    error!("voice audio worker endpoint invalid: {error}");
-                    return;
                 }
-            };
-            let mut client = VoiceServiceClient::new(channel);
-            while let Some((audio, chunk)) = audio_chunk_rx.recv().await {
-                if let Err(error) = drain_router
-                    .handle_audio_chunk(&mut client, audio, chunk)
-                    .await
-                {
+
+                let mut handle_error = None;
+                if let Some(client_ref) = client.as_mut() {
+                    if let Err(error) = drain_router
+                        .handle_audio_chunk(client_ref, audio, chunk)
+                        .await
+                    {
+                        handle_error = Some(error);
+                    }
+                }
+                if let Some(error) = handle_error {
+                    // gRPC 调用失败可能是连接失效：丢弃客户端触发重连
+                    client = None;
                     error!("Voice router audio handling failed: {error}");
                 }
             }
@@ -413,13 +465,31 @@ impl VoiceRouter {
             .map_err(|error| anyhow::anyhow!("list audio caller failed: {error}"))?;
         let caller = clients
             .iter()
-            .find(|client| u32::try_from(client.id).ok() == Some(audio.from_client_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "audio caller {} not found in online clients",
-                    audio.from_client_id
-                )
-            })?;
+            .find(|client| u32::try_from(client.id).ok() == Some(audio.from_client_id));
+        // drain 产物携带 uid/name：speaker 已下线时降级继续（ACL 按空组判定）
+        let Some(caller) = caller else {
+            if !audio.from_client_uid.is_empty() {
+                warn!(
+                    clid = audio.from_client_id,
+                    uid = %audio.from_client_uid,
+                    "audio caller left before handling; continuing with degraded context"
+                );
+                return Ok(CallerContext {
+                    caller_id: audio.from_client_id,
+                    caller_uid: audio.from_client_uid.clone(),
+                    caller_name: audio.from_client_name.clone(),
+                    groups: Vec::new(),
+                    channel_group_id: 0,
+                    channel_id: 0,
+                    reply_target_mode,
+                    reply_target_client_id,
+                });
+            }
+            anyhow::bail!(
+                "audio caller {} not found in online clients",
+                audio.from_client_id
+            );
+        };
         let channel_group_id = self
             .ts_adapter
             .get_client_channel_group_id(audio.from_client_id)

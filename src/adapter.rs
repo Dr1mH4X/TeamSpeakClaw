@@ -46,8 +46,33 @@ pub async fn run(
 
         let (adapter, event_rx, disconnect_rx) = match connection {
             Ok(adapter) => {
-                let (event_rx, disconnect_rx) = adapter.take_main_subscriptions()?;
-                (adapter, event_rx, disconnect_rx)
+                let subscriptions = match adapter.take_main_subscriptions() {
+                    Ok(subscriptions) => subscriptions,
+                    Err(error) => {
+                        // 已建立连接但订阅取出失败：先断开避免泄漏，再走统一重连计数
+                        warn!("Failed to take TS subscriptions: {error}");
+                        disconnect_adapter(&adapter).await;
+                        let had_running_session = reconnect.has_started_session();
+                        match reconnect.record_failure() {
+                            RetryDecision::Exhausted => {
+                                return Err(error);
+                            }
+                            RetryDecision::Retry { attempt, delay } => {
+                                if !had_running_session {
+                                    warn!(
+                                        "Initial TeamSpeak connection attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed; retrying after {:.0?}",
+                                        delay
+                                    );
+                                }
+                                if !wait_for_retry(delay, &shutdown).await {
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                };
+                (adapter, subscriptions.0, subscriptions.1)
             }
             Err(error) => {
                 let had_running_session = reconnect.has_started_session();
