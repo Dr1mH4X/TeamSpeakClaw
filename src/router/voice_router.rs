@@ -394,6 +394,7 @@ impl VoiceRouter {
         audio: &voicev1::AudioFrameEvent,
         speaker_client_id: u32,
         speaker_name: &str,
+        speaker_uid: &str,
     ) -> Result<CallerContext> {
         let mut ctx = self.resolve_caller_from_audio(audio).await?;
         if ctx.caller_id != speaker_client_id {
@@ -405,6 +406,9 @@ impl VoiceRouter {
         }
         if !speaker_name.is_empty() {
             ctx.caller_name = speaker_name.to_string();
+        }
+        if !speaker_uid.is_empty() {
+            ctx.caller_uid = speaker_uid.to_string();
         }
         Ok(ctx)
     }
@@ -475,7 +479,12 @@ impl VoiceRouter {
         chunk: SpeechChunk,
     ) -> Result<()> {
         let ctx = self
-            .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
+            .resolve_audio_chunk_caller(
+                &audio,
+                chunk.speaker_client_id,
+                &chunk.speaker_name,
+                &chunk.speaker_uid,
+            )
             .await?;
         if self.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
