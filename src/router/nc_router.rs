@@ -10,7 +10,7 @@ use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, UnifiedInboundEvent, strip_trigger_prefix};
+use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use serde_json::json;
