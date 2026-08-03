@@ -17,9 +17,8 @@ pub async fn ts3_actor(
     mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
     events_tx: broadcast::Sender<voicev1::Event>,
     shutdown_token: CancellationToken,
-    bot_respond_to_private: bool,
-    bot_trigger_prefixes: Vec<String>,
-    bot_default_reply_mode: String,
+    runtime_config: super::HeadlessRuntimeConfig,
+    bridge_state: super::VoiceBridgeState,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
 
@@ -27,8 +26,9 @@ pub async fn ts3_actor(
 
     // 先注册 text handler，避免丢消息
     let events_tx_t = events_tx.clone();
-    let respond_private = bot_respond_to_private;
-    let reply_mode = bot_default_reply_mode.clone();
+    let respond_private = runtime_config.bot_respond_to_private;
+    let reply_mode = runtime_config.bot_default_reply_mode.clone();
+    let bot_trigger_prefixes = runtime_config.bot_trigger_prefixes.clone();
     client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::TextMessage(ref msg) = event {
             let target_mode = match msg.target_mode {
@@ -81,6 +81,9 @@ pub async fn ts3_actor(
             });
         }
     }));
+
+    // text handler 注册完成后置位 actor 就绪，避免文本被过早路由到 bridge 而丢失
+    bridge_state.set_actor_ready(true);
 
     // 启动时 listClients 一次，填充 name 映射供 voice handler 使用
     let client_names: Arc<HashMap<i32, String>> =
