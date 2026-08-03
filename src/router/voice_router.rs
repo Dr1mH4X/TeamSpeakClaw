@@ -576,6 +576,10 @@ impl VoiceRouter {
             message_chars = user_msg.chars().count(),
             "Voice user message received"
         );
+        if let Err(error) = self.llm.check_user_text_bounds(&user_msg) {
+            warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
+            return Ok(());
+        }
 
         let (mut messages, tools, allowed_skills, session_source) =
             self.build_llm_request(&ctx, user_msg.clone()).await;

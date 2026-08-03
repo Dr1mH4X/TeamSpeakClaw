@@ -4,6 +4,7 @@ pub mod provider;
 pub mod tool_loop;
 
 pub use context::SessionSource;
+pub(crate) use context::TurnPermit;
 pub use engine::LlmEngine;
 pub use provider::ToolCall;
 pub use tool_loop::{StreamCallbacks, ToolExecutor};
