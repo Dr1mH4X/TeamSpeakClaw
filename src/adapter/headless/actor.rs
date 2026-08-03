@@ -14,6 +14,12 @@ use super::types::now_unix_ms;
 /// 客户端目录：clid -> (uid, nickname)，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, (String, String)>>>;
 
+/// actor 事件输出通道：控制事件（chat/log）与音频事件分离，音频洪峰不影响聊天
+pub struct ActorEventChannels {
+    pub control_tx: broadcast::Sender<voicev1::Event>,
+    pub audio_tx: broadcast::Sender<voicev1::Event>,
+}
+
 async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient_rs::Client) {
     match tsclient_rs::listClients(client).await {
         Ok(clients) => {
@@ -31,7 +37,7 @@ pub async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
     mut audio_rx: mpsc::Receiver<(Vec<u8>, i32)>,
     mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
-    events_tx: broadcast::Sender<voicev1::Event>,
+    channels: ActorEventChannels,
     shutdown_token: CancellationToken,
     runtime_config: super::HeadlessRuntimeConfig,
     bridge_state: super::VoiceBridgeState,
@@ -41,7 +47,7 @@ pub async fn ts3_actor(
     let mut send_tick = tokio::time::interval(Duration::from_millis(20));
 
     // 先注册 text handler，避免丢消息
-    let events_tx_t = events_tx.clone();
+    let control_tx_t = channels.control_tx.clone();
     let respond_private = runtime_config.bot_respond_to_private;
     let reply_mode = runtime_config.bot_default_reply_mode.clone();
     let bot_trigger_prefixes = runtime_config.bot_trigger_prefixes.clone();
@@ -79,7 +85,7 @@ pub async fn ts3_actor(
                     _ => (1, invoker_client_id),
                 }
             };
-            let _ = events_tx_t.send(voicev1::Event {
+            let _ = control_tx_t.send(voicev1::Event {
                 unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Chat(voicev1::ChatEvent {
                     target_mode,
@@ -106,7 +112,7 @@ pub async fn ts3_actor(
     refresh_client_directory(&client_directory, &client).await;
 
     // voice data → AudioFrameEvent
-    let events_tx_v = events_tx.clone();
+    let audio_tx_v = channels.audio_tx.clone();
     let voice_directory = client_directory.clone();
     client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::VoiceData(ref vd) = event {
@@ -123,7 +129,7 @@ pub async fn ts3_actor(
                 .get(&vd.client_id)
                 .cloned()
                 .unwrap_or_default();
-            let _ = events_tx_v.send(voicev1::Event {
+            let _ = audio_tx_v.send(voicev1::Event {
                 unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
