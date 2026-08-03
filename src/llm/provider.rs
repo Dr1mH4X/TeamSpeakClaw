@@ -252,15 +252,19 @@ fn output_stream_with_total_deadline(
 ) -> impl Stream<Item = Result<LlmStreamEvent>> {
     futures_util::stream::unfold(Some(rx), move |state| async move {
         let mut rx = state?;
-        tokio::select! {
-            biased;
-            _ = tokio::time::sleep_until(total_deadline) => Some((
+        // 已缓冲项优先：deadline 只作用于"等待新项"，不吞已完成的 Done
+        if let Ok(item) = rx.try_recv() {
+            return Some((item, Some(rx)));
+        }
+        match tokio::time::timeout_at(total_deadline, rx.recv()).await {
+            Ok(Some(item)) => Some((item, Some(rx))),
+            Ok(None) => None,
+            Err(_) => Some((
                 Err(anyhow::anyhow!(
                     "LLM stream exceeded the total timeout of {total_timeout_secs} seconds"
                 )),
                 None,
             )),
-            item = rx.recv() => item.map(|item| (item, Some(rx))),
         }
     })
 }
@@ -643,11 +647,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_stream_total_deadline_preempts_buffered_items() {
+    async fn output_stream_total_deadline_does_not_preempt_buffered_items() {
         let (tx, rx) = mpsc::channel(1);
         tx.send(Ok(LlmStreamEvent::Token("late".to_string())))
             .await
             .unwrap();
+        // deadline 已过期，但通道内已有缓冲项：缓冲项必须优先产出，不误报超时
+        let mut stream = Box::pin(output_stream_with_total_deadline(
+            rx,
+            tokio::time::Instant::now() - Duration::from_secs(1),
+            1,
+        ));
+
+        let item = stream.next().await.unwrap().unwrap();
+
+        assert!(matches!(item, LlmStreamEvent::Token(t) if t == "late"));
+    }
+
+    #[tokio::test]
+    async fn output_stream_total_deadline_fires_when_waiting_for_new_items() {
+        let (_tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(1);
         let mut stream = Box::pin(output_stream_with_total_deadline(
             rx,
             tokio::time::Instant::now() - Duration::from_secs(1),

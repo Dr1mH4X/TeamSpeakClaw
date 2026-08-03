@@ -112,8 +112,9 @@ message AudioFrameEvent {
 
   uint32 from_client_id = 1;
   string from_client_name = 2;
-  string from_client_uid = 3;
-  Codec codec = 4;
-  bool is_whisper = 5;
-  bytes frame = 6;
+  Codec codec = 3;
+  bool is_whisper = 4;
+  bytes frame = 5;
+  // 新增字段必须 append，保持既有字段号与 wire type 向后兼容
+  string from_client_uid = 6;
 }
