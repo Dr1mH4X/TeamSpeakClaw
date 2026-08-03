@@ -14,6 +14,9 @@ use super::types::now_unix_ms;
 /// 客户端目录：clid -> (uid, nickname)，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, (String, String)>>>;
 
+/// 输出缓冲上限：满时暂停读取上游（背压），不再丢弃旧帧
+const OUT_BUF_MAX: usize = 400;
+
 /// actor 事件输出通道：控制事件（chat/log）与音频事件分离，音频洪峰不影响聊天
 pub struct ActorEventChannels {
     pub control_tx: broadcast::Sender<voicev1::Event>,
@@ -157,11 +160,8 @@ pub async fn ts3_actor(
                 refresh_client_directory(&client_directory, &client).await;
             }
 
-            pkt = audio_rx.recv() => {
+            pkt = audio_rx.recv(), if out_buf.len() < OUT_BUF_MAX => {
                 if let Some(p) = pkt {
-                    if out_buf.len() >= 800 {
-                        out_buf.pop_front();
-                    }
                     out_buf.push_back(p);
                 } else {
                     break;

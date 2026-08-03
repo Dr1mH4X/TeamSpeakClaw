@@ -72,6 +72,48 @@ fn should_close_tts_turn(finish_reason: &str) -> bool {
     finish_reason != "tool_calls"
 }
 
+/// 每轮 TTS 运行时：持有合成与上传任务，正常结束 join，取消时 abort
+struct TtsTurnRuntime {
+    callbacks: StreamCallbacks,
+    shared_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<(usize, String)>>>>,
+    synth_task: tokio::task::JoinHandle<()>,
+    upload_task: tokio::task::JoinHandle<()>,
+    trace_id: String,
+}
+
+impl TtsTurnRuntime {
+    fn callbacks(&self) -> Option<&StreamCallbacks> {
+        Some(&self.callbacks)
+    }
+
+    /// 正常结束：关闭句段通道使合成任务发 EOS 后退出，再 join 上传任务
+    async fn finish(self) {
+        *self.shared_tx.lock().expect("tts tx poisoned") = None;
+        if let Err(error) = self.synth_task.await {
+            error!(
+                trace_id = %self.trace_id,
+                error = %error,
+                "tts synth task failed"
+            );
+        }
+        if let Err(error) = self.upload_task.await {
+            error!(
+                trace_id = %self.trace_id,
+                error = %error,
+                "tts upload task failed"
+            );
+        }
+    }
+
+    /// 取消：abort 两个任务并收割，不产生悬挂句柄
+    async fn abort(self) {
+        self.synth_task.abort();
+        self.upload_task.abort();
+        let _ = self.synth_task.await;
+        let _ = self.upload_task.await;
+    }
+}
+
 struct SkillExecutor<'a> {
     router: &'a VoiceRouter,
     ctx: &'a CallerContext,
@@ -567,7 +609,7 @@ impl VoiceRouter {
             ctx: &ctx,
             allowed_skills: &allowed_skills,
         };
-        let callbacks = if self.is_tts_effectively_enabled() {
+        let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
             None
@@ -575,7 +617,12 @@ impl VoiceRouter {
 
         match self
             .llm
-            .run_tool_loop(&mut messages, &tools, &executor, callbacks.as_ref())
+            .run_tool_loop(
+                &mut messages,
+                &tools,
+                &executor,
+                tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            )
             .await
         {
             Ok(result) => {
@@ -592,10 +639,8 @@ impl VoiceRouter {
                 }
             }
             Err(e) => {
-                if let Some(ref cb) = callbacks {
-                    if let Some(ref on_end) = cb.on_turn_end {
-                        on_end("stop");
-                    }
+                if let Some(runtime) = tts_runtime {
+                    runtime.abort().await;
                 }
                 self.send_reply(
                     client,
@@ -606,6 +651,9 @@ impl VoiceRouter {
                 return Err(e.into());
             }
         };
+        if let Some(runtime) = tts_runtime {
+            runtime.finish().await;
+        }
         Ok(())
     }
 
@@ -625,7 +673,6 @@ impl VoiceRouter {
             warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
             return Ok(());
         }
-
         let (mut messages, tools, allowed_skills, session_source) =
             self.build_llm_request(&ctx, user_msg.clone()).await;
         let executor = SkillExecutor {
@@ -634,7 +681,7 @@ impl VoiceRouter {
             allowed_skills: &allowed_skills,
         };
 
-        let callbacks = if self.is_tts_effectively_enabled() {
+        let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
             None
@@ -642,15 +689,18 @@ impl VoiceRouter {
 
         let result = match self
             .llm
-            .run_tool_loop(&mut messages, &tools, &executor, callbacks.as_ref())
+            .run_tool_loop(
+                &mut messages,
+                &tools,
+                &executor,
+                tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            )
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                if let Some(ref cb) = callbacks {
-                    if let Some(ref on_end) = cb.on_turn_end {
-                        on_end("stop");
-                    }
+                if let Some(runtime) = tts_runtime {
+                    runtime.abort().await;
                 }
                 self.send_reply(
                     client,
@@ -673,17 +723,21 @@ impl VoiceRouter {
             self.llm
                 .save_turn(&session_source, user_msg, result.content);
         }
+        if let Some(runtime) = tts_runtime {
+            runtime.finish().await;
+        }
         Ok(())
     }
 
-    async fn build_tts_callbacks(&self) -> Result<StreamCallbacks> {
+    /// 每轮 TTS 运行时：持有合成与上传任务，正常结束 join，取消时 abort
+    async fn build_tts_callbacks(&self) -> Result<TtsTurnRuntime> {
         let speech_provider = self
             .speech_provider
             .clone()
             .ok_or_else(|| anyhow::anyhow!("TTS provider missing"))?;
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint)?.connect().await?;
-        let (sentence_tx, sentence_rx) = mpsc::channel::<String>(128);
+        let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(128);
         let (audio_tx, audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
         let trace_id = format!(
             "tts-{}",
@@ -695,28 +749,49 @@ impl VoiceRouter {
 
         let synth_audio_tx = audio_tx.clone();
         let synth_trace = trace_id.clone();
-        tokio::spawn(async move {
+        let synth_task = tokio::spawn(async move {
             let mut rx = sentence_rx;
-            while let Some(sentence) = rx.recv().await {
+            let mut segment_index = 0usize;
+            while let Some((_index, sentence)) = rx.recv().await {
+                segment_index += 1;
                 if !is_speakable(&sentence) {
-                    debug!("skipping unspeakable tts segment: {sentence}");
+                    debug!(
+                        trace_id = %synth_trace,
+                        segment = segment_index,
+                        "skipping unspeakable tts segment"
+                    );
                     continue;
                 }
                 match speech_provider.synthesize(&sentence).await {
                     Ok(audio) => {
                         let codec = detect_audio_format(&audio);
-                        let _ = synth_audio_tx
+                        if let Err(error) = synth_audio_tx
                             .send(voicev1::TtsAudioChunk {
                                 payload: audio,
                                 codec: codec.to_string(),
                                 end_of_stream: false,
                                 trace_id: synth_trace.clone(),
                             })
-                            .await;
+                            .await
+                        {
+                            warn!(
+                                trace_id = %synth_trace,
+                                segment = segment_index,
+                                error = %error,
+                                "tts audio channel closed; aborting synthesis"
+                            );
+                            break;
+                        }
                     }
-                    Err(e) => warn!(error = %e, "tts synthesis failed"),
+                    Err(e) => warn!(
+                        trace_id = %synth_trace,
+                        segment = segment_index,
+                        error = %e,
+                        "tts synthesis failed"
+                    ),
                 }
             }
+            // 合成结束发 EOS：工具多轮时只在最终轮触发
             let _ = synth_audio_tx
                 .send(voicev1::TtsAudioChunk {
                     payload: vec![],
@@ -727,13 +802,13 @@ impl VoiceRouter {
                 .await;
         });
 
-        tokio::spawn(async move {
-            let mut tts_client = VoiceServiceClient::new(channel);
-            if let Err(e) = tts_client
+        let upload_trace = trace_id.clone();
+        let upload_task = tokio::spawn(async move {
+            if let Err(e) = VoiceServiceClient::new(channel)
                 .stream_tts_audio(tonic::Request::new(ReceiverStream::new(audio_rx)))
                 .await
             {
-                warn!("stream_tts_audio failed: {e}");
+                warn!(trace_id = %upload_trace, error = %e, "stream_tts_audio failed");
             }
         });
 
@@ -747,42 +822,73 @@ impl VoiceRouter {
         let on_text_token_shared = shared_tx.clone();
         let on_text_token_chunker = chunker.clone();
         let on_text_token = move |token: &str| {
-            let Ok(mut chunker_guard) = on_text_token_chunker.lock() else {
-                return;
-            };
-            let Ok(tx_guard) = on_text_token_shared.lock() else {
-                return;
-            };
-            if let Some(ref tx) = *tx_guard {
-                for segment in chunker_guard.push_token(token) {
-                    let _ = tx.try_send(segment);
+            let token = token.to_string();
+            let chunker = on_text_token_chunker.clone();
+            let shared = on_text_token_shared.clone();
+            Box::pin(async move {
+                let segments: Vec<(usize, String)> = {
+                    let mut chunker_guard = chunker.lock().expect("chunker poisoned");
+                    chunker_guard
+                        .push_token(&token)
+                        .into_iter()
+                        .map(|segment| (0, segment))
+                        .collect()
+                };
+                // 取出发送端副本，避免 std MutexGuard 跨 await 存活导致 future 非 Send
+                let tx = shared
+                    .lock()
+                    .expect("tts tx poisoned")
+                    .as_ref()
+                    .cloned();
+                if let Some(tx) = tx {
+                    for (index, segment) in segments {
+                        if tx.send((index, segment)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
-            }
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         };
 
         let on_turn_end_shared = shared_tx.clone();
         let on_turn_end_chunker = chunker.clone();
         let on_turn_end = move |finish_reason: &str| {
-            if should_close_tts_turn(finish_reason) {
-                let Ok(mut chunker_guard) = on_turn_end_chunker.lock() else {
+            let finish_reason = finish_reason.to_string();
+            let chunker = on_turn_end_chunker.clone();
+            let shared = on_turn_end_shared.clone();
+            Box::pin(async move {
+                if !should_close_tts_turn(&finish_reason) {
                     return;
+                }
+                let segments: Vec<(usize, String)> = {
+                    let mut chunker_guard = chunker.lock().expect("chunker poisoned");
+                    chunker_guard
+                        .finish()
+                        .into_iter()
+                        .map(|segment| (0, segment))
+                        .collect()
                 };
-                if let Ok(tx_guard) = on_turn_end_shared.lock() {
-                    if let Some(ref tx) = *tx_guard {
-                        for segment in chunker_guard.finish() {
-                            let _ = tx.try_send(segment);
+                let tx = shared.lock().expect("tts tx poisoned").as_ref().cloned();
+                if let Some(tx) = tx {
+                    for (index, segment) in segments {
+                        if tx.send((index, segment)).await.is_err() {
+                            break;
                         }
                     }
                 }
-                if let Ok(mut tx_guard) = shared_tx.lock() {
-                    *tx_guard = None;
-                }
-            }
+                *shared.lock().expect("tts tx poisoned") = None;
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         };
 
-        Ok(StreamCallbacks {
-            on_text_token: Some(Box::new(on_text_token)),
-            on_turn_end: Some(Box::new(on_turn_end)),
+        Ok(TtsTurnRuntime {
+            callbacks: StreamCallbacks {
+                on_text_token: Some(Box::new(on_text_token)),
+                on_turn_end: Some(Box::new(on_turn_end)),
+            },
+            shared_tx,
+            synth_task,
+            upload_task,
+            trace_id,
         })
     }
 
@@ -1015,5 +1121,82 @@ mod tests {
         for finish_reason in ["stop", "length", "content_filter", "function_call", ""] {
             assert!(should_close_tts_turn(finish_reason));
         }
+    }
+
+    #[tokio::test]
+    async fn tts_sentence_channel_backpressures_sender_when_full() {
+        let (tx, mut rx) = mpsc::channel::<(usize, String)>(1);
+        tx.send((1, "first".to_string())).await.unwrap();
+
+        // 满通道：send 挂起而非丢帧
+        let sender = tx.clone();
+        let pending = tokio::spawn(async move {
+            sender.send((2, "second".to_string())).await.is_ok()
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+
+        let _ = rx.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), pending)
+                .await
+                .expect("backpressured send must complete after space frees")
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn tts_turn_runtime_finish_drains_tasks() {
+        let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(8);
+        let (audio_tx, _audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+
+        let synth_task = tokio::spawn(async move {
+            let mut rx = sentence_rx;
+            while let Some((_, _)) = rx.recv().await {}
+            let _ = audio_tx
+                .send(voicev1::TtsAudioChunk {
+                    payload: vec![],
+                    codec: "mp3".to_string(),
+                    end_of_stream: true,
+                    trace_id: "test".to_string(),
+                })
+                .await;
+        });
+        let upload_task = tokio::spawn(async {});
+
+        let runtime = TtsTurnRuntime {
+            callbacks: StreamCallbacks::default(),
+            shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
+            synth_task,
+            upload_task,
+            trace_id: "test-trace".to_string(),
+        };
+
+        runtime.finish().await;
+    }
+
+    #[tokio::test]
+    async fn tts_turn_runtime_abort_cancels_tasks() {
+        let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(8);
+        let _rx_keepalive = sentence_rx;
+        let (audio_tx, _audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+        drop(audio_tx);
+
+        let synth_task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let upload_task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let runtime = TtsTurnRuntime {
+            callbacks: StreamCallbacks::default(),
+            shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
+            synth_task,
+            upload_task,
+            trace_id: "test-trace".to_string(),
+        };
+
+        runtime.abort().await;
     }
 }
