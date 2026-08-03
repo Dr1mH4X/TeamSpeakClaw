@@ -170,7 +170,10 @@ impl NcRouter {
             user_id: msg.user_id,
         };
         let Ok(permit) = llm.try_reserve_turn(&source).await else {
-            warn!(user_id = msg.user_id, "NC LLM turn queue full; dropping message");
+            warn!(
+                user_id = msg.user_id,
+                "NC LLM turn queue full; dropping message"
+            );
             return;
         };
 
@@ -201,7 +204,10 @@ impl NcRouter {
             group_id: msg.group_id,
         };
         let Ok(permit) = llm.try_reserve_turn(&source).await else {
-            warn!(group_id = msg.group_id, "NC LLM turn queue full; dropping message");
+            warn!(
+                group_id = msg.group_id,
+                "NC LLM turn queue full; dropping message"
+            );
             return;
         };
 
@@ -344,7 +350,8 @@ impl NcRouter {
             .save_turn(&source, stripped.to_string(), reply_text);
     }
 
-    fn is_triggered(&self, message: &[Segment]) -> bool {        let nc = &self.config.napcat;
+    fn is_triggered(&self, message: &[Segment]) -> bool {
+        let nc = &self.config.napcat;
         let self_id = self.adapter.get_self_id().to_string();
         if message
             .iter()

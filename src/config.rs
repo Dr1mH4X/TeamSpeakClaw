@@ -34,6 +34,7 @@ pub fn config_dir() -> PathBuf {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
@@ -41,19 +42,6 @@ pub struct AppConfig {
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            llm: LlmConfig::default(),
-            bot: BotConfig::default(),
-            music_backend: None,
-            napcat: NapCatConfig::default(),
-            headless: HeadlessConfig::default(),
-            logging: LogConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -84,7 +72,6 @@ impl AppConfig {
         if self.llm.max_queued_requests == 0 {
             anyhow::bail!("llm.max_queued_requests must be greater than zero");
         }
-
 
         if self.llm.connect_timeout_secs == 0 {
             anyhow::bail!("llm.connect_timeout_secs must be greater than zero");
