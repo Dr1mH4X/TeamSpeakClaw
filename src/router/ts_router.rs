@@ -1,7 +1,7 @@
-use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::headless::{
     should_route_text_through_bridge, voice_features_enabled, VoiceBridgeState,
 };
+use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;

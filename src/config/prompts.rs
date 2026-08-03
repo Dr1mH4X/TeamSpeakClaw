@@ -4,18 +4,10 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct PromptsConfig {
     pub system: SystemPrompts,
     pub tts: TtsPrompts,
-}
-
-impl Default for PromptsConfig {
-    fn default() -> Self {
-        Self {
-            system: SystemPrompts::default(),
-            tts: TtsPrompts::default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -3,8 +3,8 @@ pub mod event;
 pub mod types;
 pub mod ws;
 
-pub use ws::NapCatAdapter;
 pub(crate) use ws::ConnectionExit;
+pub use ws::NapCatAdapter;
 
 use crate::config::AppConfig;
 use anyhow::Result;

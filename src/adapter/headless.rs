@@ -256,10 +256,7 @@ pub async fn run(
     if shutdown_requested {
         Ok(())
     } else {
-        Err(anyhow!(
-            "{} stopped unexpectedly",
-            first_component.name()
-        ))
+        Err(anyhow!("{} stopped unexpectedly", first_component.name()))
     }
 }
 
