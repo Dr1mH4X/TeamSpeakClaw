@@ -41,16 +41,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update version in Cargo.toml
+      - name: Setup Python
+        if: inputs.is-release == true
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Update release version
         if: inputs.is-release == true
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
-          else
-            sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
-          fi
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          if not re.fullmatch(
+              r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+              version,
+          ):
+              raise SystemExit(f"invalid release version: {version}")
+
+          def replace_once(path: Path, pattern: str) -> None:
+              content = path.read_text(encoding="utf-8")
+              updated, count = re.subn(
+                  pattern,
+                  lambda match: f'{match.group(1)}{version}"',
+                  content,
+              )
+              if count != 1:
+                  raise SystemExit(f"failed to update version in {path}")
+              path.write_text(updated, encoding="utf-8")
+
+          replace_once(Path("Cargo.toml"), r'(?m)^(version = ")[^"]+"')
+          replace_once(
+              Path("Cargo.lock"),
+              r'(\[\[package\]\]\nname = "teamspeakclaw"\nversion = ")[^"]+"',
+          )
+          PY
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -75,7 +106,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Prepare artifacts
         shell: bash
