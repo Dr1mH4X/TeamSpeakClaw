@@ -81,6 +81,11 @@ impl AppConfig {
             anyhow::bail!("llm.max_concurrent_requests must be greater than zero");
         }
 
+        if self.llm.max_queued_requests == 0 {
+            anyhow::bail!("llm.max_queued_requests must be greater than zero");
+        }
+
+
         if self.llm.connect_timeout_secs == 0 {
             anyhow::bail!("llm.connect_timeout_secs must be greater than zero");
         }

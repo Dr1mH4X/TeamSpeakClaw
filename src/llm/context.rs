@@ -34,15 +34,45 @@ impl fmt::Display for SessionSource {
     }
 }
 
-/// 为每个规范会话键提供独立的串行锁。
-#[derive(Default)]
+/// 轮次预留失败：容量（并发 + 排队）已满
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnQueueFull;
+
+/// 已预留的轮次许可：持有期间同会话后续轮次被阻塞，容量占位
+pub(crate) struct TurnPermit {
+    _capacity: tokio::sync::OwnedSemaphorePermit,
+    _session: OwnedMutexGuard<()>,
+}
+
+impl std::fmt::Debug for TurnPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnPermit")
+    }
+}
+
+/// 为每个规范会话键提供独立的串行锁，并限制总排队/执行容量
 pub(crate) struct TurnCoordinator {
     locks: AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    capacity: Arc<tokio::sync::Semaphore>,
 }
 
 impl TurnCoordinator {
-    /// 获取当前会话的独占轮次锁，并在取锁前清理失效条目。
-    pub(crate) async fn acquire(&self, source: &SessionSource) -> OwnedMutexGuard<()> {
+    /// total_capacity = max_concurrent_requests + max_queued_requests
+    pub(crate) fn new(total_capacity: usize) -> Self {
+        Self {
+            locks: AsyncMutex::new(HashMap::new()),
+            capacity: Arc::new(tokio::sync::Semaphore::new(total_capacity)),
+        }
+    }
+
+    /// 预留当前会话的轮次：容量满立即返回 busy；同会话严格按预留顺序排队。
+    pub(crate) async fn try_reserve(&self, source: &SessionSource) -> Result<TurnPermit, TurnQueueFull> {
+        let capacity = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| TurnQueueFull)?;
+
         let session_lock = {
             let mut locks = self.locks.lock().await;
             locks.retain(|_, lock| lock.strong_count() > 0);
@@ -57,7 +87,11 @@ impl TurnCoordinator {
             }
         };
 
-        session_lock.lock_owned().await
+        let session = session_lock.lock_owned().await;
+        Ok(TurnPermit {
+            _capacity: capacity,
+            _session: session,
+        })
     }
 }
 
@@ -220,16 +254,17 @@ mod tests {
 
     #[tokio::test]
     async fn same_session_turns_are_serialized() {
-        let coordinator = Arc::new(TurnCoordinator::default());
+        let coordinator = Arc::new(TurnCoordinator::new(8));
         let source = SessionSource::TeamSpeak {
             uid: "same-user".to_string(),
         };
-        let first_guard = coordinator.acquire(&source).await;
+        let first_guard = coordinator.try_reserve(&source).await.unwrap();
 
         let waiting_coordinator = coordinator.clone();
         let waiting_source = source.clone();
-        let mut waiter =
-            tokio::spawn(async move { waiting_coordinator.acquire(&waiting_source).await });
+        let mut waiter = tokio::spawn(async move {
+            waiting_coordinator.try_reserve(&waiting_source).await
+        });
 
         assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
             .await
@@ -245,27 +280,28 @@ mod tests {
 
     #[tokio::test]
     async fn different_sessions_can_run_concurrently() {
-        let coordinator = TurnCoordinator::default();
+        let coordinator = TurnCoordinator::new(8);
         let first_source = SessionSource::TeamSpeak {
             uid: "first-user".to_string(),
         };
         let second_source = SessionSource::TeamSpeak {
             uid: "second-user".to_string(),
         };
-        let _first_guard = coordinator.acquire(&first_source).await;
+        let _first_guard = coordinator.try_reserve(&first_source).await.unwrap();
 
         let second_guard = tokio::time::timeout(
             Duration::from_millis(200),
-            coordinator.acquire(&second_source),
+            coordinator.try_reserve(&second_source),
         )
         .await
-        .expect("different sessions must not block each other");
+        .expect("different sessions must not block each other")
+        .expect("capacity must be available");
         drop(second_guard);
     }
 
     #[tokio::test]
     async fn stale_session_locks_are_removed_on_next_acquire() {
-        let coordinator = TurnCoordinator::default();
+        let coordinator = TurnCoordinator::new(8);
         let first_source = SessionSource::Headless {
             uid: "expired".to_string(),
         };
@@ -273,11 +309,52 @@ mod tests {
             uid: "active".to_string(),
         };
 
-        let first_guard = coordinator.acquire(&first_source).await;
+        let first_guard = coordinator.try_reserve(&first_source).await.unwrap();
         assert_eq!(coordinator.locks.lock().await.len(), 1);
         drop(first_guard);
 
-        let _second_guard = coordinator.acquire(&second_source).await;
+        let _second_guard = coordinator.try_reserve(&second_source).await.unwrap();
         assert_eq!(coordinator.locks.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn full_capacity_returns_queue_full_without_waiting() {
+        let coordinator = TurnCoordinator::new(2);
+        let source = SessionSource::NapCatPrivate { user_id: 1 };
+        let other = SessionSource::NapCatPrivate { user_id: 2 };
+
+        let first = coordinator.try_reserve(&source).await.unwrap();
+        let second = coordinator.try_reserve(&other).await.unwrap();
+
+        assert_eq!(
+            coordinator.try_reserve(&source).await.unwrap_err(),
+            TurnQueueFull
+        );
+        drop(first);
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_releases_capacity_for_successors() {
+        let coordinator = Arc::new(TurnCoordinator::new(1));
+        let source = SessionSource::NapCatPrivate { user_id: 1 };
+        let holder = coordinator.try_reserve(&source).await.unwrap();
+
+        let waiting = tokio::spawn({
+            let coordinator = coordinator.clone();
+            let source = source.clone();
+            async move { coordinator.try_reserve(&source).await }
+        });
+        waiting.abort();
+        drop(holder);
+
+        let successor = tokio::time::timeout(
+            Duration::from_millis(200),
+            coordinator.try_reserve(&source),
+        )
+        .await
+        .expect("cancelled waiter must not block successors")
+        .expect("capacity must be released");
+        drop(successor);
     }
 }

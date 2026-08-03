@@ -5,7 +5,7 @@ use crate::adapter::headless::{
 use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnPermit};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry};
@@ -13,7 +13,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, watch, Mutex};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 struct SqExecutor<'a> {
@@ -103,18 +105,29 @@ impl EventRouter {
             .take()
             .ok_or_else(|| anyhow::anyhow!("TS event router already started"))?;
 
+        let mut tasks = JoinSet::new();
         loop {
             match receive_ts_event(&mut subscriptions.events, &mut subscriptions.disconnected)
                 .await?
             {
                 TsEvent::TextMessage(msg) => {
                     let this = self.clone();
-                    tokio::spawn(async move {
-                        this.handle_message(msg).await;
+                    let source = SessionSource::TeamSpeak {
+                        uid: msg.invoker_uid.clone(),
+                    };
+                    let Ok(permit) = this.llm.try_reserve_turn(&source).await else {
+                        warn!(
+                            invoker = %msg.invoker_name,
+                            "TS LLM turn queue full; dropping message"
+                        );
+                        continue;
+                    };
+                    tasks.spawn(async move {
+                        this.handle_message(msg, permit).await;
                     });
                 }
                 TsEvent::Disconnected => {
-                    return Ok(TsRouterExit::Disconnected);
+                    return drain_ts_tasks(tasks).await;
                 }
             }
         }
@@ -142,7 +155,7 @@ impl EventRouter {
             .await
     }
 
-    async fn handle_message(&self, event: TextMessageEvent) {
+    async fn handle_message(&self, event: TextMessageEvent, _turn: TurnPermit) {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
@@ -215,6 +228,10 @@ impl EventRouter {
         let source = SessionSource::TeamSpeak {
             uid: event.invoker_uid.clone(),
         };
+        if let Err(error) = self.llm.check_user_text_bounds(msg_content) {
+            warn!(error = %error, "TS message dropped for exceeding size limit");
+            return;
+        }
         let system_prompt = &self.prompts.system.content;
 
         let (online_clients, invoker_channel) = match self.adapter.list_clients().await {
@@ -272,12 +289,15 @@ Online: {}"#,
                         reply_chars = result.content.chars().count(),
                         "[TS] LLM final reply ready"
                     );
-                    self.llm
-                        .save_turn(&source, msg_content.to_string(), result.content.clone());
-                    let _ = self
+                    if self
                         .adapter
                         .send_text_message(reply_mode, reply_target, &result.content)
-                        .await;
+                        .await
+                        .is_ok()
+                    {
+                        self.llm
+                            .save_turn(&source, msg_content.to_string(), result.content);
+                    }
                 }
             }
             Err(e) => {
@@ -293,6 +313,32 @@ Online: {}"#,
             }
         }
     }
+}
+
+/// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
+const TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn drain_ts_tasks(mut tasks: JoinSet<()>) -> Result<TsRouterExit> {
+    loop {
+        let result = tokio::time::timeout(TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
+        match result {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(error))) => {
+                error!("TS message task failed: {error}");
+            }
+            Ok(None) => break,
+            Err(_) => {
+                warn!(
+                    timeout_secs = TASK_DRAIN_TIMEOUT.as_secs(),
+                    "TS message tasks exceeded drain timeout; aborting"
+                );
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                break;
+            }
+        }
+    }
+    Ok(TsRouterExit::Disconnected)
 }
 
 async fn receive_ts_event(
