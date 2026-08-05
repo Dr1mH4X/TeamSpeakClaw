@@ -65,10 +65,6 @@ impl AppConfig {
             anyhow::bail!("llm.base_url must use http or https");
         }
 
-        if self.llm.max_concurrent_requests == 0 {
-            anyhow::bail!("llm.max_concurrent_requests must be greater than zero");
-        }
-
         if !matches!(
             self.bot.default_reply_mode.as_str(),
             "private" | "channel" | "server"
@@ -114,7 +110,6 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "legacy-model"
 omni_model = true
 max_context_turns = 3
-max_context_sessions = 8
 "#,
         )
         .unwrap();
@@ -124,24 +119,10 @@ max_context_sessions = 8
         assert_eq!(config.llm.model, "legacy-model");
         assert!(config.llm.omni_model);
         assert_eq!(config.llm.max_context_turns, 3);
-        assert_eq!(config.llm.max_context_sessions, 8);
-        assert_eq!(config.llm.max_concurrent_requests, 4);
         assert_eq!(config.bot.default_reply_mode, "private");
         assert!(!config.napcat.enabled);
         assert_eq!(config.logging.max_log_days, 7);
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn rejects_zero_llm_concurrency() {
-        let mut config = AppConfig::default();
-        config.llm.max_concurrent_requests = 0;
-
-        let error = config.validate().unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("max_concurrent_requests must be greater than zero"));
     }
 
     #[test]

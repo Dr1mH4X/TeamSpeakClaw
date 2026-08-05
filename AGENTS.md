@@ -71,7 +71,7 @@ examples/config/             # Reference config templates (settings.toml, acl.to
 
 - OpenAI-compatible (any API with `/v1/chat/completions`)
 - Streamed response parsing: `reasoning_content` fields are **ignored** (not stored or relayed)
-- Context: configurable max turns/sessions via `max_context_turns` / `max_context_sessions`
+- Context: configurable max turns via `max_context_turns`; sessions capped by a fixed constant
 - Concurrent request limiting via tokio `Semaphore`; configurable timeouts (connect, stream idle, stream total)
 - `omni_model` flag (`config/llm.rs`): enables omni-modal mode; when set, text is routed through voice bridge
 
