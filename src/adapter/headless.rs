@@ -355,7 +355,7 @@ impl Runtime {
                         bridge_registry.clone(),
                         bridge_ts_adapter.clone(),
                         bridge_state_for_router.clone(),
-                    ).run() => result,
+                    ).run(shutdown_for_bridge.clone()) => result,
                 };
                 bridge_state_for_router.set_stream_ready(false);
                 if shutdown_for_bridge.is_cancelled() {
