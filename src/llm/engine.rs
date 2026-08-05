@@ -15,6 +15,12 @@ pub const MAX_USER_TEXT_BYTES: usize = 1024 * 1024;
 /// 同会话排队等待前驱完成的最大任务数（并发满载时新消息被丢弃）
 const MAX_QUEUED_REQUESTS: usize = 4;
 
+/// 上下文最多保留的会话数（0 表示不限制的逻辑在 ContextWindow 内部已处理）
+const MAX_CONTEXT_SESSIONS: usize = 1000;
+
+/// 最大并发 LLM 请求数
+const MAX_CONCURRENT_REQUESTS: usize = 4;
+
 pub struct LlmEngine {
     provider: Box<dyn LlmProvider>,
     context: ContextWindow,
@@ -26,10 +32,9 @@ impl LlmEngine {
     pub fn new(config: Arc<AppConfig>) -> Result<Self> {
         let cfg = &config;
         let provider = Box::new(OpenAiProvider::new(cfg.llm.clone())?);
-        let context = ContextWindow::new(cfg.llm.max_context_turns, cfg.llm.max_context_sessions);
-        let request_limit = Semaphore::new(cfg.llm.max_concurrent_requests);
-        let turn_coordinator =
-            TurnCoordinator::new(cfg.llm.max_concurrent_requests + MAX_QUEUED_REQUESTS);
+        let context = ContextWindow::new(cfg.llm.max_context_turns, MAX_CONTEXT_SESSIONS);
+        let request_limit = Semaphore::new(MAX_CONCURRENT_REQUESTS);
+        let turn_coordinator = TurnCoordinator::new(MAX_CONCURRENT_REQUESTS + MAX_QUEUED_REQUESTS);
         Ok(Self {
             provider,
             context,

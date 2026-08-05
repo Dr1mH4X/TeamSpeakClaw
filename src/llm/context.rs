@@ -67,7 +67,7 @@ pub(crate) struct TurnCoordinator {
 }
 
 impl TurnCoordinator {
-    /// total_capacity = max_concurrent_requests + 排队容量常量
+    /// total_capacity = MAX_CONCURRENT_REQUESTS + MAX_QUEUED_REQUESTS
     pub(crate) fn new(total_capacity: usize) -> Self {
         Self {
             locks: AsyncMutex::new(HashMap::new()),
