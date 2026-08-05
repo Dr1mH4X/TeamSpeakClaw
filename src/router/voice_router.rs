@@ -184,6 +184,7 @@ pub struct VoiceRouter {
     session_locks: SessionLocks,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
     bridge_state: VoiceBridgeState,
+    tts_lock: Mutex<()>,
 }
 
 impl VoiceRouter {
@@ -216,6 +217,7 @@ impl VoiceRouter {
             ts_adapter,
             speech_provider,
             bridge_state,
+            tts_lock: Mutex::new(()),
         }
     }
 
@@ -655,6 +657,13 @@ impl VoiceRouter {
         let audio_base64 = BASE64.encode(&wav_bytes);
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
 
+        // TTS 是单输出通道：一次只允许一个带语音输出的 LLM 轮次，避免多个 TTS 流交错混音
+        let _tts_guard = if self.is_tts_effectively_enabled() {
+            Some(self.tts_lock.lock().await)
+        } else {
+            None
+        };
+
         let (mut messages, tools, allowed_skills, session_source) =
             self.build_omni_llm_request(&ctx, audio_data).await;
         let executor = SkillExecutor {
@@ -722,6 +731,12 @@ impl VoiceRouter {
             message_chars = user_msg.chars().count(),
             "Voice user message received"
         );
+        // TTS 是单输出通道：一次只允许一个带语音输出的 LLM 轮次，避免多个 TTS 流交错混音
+        let _tts_guard = if self.is_tts_effectively_enabled() {
+            Some(self.tts_lock.lock().await)
+        } else {
+            None
+        };
         if let Err(error) = self.llm.check_user_text_bounds(&user_msg) {
             warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
             return Ok(());
