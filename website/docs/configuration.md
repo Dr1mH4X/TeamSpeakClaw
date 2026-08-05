@@ -28,8 +28,6 @@ sidebar_position: 3
 | `omni_model` | bool | `false` | 是否直接使用多模态模型处理语音 |
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
 
-流式响应另有固定的安全限制：单行最多 256 KiB，单次原始 SSE 数据最多 8 MiB。
-
 ### NapCat 配置详解
 
 `[napcat]` 区段用于配置 QQ 机器人功能，通过 NapCat（OneBot 11 协议实现）连接 QQ。
