@@ -34,6 +34,7 @@ pub fn config_dir() -> PathBuf {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub bot: BotConfig,
@@ -41,19 +42,6 @@ pub struct AppConfig {
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            llm: LlmConfig::default(),
-            bot: BotConfig::default(),
-            music_backend: None,
-            napcat: NapCatConfig::default(),
-            headless: HeadlessConfig::default(),
-            logging: LogConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -75,10 +63,6 @@ impl AppConfig {
             url::Url::parse(&self.llm.base_url).context("llm.base_url must be a valid URL")?;
         if !matches!(llm_base_url.scheme(), "http" | "https") {
             anyhow::bail!("llm.base_url must use http or https");
-        }
-
-        if self.llm.max_concurrent_requests == 0 {
-            anyhow::bail!("llm.max_concurrent_requests must be greater than zero");
         }
 
         if !matches!(
@@ -126,7 +110,6 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "legacy-model"
 omni_model = true
 max_context_turns = 3
-max_context_sessions = 8
 "#,
         )
         .unwrap();
@@ -136,24 +119,10 @@ max_context_sessions = 8
         assert_eq!(config.llm.model, "legacy-model");
         assert!(config.llm.omni_model);
         assert_eq!(config.llm.max_context_turns, 3);
-        assert_eq!(config.llm.max_context_sessions, 8);
-        assert_eq!(config.llm.max_concurrent_requests, 4);
         assert_eq!(config.bot.default_reply_mode, "private");
         assert!(!config.napcat.enabled);
         assert_eq!(config.logging.max_log_days, 7);
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn rejects_zero_llm_concurrency() {
-        let mut config = AppConfig::default();
-        config.llm.max_concurrent_requests = 0;
-
-        let error = config.validate().unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("max_concurrent_requests must be greater than zero"));
     }
 
     #[test]

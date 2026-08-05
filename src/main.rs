@@ -10,6 +10,7 @@ mod skills;
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::cli::Args;
@@ -32,7 +33,44 @@ async fn main() -> Result<()> {
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
     let registry = Arc::new(SkillRegistry::with_defaults(config.clone()));
-    let llm = Arc::new(LlmEngine::new(config.clone()));
+    let llm = Arc::new(LlmEngine::new(config.clone())?);
 
-    crate::adapter::run(config, prompts, gate, registry, llm).await
+    let shutdown = CancellationToken::new();
+    let run = crate::adapter::run(config, prompts, gate, registry, llm, shutdown.clone());
+    tokio::pin!(run);
+
+    tokio::select! {
+        result = &mut run => result,
+        signal_result = wait_for_shutdown_signal() => {
+            shutdown.cancel();
+            match signal_result {
+                Ok(()) => {
+                    info!("Shutdown signal received");
+                    run.await
+                }
+                Err(error) => {
+                    let _ = run.await;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<()> {
+    use tokio::signal::unix::SignalKind;
+
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+        signal = sigterm.recv() => signal
+            .map(|_| ())
+            .ok_or_else(|| anyhow::anyhow!("SIGTERM signal stream closed")),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<()> {
+    tokio::signal::ctrl_c().await.map_err(Into::into)
 }

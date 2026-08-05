@@ -8,13 +8,15 @@ use crate::adapter::napcat::{
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor};
+use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, UnifiedInboundEvent, strip_trigger_prefix};
+use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 struct NcExecutor<'a> {
@@ -104,6 +106,7 @@ impl NcRouter {
         let mut rx = self.adapter.subscribe();
         info!("NcRouter: listening for NapCat events");
 
+        let mut tasks = JoinSet::new();
         loop {
             let event = match rx.recv().await {
                 Ok(event) => event,
@@ -115,6 +118,7 @@ impl NcRouter {
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    drain_nc_tasks(tasks).await;
                     return Err(anyhow::anyhow!("NcRouter event stream closed"));
                 }
             };
@@ -127,7 +131,7 @@ impl NcRouter {
                         info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
-                    self.spawn_handle_private(msg);
+                    self.spawn_handle_private(&mut tasks, msg).await;
                 }
                 NcEvent::GroupMessage(msg) => {
                     if msg.user_id == self.adapter.get_self_id() {
@@ -144,7 +148,7 @@ impl NcRouter {
                         );
                         continue;
                     }
-                    self.spawn_handle_group(msg);
+                    self.spawn_handle_group(&mut tasks, msg).await;
                 }
                 NcEvent::Heartbeat => {
                     debug!("NapCat heartbeat");
@@ -153,7 +157,7 @@ impl NcRouter {
         }
     }
 
-    fn spawn_handle_private(&self, msg: PrivateMessageEvent) {
+    async fn spawn_handle_private(&self, tasks: &mut JoinSet<()>, msg: PrivateMessageEvent) {
         let config = self.config.clone();
         let prompts = self.prompts.clone();
         let adapter = self.adapter.clone();
@@ -162,7 +166,19 @@ impl NcRouter {
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
 
-        tokio::spawn(async move {
+        let source = SessionSource::NapCatPrivate {
+            user_id: msg.user_id,
+        };
+        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
+            warn!(
+                user_id = msg.user_id,
+                "NC LLM turn queue full; dropping message"
+            );
+            return;
+        };
+
+        tasks.spawn(async move {
+            let session = llm.acquire_turn_session(&source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -172,11 +188,11 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_private(msg).await;
+            router.handle_private(msg, capacity, session).await;
         });
     }
 
-    fn spawn_handle_group(&self, msg: GroupMessageEvent) {
+    async fn spawn_handle_group(&self, tasks: &mut JoinSet<()>, msg: GroupMessageEvent) {
         let config = self.config.clone();
         let prompts = self.prompts.clone();
         let adapter = self.adapter.clone();
@@ -185,7 +201,19 @@ impl NcRouter {
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
 
-        tokio::spawn(async move {
+        let source = SessionSource::NapCatGroup {
+            group_id: msg.group_id,
+        };
+        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
+            warn!(
+                group_id = msg.group_id,
+                "NC LLM turn queue full; dropping message"
+            );
+            return;
+        };
+
+        tasks.spawn(async move {
+            let session = llm.acquire_turn_session(&source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -195,11 +223,17 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_group(msg).await;
+            router.handle_group(msg, capacity, session).await;
         });
     }
 
-    async fn handle_private(&self, msg: PrivateMessageEvent) {
+    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
+    async fn handle_private(
+        &self,
+        msg: PrivateMessageEvent,
+        _capacity: TurnCapacityPermit,
+        _session: TurnSessionGuard,
+    ) {
         let Some(unified_event) = UnifiedInboundEvent::from_nc_private(&msg) else {
             return;
         };
@@ -225,6 +259,11 @@ impl NcRouter {
             "[NC Private] message received"
         );
 
+        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
+            warn!(error = %error, "NC message dropped for exceeding size limit");
+            return;
+        }
+
         let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, None);
 
         let reply_text = self
@@ -241,11 +280,23 @@ impl NcRouter {
             let segs = vec![Segment::text(&reply_text)];
             if let Err(e) = self.adapter.send_private(user_id, &segs).await {
                 error!("NC send_private failed: {e}");
+                return;
             }
         }
+        let source = SessionSource::NapCatPrivate {
+            user_id: msg.user_id,
+        };
+        self.llm
+            .save_turn(&source, stripped.to_string(), reply_text);
     }
 
-    async fn handle_group(&self, msg: GroupMessageEvent) {
+    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
+    async fn handle_group(
+        &self,
+        msg: GroupMessageEvent,
+        _capacity: TurnCapacityPermit,
+        _session: TurnSessionGuard,
+    ) {
         let triggered = self.is_triggered(&msg.message);
         let Some(unified_event) = UnifiedInboundEvent::from_nc_group(&msg, triggered) else {
             return;
@@ -273,6 +324,11 @@ impl NcRouter {
             "[NC Group] message received"
         );
 
+        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
+            warn!(error = %error, "NC message dropped for exceeding size limit");
+            return;
+        }
+
         let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, Some(msg.group_id));
 
         let reply_text = self
@@ -298,8 +354,14 @@ impl NcRouter {
             segs.push(Segment::text(&reply_text));
             if let Err(e) = self.adapter.send_group(group_id, &segs).await {
                 error!("NC send_group failed: {e}");
+                return;
             }
         }
+        let source = SessionSource::NapCatGroup {
+            group_id: msg.group_id,
+        };
+        self.llm
+            .save_turn(&source, stripped.to_string(), reply_text);
     }
 
     fn is_triggered(&self, message: &[Segment]) -> bool {
@@ -455,13 +517,36 @@ impl NcRouter {
                     reply_chars = content.chars().count(),
                     "[NC] LLM final reply ready"
                 );
-                self.llm
-                    .save_turn(&source, user_msg.to_string(), content.clone());
                 content
             }
             Err(e) => {
                 error!("NC LLM error: {}", e);
                 error_msg
+            }
+        }
+    }
+}
+
+/// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
+const NC_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn drain_nc_tasks(mut tasks: JoinSet<()>) {
+    loop {
+        let result = tokio::time::timeout(NC_TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
+        match result {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(error))) => {
+                error!("NC message task failed: {error}");
+            }
+            Ok(None) => break,
+            Err(_) => {
+                warn!(
+                    timeout_secs = NC_TASK_DRAIN_TIMEOUT.as_secs(),
+                    "NC message tasks exceeded drain timeout; aborting"
+                );
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                break;
             }
         }
     }
