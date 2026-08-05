@@ -15,6 +15,9 @@ pub(crate) const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 pub(crate) const MAX_TOOL_ARGUMENT_BYTES_TOTAL: usize = 64 * 1024;
 const MAX_SSE_LINE_BYTES: usize = 256 * 1024;
 const MAX_SSE_STREAM_BYTES: usize = 8 * 1024 * 1024;
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+const STREAM_IDLE_TIMEOUT_SECS: u64 = 30;
+const STREAM_TOTAL_TIMEOUT_SECS: u64 = 300;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -141,7 +144,7 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new(config: LlmConfig) -> Result<Self> {
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .user_agent("Version: 5.10.0 (c3d4709c)")
             .build()
             .context("failed to build the LLM HTTP client")?;
@@ -308,11 +311,9 @@ impl LlmProvider for OpenAiProvider {
             body["tool_choice"] = json!("auto");
         }
 
-        let stream_idle_timeout = Duration::from_secs(self.config.stream_idle_timeout_secs);
-        let stream_total_timeout = Duration::from_secs(self.config.stream_total_timeout_secs);
-        let total_deadline = tokio::time::Instant::now()
-            .checked_add(stream_total_timeout)
-            .ok_or_else(|| anyhow::anyhow!("llm.stream_total_timeout_secs is too large"))?;
+        let stream_idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS);
+        let stream_total_timeout = Duration::from_secs(STREAM_TOTAL_TIMEOUT_SECS);
+        let total_deadline = tokio::time::Instant::now() + stream_total_timeout;
         let resp = match wait_with_deadlines(
             self.build_request(&url, &body).send(),
             stream_idle_timeout,
@@ -323,11 +324,11 @@ impl LlmProvider for OpenAiProvider {
             DeadlineOutcome::Completed(result) => result?,
             DeadlineOutcome::IdleTimeout => anyhow::bail!(
                 "LLM response headers were idle for {} seconds",
-                self.config.stream_idle_timeout_secs
+                STREAM_IDLE_TIMEOUT_SECS
             ),
             DeadlineOutcome::TotalTimeout => anyhow::bail!(
                 "LLM stream exceeded the total timeout of {} seconds",
-                self.config.stream_total_timeout_secs
+                STREAM_TOTAL_TIMEOUT_SECS
             ),
         };
 
@@ -336,8 +337,6 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let mut byte_stream = resp.bytes_stream();
-        let stream_idle_timeout_secs = self.config.stream_idle_timeout_secs;
-        let stream_total_timeout_secs = self.config.stream_total_timeout_secs;
         let (tx, rx) = mpsc::channel::<Result<LlmStreamEvent>>(128);
         tokio::spawn(async move {
             let mut pending: Vec<u8> = Vec::new();
@@ -355,7 +354,7 @@ impl LlmProvider for OpenAiProvider {
                         let _ = send_output_before_deadline(
                             &tx,
                             Err(anyhow::anyhow!(
-                                "LLM stream was idle for {stream_idle_timeout_secs} seconds"
+                                "LLM stream was idle for {STREAM_IDLE_TIMEOUT_SECS} seconds"
                             )),
                             total_deadline,
                         )
@@ -488,7 +487,7 @@ impl LlmProvider for OpenAiProvider {
         Ok(Box::pin(output_stream_with_total_deadline(
             rx,
             total_deadline,
-            stream_total_timeout_secs,
+            STREAM_TOTAL_TIMEOUT_SECS,
         )))
     }
 }

@@ -17,10 +17,6 @@ omni_model = false    # 多模态模型：true 时自动禁用 TTS/STT，直接�
 max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）
 max_context_sessions = 3  # 最大不同用户会话数（超过时淘汰最旧会话）
 max_concurrent_requests = 4  # 最大并发 LLM 请求数，必须大于 0
-max_queued_requests = 4  # 同会话等待队列容量（排队的任务数），必须大于 0；并发+排队总量满载时新消息被丢弃
-connect_timeout_secs = 10  # 建立 API 连接的超时时间（秒），必须大于 0
-stream_idle_timeout_secs = 30  # 流式响应连续无数据的超时时间（秒），必须大于 0
-stream_total_timeout_secs = 300  # 单次流式请求允许的总时间（秒），必须大于 0
 
 # Headless 语音服务配置
 [headless]
