@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
 use crate::config::{config_dir, AppConfig};
@@ -11,6 +11,25 @@ use crate::config::{config_dir, AppConfig};
 const IDENTITY_MAX_LEVEL: i32 = 29;
 /// 每次重试提升的等级步长
 const IDENTITY_UPGRADE_STEP: i32 = 5;
+
+fn next_identity_level(current_level: i32) -> Option<i32> {
+    (current_level < IDENTITY_MAX_LEVEL)
+        .then(|| (current_level + IDENTITY_UPGRADE_STEP).min(IDENTITY_MAX_LEVEL))
+}
+
+fn write_identity_file(path: &std::path::Path, serialized: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("identity path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        anyhow!(
+            "create identity directory {} failed: {error}",
+            parent.display()
+        )
+    })?;
+    std::fs::write(path, serialized)
+        .map_err(|error| anyhow!("write identity file {} failed: {error}", path.display()))
+}
 
 /// 检查 TS 错误，如果是权限问题则额外提示用户。
 fn check_ts_error(err: tsclient_rs::Error, op: &str) -> anyhow::Error {
@@ -43,6 +62,12 @@ pub struct TsAdapter {
     client: Arc<tsclient_rs::Client>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: std::sync::atomic::AtomicU32,
+    main_subscriptions: Mutex<Option<MainSubscriptions>>,
+}
+
+struct MainSubscriptions {
+    events: broadcast::Receiver<TsEvent>,
+    disconnected: watch::Receiver<bool>,
 }
 
 impl TsAdapter {
@@ -73,8 +98,9 @@ impl TsAdapter {
             let mut client =
                 tsclient_rs::Client::new(identity.clone(), addr.clone(), nickname.clone(), opts);
 
-            let (event_tx, _) = broadcast::channel::<TsEvent>(256);
-            Self::register_event_handlers(&client, event_tx.clone());
+            let (event_tx, event_rx) = broadcast::channel::<TsEvent>(256);
+            let (disconnect_tx, disconnect_rx) = watch::channel(false);
+            Self::register_event_handlers(&client, event_tx.clone(), disconnect_tx);
 
             client
                 .connect()
@@ -126,11 +152,17 @@ impl TsAdapter {
                         .map_err(|_| anyhow!("invalid TeamSpeak bot client ID: {clid}"))?;
                     let client = Arc::new(client);
 
-                    return Ok(Arc::new(Self {
+                    let adapter = Arc::new(Self {
                         client,
                         event_tx,
                         bot_clid: std::sync::atomic::AtomicU32::new(bot_clid),
-                    }));
+                        main_subscriptions: Mutex::new(Some(MainSubscriptions {
+                            events: event_rx,
+                            disconnected: disconnect_rx,
+                        })),
+                    });
+
+                    return Ok(adapter);
                 }
                 Ok(Err(e)) => {
                     let _ = client.disconnect().await;
@@ -149,7 +181,11 @@ impl TsAdapter {
         }
     }
 
-    fn register_event_handlers(client: &tsclient_rs::Client, tx: broadcast::Sender<TsEvent>) {
+    fn register_event_handlers(
+        client: &tsclient_rs::Client,
+        tx: broadcast::Sender<TsEvent>,
+        disconnect_tx: watch::Sender<bool>,
+    ) {
         {
             let tx = tx.clone();
             client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
@@ -186,6 +222,7 @@ impl TsAdapter {
             let tx_dc = tx.clone();
             client.on_disconnected(Arc::new(move |_: tsclient_rs::Event| {
                 let _ = tx_dc.send(TsEvent::Disconnected);
+                disconnect_tx.send_replace(true);
             }));
         }
     }
@@ -195,12 +232,11 @@ impl TsAdapter {
         current_level: i32,
         identity_file: &std::path::Path,
     ) -> Result<i32> {
-        let next_level = current_level + IDENTITY_UPGRADE_STEP;
-        if next_level > IDENTITY_MAX_LEVEL {
-            return Err(anyhow!(
+        let next_level = next_identity_level(current_level).ok_or_else(|| {
+            anyhow!(
                 "Server rejected connection at identity level {current_level} (tried max {IDENTITY_MAX_LEVEL})"
-            ));
-        }
+            )
+        })?;
 
         info!("Upgrading identity to level {next_level} (this may take a few minutes)...");
         identity
@@ -209,7 +245,7 @@ impl TsAdapter {
             .map_err(|e| anyhow!("identity upgrade failed: {e}"))?;
 
         let s = identity.to_string();
-        let _ = std::fs::write(identity_file, &s);
+        write_identity_file(identity_file, &s)?;
         info!("Identity upgraded to level {next_level}");
         Ok(next_level)
     }
@@ -234,14 +270,9 @@ impl TsAdapter {
                 }
             }
         }
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let identity = tsclient_rs::generateIdentity(level as i32);
         let s = identity.to_string();
-        if let Err(e) = std::fs::write(path, &s) {
-            warn!("Failed to save identity to {}: {e}", path.display());
-        }
+        write_identity_file(path, &s)?;
         info!("Generated new identity at level {level}");
         Ok(identity)
     }
@@ -252,6 +283,19 @@ impl TsAdapter {
 
     pub fn subscribe(&self) -> broadcast::Receiver<TsEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// 取出连接前创建的主订阅；每个适配器连接只能交给一个主路由。
+    pub(crate) fn take_main_subscriptions(
+        &self,
+    ) -> Result<(broadcast::Receiver<TsEvent>, watch::Receiver<bool>)> {
+        let subscriptions = self
+            .main_subscriptions
+            .lock()
+            .map_err(|_| anyhow!("TS main subscription lock poisoned"))?
+            .take()
+            .ok_or_else(|| anyhow!("TS main subscriptions already taken"))?;
+        Ok((subscriptions.events, subscriptions.disconnected))
     }
 
     pub async fn send_text_message(&self, target_mode: u8, target: u32, msg: &str) -> Result<()> {
@@ -356,8 +400,9 @@ pub enum TextMessageTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_client_channel_group_id;
+    use super::{next_identity_level, parse_client_channel_group_id, write_identity_file};
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     #[test]
     fn parses_nonzero_client_channel_group_id() {
@@ -376,5 +421,55 @@ mod tests {
         let info = HashMap::from([("client_channel_group_id".to_string(), "invalid".to_string())]);
 
         assert!(parse_client_channel_group_id(&info).is_err());
+    }
+
+    #[test]
+    fn identity_upgrade_uses_regular_step() {
+        assert_eq!(next_identity_level(8), Some(13));
+    }
+
+    #[test]
+    fn identity_upgrade_clamps_to_maximum() {
+        assert_eq!(next_identity_level(28), Some(29));
+    }
+
+    #[test]
+    fn identity_upgrade_stops_at_maximum() {
+        assert_eq!(next_identity_level(29), None);
+    }
+
+    #[test]
+    fn identity_write_creates_parent_and_persists_contents() {
+        let root = std::env::temp_dir().join(format!("tsclaw-identity-{}", Uuid::new_v4()));
+        let path = root.join("nested").join("identity.json");
+
+        write_identity_file(&path, "identity-data").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "identity-data");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn identity_write_reports_directory_creation_error_with_path() {
+        let root = std::env::temp_dir().join(format!("tsclaw-identity-{}", Uuid::new_v4()));
+        std::fs::write(&root, "not-a-directory").unwrap();
+        let path = root.join("identity.json");
+
+        let error = write_identity_file(&path, "identity-data").unwrap_err();
+
+        assert!(error.to_string().contains(&root.display().to_string()));
+        std::fs::remove_file(&root).unwrap();
+    }
+
+    #[test]
+    fn identity_write_reports_file_error_with_path() {
+        let root = std::env::temp_dir().join(format!("tsclaw-identity-{}", Uuid::new_v4()));
+        let path = root.join("identity.json");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let error = write_identity_file(&path, "identity-data").unwrap_err();
+
+        assert!(error.to_string().contains(&path.display().to_string()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

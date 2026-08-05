@@ -2,7 +2,7 @@
 /target/
 
 # 本地配置与敏感信息
-config/secrets.toml
+/config/
 /config.json
 
 # 本地环境文件

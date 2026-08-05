@@ -28,6 +28,7 @@ struct SpeakerState {
     speech_ms: u64,
     silence_ms: u64,
     last_seen: Instant,
+    name: String,
 }
 
 pub struct OpusSttPipeline {
@@ -83,26 +84,28 @@ impl OpusSttPipeline {
             return Ok(None);
         }
 
-        if !self.speakers.contains_key(&event.from_client_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.speakers.entry(event.from_client_id)
+        {
             let decoder = Decoder::new(SampleRate::Hz48000, Channels::Stereo)
                 .map_err(|e| anyhow!("opus decoder init failed: {e}"))?;
-            self.speakers.insert(
-                event.from_client_id,
-                SpeakerState {
-                    decoder,
-                    pcm16_mono_16k: Vec::new(),
-                    speaking: false,
-                    speech_ms: 0,
-                    silence_ms: 0,
-                    last_seen: now,
-                },
-            );
+            e.insert(SpeakerState {
+                decoder,
+                pcm16_mono_16k: Vec::new(),
+                speaking: false,
+                speech_ms: 0,
+                silence_ms: 0,
+                last_seen: now,
+                name: event.from_client_name.clone(),
+            });
         }
         let state = self
             .speakers
             .get_mut(&event.from_client_id)
             .ok_or_else(|| anyhow!("speaker state missing"))?;
+
         state.last_seen = now;
+        state.name = event.from_client_name.clone();
 
         let mut decoded = vec![0i16; 5760 * 2];
         let packet = match (&event.frame).try_into() {
@@ -175,6 +178,64 @@ impl OpusSttPipeline {
         state.silence_ms = 0;
 
         Ok(Some(chunk))
+    }
+
+    /// 定时冲刷不活跃 speaker：达到最短语音长度则产出完整 utterance；
+    /// 过短的突发噪音直接丢弃并复位；超空闲时间的 speaker 移除。
+    /// 由外部每 100ms 调用一次，配合 VAD 尾音（PTT 松键后无尾帧）触发。
+    pub fn drain_inactive(&mut self, now: Instant) -> Vec<SpeechChunk> {
+        const IDLE_FLUSH_AFTER_MS: u64 = 600;
+        const SPEAKER_IDLE_EVICT_AFTER_SECS: u64 = 300;
+
+        let mut chunks = Vec::new();
+        let mut discard_ids = Vec::new();
+        for (client_id, state) in self.speakers.iter_mut() {
+            if !state.speaking && state.pcm16_mono_16k.is_empty() {
+                continue;
+            }
+            let idle_ms = now.duration_since(state.last_seen).as_millis() as u64;
+            if idle_ms < IDLE_FLUSH_AFTER_MS {
+                continue;
+            }
+
+            if state.speech_ms >= self.min_chunk_ms {
+                // 达到最短语音长度：冲刷为完整 utterance
+                chunks.push(SpeechChunk {
+                    speaker_client_id: *client_id,
+                    speaker_name: state.name.clone(),
+                    pcm16_mono_16k: std::mem::take(&mut state.pcm16_mono_16k),
+                });
+            } else {
+                // 过短突发：视为噪音，丢弃并复位
+                debug!(
+                    clid = *client_id,
+                    speech_ms = state.speech_ms,
+                    "discard short audio burst without speech"
+                );
+                discard_ids.push(*client_id);
+            }
+            state.speaking = false;
+            state.speech_ms = 0;
+            state.silence_ms = 0;
+        }
+
+        if !discard_ids.is_empty() {
+            for id in discard_ids {
+                if let Some(state) = self.speakers.get_mut(&id) {
+                    state.pcm16_mono_16k.clear();
+                }
+            }
+        }
+
+        // 超空闲时间且无缓冲的 speaker 移除
+        self.speakers.retain(|_, state| {
+            if state.speaking || !state.pcm16_mono_16k.is_empty() {
+                return true;
+            }
+            now.duration_since(state.last_seen).as_secs() < SPEAKER_IDLE_EVICT_AFTER_SECS
+        });
+
+        chunks
     }
 }
 
@@ -267,7 +328,7 @@ impl OpenAiSpeechProvider {
 
         // MiMo TTS: uses /chat/completions with audio field
         if tts.provider == "mimo" {
-            return self.synthesize_mimo(text, &api_key).await;
+            return self.synthesize_mimo(text, api_key).await;
         }
 
         // OpenAI-compatible format
@@ -490,10 +551,6 @@ fn is_openai_compatible_provider(provider: &str) -> bool {
 pub fn detect_audio_format(data: &[u8]) -> &'static str {
     if data.len() >= 4 && &data[0..4] == b"RIFF" {
         "wav"
-    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
-        "mp3"
-    } else if data.len() >= 1 && data[0] == 0xFF {
-        "mp3"
     } else {
         "mp3"
     }
@@ -631,7 +688,11 @@ pub fn is_speakable(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_speech_api_key;
+    use super::{resolve_speech_api_key, OpusSttPipeline, SpeakerState};
+    use audiopus::coder::Decoder;
+    use audiopus::{Channels, SampleRate};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn explicit_speech_endpoint_does_not_inherit_llm_key() {
@@ -652,5 +713,74 @@ mod tests {
             resolve_speech_api_key("speech-secret", "https://speech.example/v1", "llm-secret"),
             "speech-secret"
         );
+    }
+
+    fn speaker_state(speech_ms: u64, speaking: bool, buffered: bool) -> SpeakerState {
+        SpeakerState {
+            decoder: Decoder::new(SampleRate::Hz48000, Channels::Stereo).unwrap(),
+            pcm16_mono_16k: if buffered {
+                vec![0i16; 160]
+            } else {
+                Vec::new()
+            },
+            speaking,
+            speech_ms,
+            silence_ms: 0,
+            last_seen: Instant::now(),
+            name: "speaker-a".to_string(),
+        }
+    }
+
+    #[test]
+    fn drain_inactive_flushes_long_tail_utterance() {
+        let mut pipeline = OpusSttPipeline::new();
+        pipeline.speakers = HashMap::from([(1, speaker_state(800, true, true))]);
+        // 空闲超过 600ms 且语音长度达到 400ms 最短阈值 → 冲刷为完整 utterance
+        let now = Instant::now() + Duration::from_millis(700);
+
+        let chunks = pipeline.drain_inactive(now);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].speaker_client_id, 1);
+        assert_eq!(chunks[0].speaker_name, "speaker-a");
+    }
+
+    #[test]
+    fn drain_inactive_discards_short_burst() {
+        let mut pipeline = OpusSttPipeline::new();
+        // 200ms 突发低于 400ms 最短语音长度 → 丢弃并复位
+        pipeline.speakers = HashMap::from([(1, speaker_state(200, true, true))]);
+        let now = Instant::now() + Duration::from_millis(700);
+
+        let chunks = pipeline.drain_inactive(now);
+
+        assert!(chunks.is_empty());
+        assert!(pipeline.speakers[&1].pcm16_mono_16k.is_empty());
+        assert!(!pipeline.speakers[&1].speaking);
+    }
+
+    #[test]
+    fn drain_inactive_ignores_fresh_speakers() {
+        let mut pipeline = OpusSttPipeline::new();
+        // 最近仍有活动的 speaker 不被冲刷
+        pipeline.speakers = HashMap::from([(1, speaker_state(800, true, true))]);
+        let now = Instant::now() + Duration::from_millis(100);
+
+        let chunks = pipeline.drain_inactive(now);
+
+        assert!(chunks.is_empty());
+        assert_eq!(pipeline.speakers[&1].speech_ms, 800);
+    }
+
+    #[test]
+    fn drain_inactive_evicts_long_idle_speakers() {
+        let mut pipeline = OpusSttPipeline::new();
+        // 无语音、无缓冲且空闲超过 300s → 移除
+        pipeline.speakers = HashMap::from([(1, speaker_state(0, false, false))]);
+        let now = Instant::now() + Duration::from_secs(301);
+
+        pipeline.drain_inactive(now);
+
+        assert!(pipeline.speakers.is_empty());
     }
 }

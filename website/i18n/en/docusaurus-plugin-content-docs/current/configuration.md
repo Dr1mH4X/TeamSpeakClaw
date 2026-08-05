@@ -27,8 +27,6 @@ The `[llm]` section configures an OpenAI-compatible Chat Completions endpoint:
 | `model` | string | `gpt-4o` | Model name |
 | `omni_model` | bool | `false` | Whether to process voice directly with a multimodal model |
 | `max_context_turns` | integer | `0` | Maximum conversation turns retained per session; `0` disables context |
-| `max_context_sessions` | integer | `1000` | Maximum retained sessions; `0` means unlimited |
-| `max_concurrent_requests` | integer | `4` | Global concurrent LLM request limit; must be greater than `0` |
 
 ### NapCat Configuration Details
 

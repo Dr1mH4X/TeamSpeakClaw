@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// 会话来源
 #[derive(Debug, Clone)]
@@ -15,13 +16,97 @@ pub enum SessionSource {
     Headless { uid: String },
 }
 
+impl SessionSource {
+    /// 返回跨适配器唯一且稳定的会话键。
+    pub(crate) fn canonical_key(&self) -> String {
+        match self {
+            SessionSource::TeamSpeak { uid } => format!("sq:{uid}"),
+            SessionSource::NapCatPrivate { user_id } => format!("nc:private:{user_id}"),
+            SessionSource::NapCatGroup { group_id } => format!("nc:group:{group_id}"),
+            SessionSource::Headless { uid } => format!("headless:{uid}"),
+        }
+    }
+}
+
 impl fmt::Display for SessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SessionSource::TeamSpeak { uid } => write!(f, "sq:{}", uid),
-            SessionSource::NapCatPrivate { user_id } => write!(f, "nc:private:{}", user_id),
-            SessionSource::NapCatGroup { group_id } => write!(f, "nc:group:{}", group_id),
-            SessionSource::Headless { uid } => write!(f, "headless:{}", uid),
+        f.write_str(&self.canonical_key())
+    }
+}
+
+/// 轮次预留失败：容量（并发 + 排队）已满
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnQueueFull;
+
+/// 容量占位许可：事件循环内同步获取，不等待
+pub(crate) struct TurnCapacityPermit {
+    _capacity: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for TurnCapacityPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnCapacityPermit")
+    }
+}
+
+/// 会话串行锁 guard：在任务内异步获取，持有到回合结束
+pub(crate) struct TurnSessionGuard {
+    _session: OwnedMutexGuard<()>,
+}
+
+impl std::fmt::Debug for TurnSessionGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnSessionGuard")
+    }
+}
+
+/// 为每个规范会话键提供独立的串行锁，并限制总排队/执行容量
+pub(crate) struct TurnCoordinator {
+    locks: AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    capacity: Arc<tokio::sync::Semaphore>,
+}
+
+impl TurnCoordinator {
+    /// total_capacity = MAX_CONCURRENT_REQUESTS + MAX_QUEUED_REQUESTS
+    pub(crate) fn new(total_capacity: usize) -> Self {
+        Self {
+            locks: AsyncMutex::new(HashMap::new()),
+            capacity: Arc::new(tokio::sync::Semaphore::new(total_capacity)),
+        }
+    }
+
+    /// 同步获取容量占位：满立即返回 busy，不等待。
+    /// 供事件循环调用，保证循环不被轮次阻塞。
+    pub(crate) fn try_acquire_capacity(&self) -> Result<TurnCapacityPermit, TurnQueueFull> {
+        let capacity = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| TurnQueueFull)?;
+        Ok(TurnCapacityPermit {
+            _capacity: capacity,
+        })
+    }
+
+    /// 异步获取会话串行锁：同会话严格 FIFO，不同会话互不阻塞。
+    /// 在任务内调用，等待期间事件循环照常运转。
+    pub(crate) async fn acquire_session(&self, source: &SessionSource) -> TurnSessionGuard {
+        let session_lock = {
+            let mut locks = self.locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+
+            let key = source.canonical_key();
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+
+        TurnSessionGuard {
+            _session: session_lock.lock_owned().await,
         }
     }
 }
@@ -109,13 +194,23 @@ impl ContextWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::time::Duration;
 
     fn turn(value: usize) -> ContextTurn {
         ContextTurn {
             user: format!("user-{value}"),
             assistant: format!("assistant-{value}"),
         }
+    }
+
+    /// 测试辅助：两段式预留（容量 + 会话锁）
+    async fn reserve(
+        coordinator: &TurnCoordinator,
+        source: &SessionSource,
+    ) -> (TurnCapacityPermit, TurnSessionGuard) {
+        let capacity = coordinator.try_acquire_capacity().unwrap();
+        let session = coordinator.acquire_session(source).await;
+        (capacity, session)
     }
 
     #[test]
@@ -133,6 +228,28 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].user, "user-2");
         assert_eq!(history[1].user, "user-3");
+    }
+
+    #[test]
+    fn canonical_keys_separate_adapter_namespaces() {
+        let teamspeak = SessionSource::TeamSpeak {
+            uid: "42".to_string(),
+        };
+        let headless = SessionSource::Headless {
+            uid: "42".to_string(),
+        };
+        let private = SessionSource::NapCatPrivate { user_id: 42 };
+        let group = SessionSource::NapCatGroup { group_id: 42 };
+
+        let keys = [
+            teamspeak.canonical_key(),
+            headless.canonical_key(),
+            private.canonical_key(),
+            group.canonical_key(),
+        ];
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+
+        assert_eq!(unique.len(), keys.len());
     }
 
     #[test]
@@ -159,5 +276,106 @@ mod tests {
         let state = context.state.lock().unwrap();
         assert_eq!(state.histories.len(), 4);
         assert_eq!(state.histories.len(), state.session_order.len());
+    }
+
+    #[tokio::test]
+    async fn same_session_turns_are_serialized() {
+        let coordinator = Arc::new(TurnCoordinator::new(8));
+        let source = SessionSource::TeamSpeak {
+            uid: "same-user".to_string(),
+        };
+        let first_guard = reserve(&coordinator, &source).await;
+
+        let waiting_coordinator = coordinator.clone();
+        let waiting_source = source.clone();
+        let mut waiter =
+            tokio::spawn(async move { reserve(&waiting_coordinator, &waiting_source).await });
+
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err());
+
+        drop(first_guard);
+        let second_guard = tokio::time::timeout(Duration::from_millis(200), &mut waiter)
+            .await
+            .expect("same-session waiter must continue after the first turn")
+            .expect("same-session waiter task must succeed");
+        drop(second_guard);
+    }
+
+    #[tokio::test]
+    async fn different_sessions_can_run_concurrently() {
+        let coordinator = TurnCoordinator::new(8);
+        let first_source = SessionSource::TeamSpeak {
+            uid: "first-user".to_string(),
+        };
+        let second_source = SessionSource::TeamSpeak {
+            uid: "second-user".to_string(),
+        };
+        let _first_guard = reserve(&coordinator, &first_source).await;
+
+        let second_guard = tokio::time::timeout(
+            Duration::from_millis(200),
+            reserve(&coordinator, &second_source),
+        )
+        .await
+        .expect("different sessions must not block each other");
+        drop(second_guard);
+    }
+
+    #[tokio::test]
+    async fn stale_session_locks_are_removed_on_next_acquire() {
+        let coordinator = TurnCoordinator::new(8);
+        let first_source = SessionSource::Headless {
+            uid: "expired".to_string(),
+        };
+        let second_source = SessionSource::Headless {
+            uid: "active".to_string(),
+        };
+
+        let first_guard = reserve(&coordinator, &first_source).await;
+        assert_eq!(coordinator.locks.lock().await.len(), 1);
+        drop(first_guard);
+
+        let _second_guard = reserve(&coordinator, &second_source).await;
+        assert_eq!(coordinator.locks.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn full_capacity_returns_queue_full_without_waiting() {
+        let coordinator = TurnCoordinator::new(2);
+        let source = SessionSource::NapCatPrivate { user_id: 1 };
+        let other = SessionSource::NapCatPrivate { user_id: 2 };
+
+        let first = reserve(&coordinator, &source).await;
+        let second = reserve(&coordinator, &other).await;
+
+        assert_eq!(
+            coordinator.try_acquire_capacity().unwrap_err(),
+            TurnQueueFull
+        );
+        drop(first);
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_releases_capacity_for_successors() {
+        let coordinator = Arc::new(TurnCoordinator::new(1));
+        let source = SessionSource::NapCatPrivate { user_id: 1 };
+        let holder = reserve(&coordinator, &source).await;
+
+        let waiting = tokio::spawn({
+            let coordinator = coordinator.clone();
+            let source = source.clone();
+            async move { reserve(&coordinator, &source).await }
+        });
+        waiting.abort();
+        drop(holder);
+
+        let successor =
+            tokio::time::timeout(Duration::from_millis(200), reserve(&coordinator, &source))
+                .await
+                .expect("cancelled waiter must not block successors");
+        drop(successor);
     }
 }
