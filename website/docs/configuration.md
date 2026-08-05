@@ -27,8 +27,6 @@ sidebar_position: 3
 | `model` | string | `gpt-4o` | 模型名称 |
 | `omni_model` | bool | `false` | 是否直接使用多模态模型处理语音 |
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
-| `max_context_sessions` | integer | `1000` | 最多保留的会话数；`0` 表示不限制 |
-| `max_concurrent_requests` | integer | `4` | 全局并发 LLM 请求上限，必须大于 `0` |
 
 流式响应另有固定的安全限制：单行最多 256 KiB，单次原始 SSE 数据最多 8 MiB。
 
