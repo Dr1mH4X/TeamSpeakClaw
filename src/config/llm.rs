@@ -18,18 +18,6 @@ pub struct LlmConfig {
     /// 最大并发 LLM 请求数
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
-    /// 等待中的 LLM 任务数（同会话排队等待前驱完成）
-    #[serde(default = "default_max_queued_requests")]
-    pub max_queued_requests: usize,
-    /// 建立 LLM API 连接的超时时间（秒）
-    #[serde(default = "default_connect_timeout_secs")]
-    pub connect_timeout_secs: u64,
-    /// 流式响应连续无数据的超时时间（秒）
-    #[serde(default = "default_stream_idle_timeout_secs")]
-    pub stream_idle_timeout_secs: u64,
-    /// 单次流式请求允许的总时间（秒）
-    #[serde(default = "default_stream_total_timeout_secs")]
-    pub stream_total_timeout_secs: u64,
 }
 
 fn default_max_context_sessions() -> usize {
@@ -38,22 +26,6 @@ fn default_max_context_sessions() -> usize {
 
 fn default_max_concurrent_requests() -> usize {
     4
-}
-
-fn default_max_queued_requests() -> usize {
-    4
-}
-
-fn default_connect_timeout_secs() -> u64 {
-    10
-}
-
-fn default_stream_idle_timeout_secs() -> u64 {
-    30
-}
-
-fn default_stream_total_timeout_secs() -> u64 {
-    300
 }
 
 impl Default for LlmConfig {
@@ -66,10 +38,6 @@ impl Default for LlmConfig {
             max_context_turns: 0,
             max_context_sessions: 1000,
             max_concurrent_requests: default_max_concurrent_requests(),
-            max_queued_requests: default_max_queued_requests(),
-            connect_timeout_secs: default_connect_timeout_secs(),
-            stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
-            stream_total_timeout_secs: default_stream_total_timeout_secs(),
         }
     }
 }

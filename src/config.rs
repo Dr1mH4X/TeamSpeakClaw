@@ -69,31 +69,6 @@ impl AppConfig {
             anyhow::bail!("llm.max_concurrent_requests must be greater than zero");
         }
 
-        if self.llm.max_queued_requests == 0 {
-            anyhow::bail!("llm.max_queued_requests must be greater than zero");
-        }
-
-        let total_capacity = self
-            .llm
-            .max_concurrent_requests
-            .checked_add(self.llm.max_queued_requests)
-            .ok_or_else(|| anyhow::anyhow!("llm concurrent + queued request capacity overflow"))?;
-        if total_capacity > 1024 {
-            anyhow::bail!("llm concurrent + queued request capacity must not exceed 1024");
-        }
-
-        if self.llm.connect_timeout_secs == 0 {
-            anyhow::bail!("llm.connect_timeout_secs must be greater than zero");
-        }
-
-        if self.llm.stream_idle_timeout_secs == 0 {
-            anyhow::bail!("llm.stream_idle_timeout_secs must be greater than zero");
-        }
-
-        if self.llm.stream_total_timeout_secs == 0 {
-            anyhow::bail!("llm.stream_total_timeout_secs must be greater than zero");
-        }
-
         if !matches!(
             self.bot.default_reply_mode.as_str(),
             "private" | "channel" | "server"
@@ -151,9 +126,6 @@ max_context_sessions = 8
         assert_eq!(config.llm.max_context_turns, 3);
         assert_eq!(config.llm.max_context_sessions, 8);
         assert_eq!(config.llm.max_concurrent_requests, 4);
-        assert_eq!(config.llm.connect_timeout_secs, 10);
-        assert_eq!(config.llm.stream_idle_timeout_secs, 30);
-        assert_eq!(config.llm.stream_total_timeout_secs, 300);
         assert_eq!(config.bot.default_reply_mode, "private");
         assert!(!config.napcat.enabled);
         assert_eq!(config.logging.max_log_days, 7);
@@ -170,42 +142,6 @@ max_context_sessions = 8
         assert!(error
             .to_string()
             .contains("max_concurrent_requests must be greater than zero"));
-    }
-
-    #[test]
-    fn rejects_zero_llm_timeouts() {
-        let mut config = AppConfig::default();
-        config.llm.connect_timeout_secs = 0;
-        let error = config.validate().unwrap_err();
-        assert!(error.to_string().contains("connect_timeout_secs"));
-
-        let mut config = AppConfig::default();
-        config.llm.stream_idle_timeout_secs = 0;
-        let error = config.validate().unwrap_err();
-        assert!(error.to_string().contains("stream_idle_timeout_secs"));
-
-        let mut config = AppConfig::default();
-        config.llm.stream_total_timeout_secs = 0;
-        let error = config.validate().unwrap_err();
-        assert!(error.to_string().contains("stream_total_timeout_secs"));
-    }
-
-    #[test]
-    fn accepts_configured_llm_timeouts() {
-        let config: AppConfig = toml::from_str(
-            r#"
-[llm]
-connect_timeout_secs = 2
-stream_idle_timeout_secs = 45
-stream_total_timeout_secs = 600
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.llm.connect_timeout_secs, 2);
-        assert_eq!(config.llm.stream_idle_timeout_secs, 45);
-        assert_eq!(config.llm.stream_total_timeout_secs, 600);
-        config.validate().unwrap();
     }
 
     #[test]

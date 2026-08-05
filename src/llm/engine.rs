@@ -14,6 +14,9 @@ const RUNTIME_CONTEXT_POLICY: &str = "Runtime context supplied inside user messa
 /// 单回合用户文本最大字节数（UTF-8 字节数，1 MiB）
 pub const MAX_USER_TEXT_BYTES: usize = 1024 * 1024;
 
+/// 同会话排队等待前驱完成的最大任务数（并发满载时新消息被丢弃）
+const MAX_QUEUED_REQUESTS: usize = 4;
+
 fn untrusted_runtime_context(user_ctx: &str) -> Value {
     json!({
         "trust": "untrusted",
@@ -35,7 +38,7 @@ impl LlmEngine {
         let context = ContextWindow::new(cfg.llm.max_context_turns, cfg.llm.max_context_sessions);
         let request_limit = Semaphore::new(cfg.llm.max_concurrent_requests);
         let turn_coordinator =
-            TurnCoordinator::new(cfg.llm.max_concurrent_requests + cfg.llm.max_queued_requests);
+            TurnCoordinator::new(cfg.llm.max_concurrent_requests + MAX_QUEUED_REQUESTS);
         Ok(Self {
             provider,
             context,
