@@ -29,12 +29,8 @@ sidebar_position: 3
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
 | `max_context_sessions` | integer | `1000` | 最多保留的会话数；`0` 表示不限制 |
 | `max_concurrent_requests` | integer | `4` | 全局并发 LLM 请求上限，必须大于 `0` |
-| `max_queued_requests` | integer | `4` | 同会话排队任务容量；并发 + 排队总量满载时新消息被丢弃，必须大于 `0` |
-| `connect_timeout_secs` | integer | `10` | 建立 API 连接的超时时间（秒），必须大于 `0` |
-| `stream_idle_timeout_secs` | integer | `30` | 流式响应连续无数据的超时时间（秒），必须大于 `0` |
-| `stream_total_timeout_secs` | integer | `300` | 单次流式请求允许的总时间（秒），必须大于 `0` |
 
-旧版配置省略这些超时字段时会自动使用表中的默认值。流式响应另有固定的安全限制：单行最多 256 KiB，单次原始 SSE 数据最多 8 MiB。
+流式响应另有固定的安全限制：单行最多 256 KiB，单次原始 SSE 数据最多 8 MiB。
 
 ### NapCat 配置详解
 
