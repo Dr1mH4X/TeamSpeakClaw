@@ -11,8 +11,8 @@ use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
 use super::types::now_unix_ms;
 
-/// 客户端目录：clid -> (uid, nickname)，随 listClients 周期刷新
-type ClientDirectory = Arc<Mutex<HashMap<i32, (String, String)>>>;
+/// 客户端目录：clid -> nickname，随 listClients 周期刷新
+type ClientDirectory = Arc<Mutex<HashMap<i32, String>>>;
 
 /// 输出缓冲上限：满时暂停读取上游（背压），不再丢弃旧帧
 const OUT_BUF_MAX: usize = 400;
@@ -29,7 +29,7 @@ async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient
             let mut dir = directory.lock().expect("client directory poisoned");
             dir.clear();
             for c in clients {
-                dir.insert(c.id, (c.uid, c.nickname));
+                dir.insert(c.id, c.nickname);
             }
         }
         Err(e) => warn!("刷新 TeamSpeak 客户端目录失败: {e}"),
@@ -110,17 +110,17 @@ pub async fn ts3_actor(
     // text handler 注册完成后置位 actor 就绪，避免文本被过早路由到 bridge 而丢失
     bridge_state.set_actor_ready(true);
 
-    // 建立客户端目录：clid -> (uid, nickname)，供 voice handler 与周期刷新使用
+    // 建立客户端目录：clid -> nickname，供 voice handler 与周期刷新使用
     let client_directory: ClientDirectory = Arc::new(Mutex::new(HashMap::new()));
     refresh_client_directory(&client_directory, &client).await;
 
-    // 进出频道通知即时更新目录，消除 clid 复用时的陈旧 UID 窗口
+    // 进出频道通知即时更新目录，消除 clid 复用时的陈旧名称窗口
     {
         let enter_directory = client_directory.clone();
         client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
             if let tsclient_rs::Event::ClientEnter(ref info) = event {
                 let mut dir = enter_directory.lock().expect("client directory poisoned");
-                dir.insert(info.id, (info.uid.clone(), info.nickname.clone()));
+                dir.insert(info.id, info.nickname.clone());
             }
         }));
         let leave_directory = client_directory.clone();
@@ -144,7 +144,7 @@ pub async fn ts3_actor(
                 );
                 return;
             };
-            let (from_client_uid, from_client_name) = voice_directory
+            let from_client_name = voice_directory
                 .lock()
                 .expect("client directory poisoned")
                 .get(&vd.client_id)
@@ -155,7 +155,6 @@ pub async fn ts3_actor(
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
                     from_client_name,
-                    from_client_uid,
                     codec: vd.codec,
                     is_whisper: false,
                     frame: vd.data.to_vec(),
@@ -164,7 +163,7 @@ pub async fn ts3_actor(
         }
     }));
 
-    // 周期刷新客户端目录，保证 clid 复用后 UID 不陈旧
+    // 周期刷新客户端目录，保证 clid 复用后名称不陈旧
     let mut directory_refresh_tick = tokio::time::interval(Duration::from_secs(60));
     directory_refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
