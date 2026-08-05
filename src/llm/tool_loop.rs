@@ -5,16 +5,23 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use thiserror::Error;
 use tracing::{debug, info};
 
 const MAX_TOOL_LOOP_TURNS: usize = 16;
 const MAX_TOOL_CALLS_TOTAL: usize = 32;
 
+/// 异步回调类型：可等待完成，允许下游执行背压（如 send().await）
+/// 回调返回 'static future，内部自行克隆所需数据
+pub type AsyncTokenCallback =
+    Box<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[derive(Default)]
 pub struct StreamCallbacks {
-    pub on_text_token: Option<Box<dyn Fn(&str) + Send + Sync>>,
-    pub on_turn_end: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub on_text_token: Option<AsyncTokenCallback>,
+    pub on_turn_end: Option<AsyncTokenCallback>,
 }
 
 #[async_trait]
@@ -60,9 +67,9 @@ async fn accumulate_stream(
         match event? {
             LlmStreamEvent::Token(token) => {
                 text.push_str(&token);
-                if let Some(ref cb) = callbacks {
+                if let Some(cb) = callbacks {
                     if let Some(ref on_token) = cb.on_text_token {
-                        on_token(&token);
+                        on_token(&token).await;
                     }
                 }
             }
@@ -72,9 +79,9 @@ async fn accumulate_stream(
             } => {
                 finish_reason = fr.clone();
                 tool_calls = tc;
-                if let Some(ref cb) = callbacks {
+                if let Some(cb) = callbacks {
                     if let Some(ref on_end) = cb.on_turn_end {
-                        on_end(&finish_reason);
+                        on_end(&finish_reason).await;
                     }
                 }
                 break;

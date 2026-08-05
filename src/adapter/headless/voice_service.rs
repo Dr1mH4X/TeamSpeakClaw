@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::{error, warn};
 
@@ -18,7 +18,8 @@ use voicev1::voice_service_server::VoiceService;
 pub struct VoiceServiceImpl {
     ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
     ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-    events_tx: broadcast::Sender<voicev1::Event>,
+    control_tx: broadcast::Sender<voicev1::Event>,
+    audio_tx: broadcast::Sender<voicev1::Event>,
     bot_default_reply_mode: String,
     tts_stream_lock: tokio::sync::Mutex<()>,
 }
@@ -27,13 +28,15 @@ impl VoiceServiceImpl {
     pub fn new(
         ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
         ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
-        events_tx: broadcast::Sender<voicev1::Event>,
+        control_tx: broadcast::Sender<voicev1::Event>,
+        audio_tx: broadcast::Sender<voicev1::Event>,
         bot_default_reply_mode: String,
     ) -> Self {
         Self {
             ts3_audio_tx,
             ts3_notice_tx,
-            events_tx,
+            control_tx,
+            audio_tx,
             bot_default_reply_mode,
             tts_stream_lock: tokio::sync::Mutex::new(()),
         }
@@ -62,6 +65,44 @@ impl Drop for ChildKillOnDrop {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let _ = child.start_kill();
+        }
+    }
+}
+
+fn map_subscribed_event(
+    result: std::result::Result<voicev1::Event, BroadcastStreamRecvError>,
+    include_chat: bool,
+    include_log: bool,
+) -> Option<std::result::Result<voicev1::Event, Status>> {
+    match result {
+        Ok(event) => {
+            let included = match event.payload.as_ref() {
+                Some(voicev1::event::Payload::Chat(_)) => include_chat,
+                Some(voicev1::event::Payload::Log(_)) => include_log,
+                // control 通道不承载音频事件；音频走独立广播
+                Some(voicev1::event::Payload::Audio(_)) => false,
+                None => false,
+            };
+            included.then_some(Ok(event))
+        }
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            // 控制事件丢失属于结构性故障，通知订阅方重建
+            Some(Err(Status::resource_exhausted(format!(
+                "voice control stream lagged by {skipped} messages"
+            ))))
+        }
+    }
+}
+
+/// 音频事件丢失只记录 skipped 数量，不中断流——音频洪峰不能拖垮聊天
+fn map_audio_event(
+    result: std::result::Result<voicev1::Event, BroadcastStreamRecvError>,
+) -> Option<voicev1::Event> {
+    match result {
+        Ok(event) => Some(event),
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            warn!(skipped, "voice audio stream lagged; dropped audio frames");
+            None
         }
     }
 }
@@ -235,7 +276,7 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         let mode = match r.target_mode {
-            1 | 2 | 3 => r.target_mode,
+            1..=3 => r.target_mode,
             _ => self.default_reply_mode(),
         };
         let mut target = r.target_client_id;
@@ -263,7 +304,7 @@ impl VoiceService for VoiceServiceImpl {
         }
 
         emit_log(
-            &self.events_tx,
+            &self.control_tx,
             2,
             format!(
                 "send_notice accepted: target_mode={} target_client_id={}",
@@ -304,36 +345,66 @@ impl VoiceService for VoiceServiceImpl {
         Status,
     > {
         let cfg = req.into_inner();
-        let rx = self.events_tx.subscribe();
-        let stream = BroadcastStream::new(rx).filter_map(move |r| {
-            let include_chat = cfg.include_chat;
-            let include_log = cfg.include_log;
-            let include_audio = cfg.include_audio;
-            async move {
-                match r {
-                    Ok(ev) => {
-                        let ok = match ev.payload {
-                            Some(voicev1::event::Payload::Chat(_)) => include_chat,
-                            Some(voicev1::event::Payload::Log(_)) => include_log,
-                            Some(voicev1::event::Payload::Audio(_)) => include_audio,
-                            None => false,
-                        };
-                        if ok {
-                            Some(Ok(ev))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None,
-                }
-            }
-        });
+        let include_audio = cfg.include_audio;
+
+        let control_stream =
+            BroadcastStream::new(self.control_tx.subscribe()).filter_map(move |r| {
+                let include_chat = cfg.include_chat;
+                let include_log = cfg.include_log;
+                async move { map_subscribed_event(r, include_chat, include_log) }
+            });
+
+        if !include_audio {
+            return Ok(Response::new(
+                Box::pin(control_stream) as Self::SubscribeEventsStream
+            ));
+        }
+
+        let audio_stream = BroadcastStream::new(self.audio_tx.subscribe())
+            .filter_map(|r| async move { map_audio_event(r).map(Ok) });
+        let merged = futures::stream::select(control_stream, audio_stream);
         Ok(Response::new(
-            Box::pin(stream) as Self::SubscribeEventsStream
+            Box::pin(merged) as Self::SubscribeEventsStream
         ))
     }
 
     type SubscribeEventsStream = std::pin::Pin<
         Box<dyn tokio_stream::Stream<Item = std::result::Result<voicev1::Event, Status>> + Send>,
     >;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_lag_becomes_resource_exhausted_status() {
+        let result = map_subscribed_event(Err(BroadcastStreamRecvError::Lagged(7)), true, true);
+
+        let Some(Err(status)) = result else {
+            panic!("control lag must produce a stream error");
+        };
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains('7'));
+    }
+
+    #[test]
+    fn audio_lag_is_skipped_without_error() {
+        let result = map_audio_event(Err(BroadcastStreamRecvError::Lagged(3)));
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn audio_event_passes_through_audio_mapper() {
+        let event = voicev1::Event {
+            unix_ms: 1,
+            payload: Some(voicev1::event::Payload::Audio(
+                voicev1::AudioFrameEvent::default(),
+            )),
+        };
+        let result = map_audio_event(Ok(event.clone()));
+
+        assert_eq!(result, Some(event));
+    }
 }

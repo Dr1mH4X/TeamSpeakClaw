@@ -9,22 +9,57 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
+  quality:
+    name: Rust quality gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libopus-dev
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   meta:
     uses: ./.github/workflows/reusable-meta.yml
 
   build:
-    needs: meta
+    needs: [quality, meta]
     uses: ./.github/workflows/reusable-build.yml
     with:
       version: ${{ needs.meta.outputs.version }}
       is-release: true
 
   docker:
-    needs: meta
+    needs: [quality, meta]
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/reusable-docker.yml
     with:
       version: ${{ needs.meta.outputs.version }}
@@ -38,7 +73,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [meta, build, changelog, docker]
+    needs: [quality, meta, build, changelog, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write

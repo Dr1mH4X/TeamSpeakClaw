@@ -2,7 +2,7 @@ use chrono::Local;
 use slog::Drain;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_slog::TracingSlogDrain;
@@ -26,7 +26,7 @@ fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
         if !path
             .file_name()
             .and_then(|n| n.to_str())
-            .map_or(false, |n| n.starts_with("tsclaw-") && n.ends_with(".log"))
+            .is_some_and(|n| n.starts_with("tsclaw-") && n.ends_with(".log"))
         {
             continue;
         }
@@ -143,11 +143,11 @@ impl DailyFileAppender {
         }
     }
 
-    fn file_path(dir: &PathBuf, prefix: &str, date_key: &str) -> PathBuf {
+    fn file_path(dir: &Path, prefix: &str, date_key: &str) -> PathBuf {
         dir.join(format!("{prefix}-{date_key}.log"))
     }
 
-    fn ensure_open(inner: &mut Inner, dir: &PathBuf, prefix: &str) -> io::Result<()> {
+    fn ensure_open(inner: &mut Inner, dir: &Path, prefix: &str) -> io::Result<()> {
         let today = Local::now().format("%Y-%m-%d").to_string();
         if inner.date_key != today || inner.file.is_none() {
             let path = Self::file_path(dir, prefix, &today);
@@ -164,7 +164,7 @@ impl Write for DailyFileAppender {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Log lock poisoned"))?;
+            .map_err(|_| io::Error::other("Log lock poisoned"))?;
         Self::ensure_open(&mut inner, &self.dir, &self.prefix)?;
         inner.file.as_mut().unwrap().write(buf)
     }
@@ -173,7 +173,7 @@ impl Write for DailyFileAppender {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Log lock poisoned"))?;
+            .map_err(|_| io::Error::other("Log lock poisoned"))?;
         if let Some(ref mut file) = inner.file {
             file.flush()?;
         }
