@@ -360,7 +360,6 @@ impl VoiceRouter {
                         let audio = voicev1::AudioFrameEvent {
                             from_client_id: chunk.speaker_client_id,
                             from_client_name: chunk.speaker_name.clone(),
-                            from_client_uid: chunk.speaker_uid.clone(),
                             codec: 4,
                             is_whisper: false,
                             frame: Vec::new(),
@@ -465,31 +464,13 @@ impl VoiceRouter {
             .map_err(|error| anyhow::anyhow!("list audio caller failed: {error}"))?;
         let caller = clients
             .iter()
-            .find(|client| u32::try_from(client.id).ok() == Some(audio.from_client_id));
-        // drain 产物携带 uid/name：speaker 已下线时降级继续（ACL 按空组判定）
-        let Some(caller) = caller else {
-            if !audio.from_client_uid.is_empty() {
-                warn!(
-                    clid = audio.from_client_id,
-                    uid = %audio.from_client_uid,
-                    "audio caller left before handling; continuing with degraded context"
-                );
-                return Ok(CallerContext {
-                    caller_id: audio.from_client_id,
-                    caller_uid: audio.from_client_uid.clone(),
-                    caller_name: audio.from_client_name.clone(),
-                    groups: Vec::new(),
-                    channel_group_id: 0,
-                    channel_id: 0,
-                    reply_target_mode,
-                    reply_target_client_id,
-                });
-            }
-            anyhow::bail!(
-                "audio caller {} not found in online clients",
-                audio.from_client_id
-            );
-        };
+            .find(|client| u32::try_from(client.id).ok() == Some(audio.from_client_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "audio caller {} not found in online clients",
+                    audio.from_client_id
+                )
+            })?;
         let channel_group_id = self
             .ts_adapter
             .get_client_channel_group_id(audio.from_client_id)
@@ -545,7 +526,6 @@ impl VoiceRouter {
         audio: &voicev1::AudioFrameEvent,
         speaker_client_id: u32,
         speaker_name: &str,
-        speaker_uid: &str,
     ) -> Result<CallerContext> {
         let mut ctx = self.resolve_caller_from_audio(audio).await?;
         if ctx.caller_id != speaker_client_id {
@@ -557,9 +537,6 @@ impl VoiceRouter {
         }
         if !speaker_name.is_empty() {
             ctx.caller_name = speaker_name.to_string();
-        }
-        if !speaker_uid.is_empty() {
-            ctx.caller_uid = speaker_uid.to_string();
         }
         Ok(ctx)
     }
@@ -630,12 +607,7 @@ impl VoiceRouter {
         chunk: SpeechChunk,
     ) -> Result<()> {
         let ctx = self
-            .resolve_audio_chunk_caller(
-                &audio,
-                chunk.speaker_client_id,
-                &chunk.speaker_name,
-                &chunk.speaker_uid,
-            )
+            .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
             .await?;
         if self.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
@@ -1167,7 +1139,6 @@ mod tests {
         let chunk = SpeechChunk {
             speaker_client_id: 1,
             speaker_name: "a".to_string(),
-            speaker_uid: "uid-a".to_string(),
             pcm16_mono_16k: Vec::new(),
         };
         tx.try_send((audio.clone(), chunk)).unwrap();
@@ -1179,7 +1150,6 @@ mod tests {
                 SpeechChunk {
                     speaker_client_id: 2,
                     speaker_name: "b".to_string(),
-                    speaker_uid: "uid-b".to_string(),
                     pcm16_mono_16k: Vec::new(),
                 }
             ))
