@@ -18,11 +18,13 @@ use crate::adapter::headless::speech::{
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::{VoiceBridgeState, INTERNAL_GRPC_ADDR};
+use crate::adapter::reconnect::{wait_for_retry, ReconnectState, RetryDecision};
 use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
 use crate::skills::{ExecutionContext, SkillRegistry};
+use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
 const AUDIO_MAX_IN_FLIGHT: usize = 8;
@@ -221,7 +223,7 @@ impl VoiceRouter {
         self.config.headless.tts.enabled && self.speech_provider.is_some()
     }
 
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         self.bridge_state.set_stream_ready(false);
         let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
         let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
@@ -246,7 +248,7 @@ impl VoiceRouter {
         let drain_router = router.clone();
         tasks.spawn(async move {
             let mut client = None;
-            let mut connect_attempt = 1u32;
+            let mut reconnect_state = ReconnectState::default();
             loop {
                 let Some((audio, chunk)) = audio_chunk_rx.recv().await else {
                     break;
@@ -264,19 +266,25 @@ impl VoiceRouter {
                     match connect_result {
                         Ok(channel) => {
                             client = Some(VoiceServiceClient::new(channel));
-                            connect_attempt = 1;
+                            reconnect_state.record_session_started();
                         }
                         Err(error) => {
+                            // 重试策略委托 reconnect 工具：失败计数与退避等待不在此处自行实现
+                            let RetryDecision::Retry { attempt, delay } =
+                                reconnect_state.record_failure()
+                            else {
+                                warn!(error = %error, "voice audio worker reconnect attempts exhausted; giving up");
+                                break;
+                            };
                             warn!(
-                                attempt = connect_attempt,
+                                attempt = attempt,
                                 error = %error,
                                 "voice audio worker connect failed; retrying"
                             );
-                            let delay = crate::adapter::reconnect::reconnect_delay_for_attempt(
-                                connect_attempt,
-                            );
-                            tokio::time::sleep(delay).await;
-                            connect_attempt = connect_attempt.saturating_add(1);
+                            // 退避等待感知取消令牌：shutdown 触发时立即退出
+                            if !wait_for_retry(delay, &shutdown).await {
+                                break;
+                            }
                             continue;
                         }
                     }
