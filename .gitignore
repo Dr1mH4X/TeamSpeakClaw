@@ -1,11 +1,10 @@
-# Rust 构建产物
+# Build
 /target/
+website/build/
 
-# 本地配置与敏感信息
+# Secrets
 /config/
 /config.json
-
-# 本地环境文件
 .env
 .env.*
 
@@ -20,17 +19,11 @@ skills-lock.json
 .claude/
 opencode.json
 
-# 日志
+# Logs
 logs/*.*
-
-# Added by cargo
-/target
 
 # Dependencies
 website/node_modules/
-
-# Production
-website/build/
 
 # Generated files
 website/.docusaurus
@@ -38,7 +31,6 @@ website/.cache-loader
 website/.temp
 
 # Misc
-.DS_Store
 .env.local
 .env.development.local
 .env.test.local
@@ -50,3 +42,6 @@ yarn-error.log*
 
 website/nul
 nul*
+
+# Backup
+backup.bundle
