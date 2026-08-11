@@ -1,92 +1,49 @@
-# AGENTS.md
+# Repository Guidelines
 
-## Commands
+TeamSpeakClaw is a Rust binary for an LLM-powered TeamSpeak assistant, plus a Docusaurus docs site. This guide explains how the repository is organized and what contributors must follow.
 
-- Build release: `cargo build --release`
-- Check: `cargo check`
-- Lint: `cargo clippy --all-targets --locked -- -D warnings`
-- Test: `cargo test --all-targets --locked`
-- Format: `cargo fmt`
-- Clean: `cargo clean`
+## Project Structure & Module Organization
 
-## Architecture
+- `src/main.rs` — entrypoint; wires configuration, adapters, routers, and shutdown.
+- `src/adapter/` — connection lifecycle and reconnect handling for the TeamSpeak headless (gRPC voice bridge) and NapCat (OneBot 11) adapters.
+- `src/router/` — event routing only (`ts_router`, `nc_router`, `voice_router`, `unified`); no connection-state awareness.
+- `src/llm/` — OpenAI-compatible engine, context, provider, and tool loop.
+- `src/skills/` — skill implementations behind the `Skill` trait; music backends in `src/skills/music/`.
+- `src/config/`, `src/permission/` — TOML config loading and ACL permission gates.
+- `proto/voice.proto` — gRPC contract; `build.rs` generates bindings automatically.
+- `examples/config/` — reference config templates; `website/` — Docusaurus docs.
 
-Single binary `teamspeakclaw`, two inbound adapter families (TeamSpeak gRPC voice bridge + NapCat OneBot 11):
+Unit tests are embedded in source files; there is no top-level `tests/` directory.
 
-```
-src/
-├── main.rs                  # Entrypoint: wires config, adapters, routers, shutdown
-├── cli.rs                   # --log-level
-├── log.rs                   # Daily-rotated file logs + tracing/slog bridge init
-├── config.rs                # Loads config/settings.toml, acl.toml, prompts.toml
-├── config/                  # Sub-modules (acl, bot, headless, llm, logging, music_backend, napcat, prompts)
-├── router.rs                # Event routing; also entry for combined router loop
-├── router/                  # Sub-modules (ts_router, nc_router, voice_router, unified, trigger)
-├── adapter.rs               # Reconnect loop, session lifecycle, cross-adapter coordination
-├── adapter/
-│   ├── reconnect.rs         # Reconnection backoff constants & helpers
-│   ├── headless.rs          # gRPC voice bridge root; voice_features_enabled, should_route_text_through_bridge
-│   ├── headless/            # (actor, event, speech, text_util, types, voice_service)
-│   ├── napcat.rs            # OneBot 11 WebSocket root
-│   └── napcat/              # (api, ws, event, types)
-├── llm.rs                   # OpenAI-compatible LLM engine, context, tool loop
-├── llm/                     # (context, engine, provider, tool_loop)
-├── permission.rs            # ACL-based permission gate
-├── permission/              # (gate)
-├── skills.rs                # Skill trait + registry; Skill, ExecutionContext, UnifiedExecutionContext
-├── skills/                  # (communication, information, moderation, music, web_search)
-│   ├── music.rs             # Music skill root
-│   └── music/               # (ts3audiobot, tsbot_http, tsmusicbot)
+## Build, Test, and Development Commands
 
-proto/voice.proto            # gRPC protobuf for voice bridge
-examples/config/             # Reference config templates (settings.toml, acl.toml, prompts.toml)
-```
+- `cargo build` / `cargo build --release` — debug or optimized build.
+- `cargo check` — type-check without codegen.
+- `cargo fmt` / `cargo fmt --check` — format or verify formatting.
+- `cargo clippy --all-targets --locked -- -D warnings` — lint; warnings are errors.
+- `cargo test --all-targets --locked` — run all unit tests.
+- `cd website && npm start` — local docs server; `npm run build`, `npm run typecheck` — production checks.
 
-### Entrypoint flow
+Linux builds require `cmake` and `libopus-dev`; protoc is vendored.
 
-1. `main.rs` loads config from `config/` subdirectory (relative to exe)
-2. Creates `PermissionGate`, `SkillRegistry`, `LlmEngine`
-3. `adapter::run()` loops: connect `TsAdapter` -> optionally connect `NapCatAdapter` -> run routers
-4. Router loop runs `EventRouter` (TeamSpeak) and optionally `NcRouter` (QQ) concurrently
-5. On TS disconnect, the adapter reconnect loop restarts
+## Coding Style & Naming Conventions
 
-## Critical Code Paths
+- Standard `rustfmt`: 4-space indentation, `snake_case` functions/items, `CamelCase` types.
+- Follow `.github/copilot-instructions.md`: fail fast, YAGNI, DRY, strong types over raw JSON/strings, no warning suppression.
+- Sparse comments; Chinese per project convention (ASCII only in code identifiers).
 
-- `adapter/headless.rs:voice_features_enabled()` + `should_route_text_through_bridge()`: when voice bridge is active, text messages are routed through `VoiceRouter` instead of `EventRouter`
-- `ts_router.rs:164-169`: skips text message handling when voice bridge is ready (STT/TTS/omni_model)
-- `text_util.rs:split_message()` + `MAX_MESSAGE_BYTES`: splits at 8192-byte TS3 ServerQuery limit, UTF-8 safe, whitespace-preferred
-- `event.rs:send_text_message()` / `actor.rs:notice_rx`: two send paths both go through `split_message`
-- `voice_router.rs`: audio STT/TTS dual pipeline, music bot audio filter, gRPC voice service
+## Testing Guidelines
 
-## Build Dependencies
+- Unit tests live in `#[cfg(test)] mod tests { use super::*; }` blocks beside the code.
+- Use `#[test]` (sync) or `#[tokio::test]` (async), descriptive `snake_case` names, and only `assert!` / `assert_eq!`.
 
-- `protoc-bin-vendored`: auto-downloaded by `build.rs` (generates gRPC code from `proto/voice.proto`)
-- `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM = "3.5"` (needed for building audiopus/opus-sys)
-- Linux: `cmake libopus-dev`
-- macOS: `brew install autoconf automake libtool`
-- Docker: Alpine 3.20 base, build deps `musl-dev cmake make gcc protoc`, runtime `opus ffmpeg`
-- Docker build sets `ENV PROTOC=/usr/bin/protoc` to override protoc-bin-vendored
+## Commit & Pull Request Guidelines
 
-## LLM / Provider
+- Use Conventional Commits: `feat`, `fix`, `refactor`, `docs`, `style`, `test`, `chore`, `ci`, `perf`, `revert`, with optional scopes like `refactor(adapter):`.
+- Add `[skip changelog]` to exclude a commit from generated changelogs.
+- PRs must pass all CI gates (fmt, tests, clippy with `-D warnings`, build), describe what and why, and link related issues.
 
-- OpenAI-compatible (any API with `/v1/chat/completions`)
-- Streamed response parsing: `reasoning_content` fields are **ignored** (not stored or relayed)
-- Context: configurable max turns via `max_context_turns`; sessions capped by a fixed constant
-- Concurrent request limiting via tokio `Semaphore`; configurable timeouts (connect, stream idle, stream total)
-- `omni_model` flag (`config/llm.rs`): enables omni-modal mode; when set, text is routed through voice bridge
+## Security & Configuration Tips
 
-## CI/CD
-
-- `.github/workflows/ci.yml`: quality (fmt/clippy/test) + build (windows/linux/macos aarch64) + docker
-- Triggers: push/PR to main/master, workflow_dispatch
-- Artifacts: platform archives + Docker image to `ghcr.io`
-- Changelog: `git-cliff` with `.github/cliff.toml`
-
-## Conventions
-
-- `.github/copilot-instructions.md` defines strict coding rules: FAILFAST, YAGNI, DRY, Chinese comments, no defensive code, Conventional Commits, type safety, no compiler warning suppression
-- Comments in Chinese (except code identifiers)
-- No docstrings on untouched code
-- Skills implement `Skill` trait with `execute` (TS), `execute_nc` (QQ), and `execute_unified` (cross-platform) — new skills should implement `execute_unified` when supporting both platforms
-- Trigger prefixes are defined in config; `trigger.rs:strip_trigger_prefix()` strips them from incoming messages
-- Config files live in `config/` beside the binary (loaded via `config_dir()` = `exe_dir().join("config")`)
+- Never commit `config/`, `.env`, or other secrets; use `examples/config/` as a template.
+- Report security issues through `SECURITY.md`.
