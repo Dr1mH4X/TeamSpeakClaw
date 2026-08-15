@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use self::ts_router::TsRouterExit;
+use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::NapCatAdapter;
-use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;

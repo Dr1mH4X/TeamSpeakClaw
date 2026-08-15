@@ -1,8 +1,8 @@
 use crate::adapter::headless::{
-    should_route_text_through_bridge, voice_features_enabled, VoiceBridgeState,
+    should_route_text_through_bridge, voice_features_enabled, TextMessageEvent, TsAdapter, TsEvent,
+    VoiceBridgeState,
 };
 use crate::adapter::napcat::NapCatAdapter;
-use crate::adapter::{TextMessageEvent, TsAdapter, TsEvent};
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
@@ -383,7 +383,7 @@ async fn receive_ts_event(
 #[cfg(test)]
 mod tests {
     use super::receive_ts_event;
-    use crate::adapter::{TextMessageEvent, TextMessageTarget, TsEvent};
+    use crate::adapter::headless::{TextMessageEvent, TextMessageTarget, TsEvent};
     use tokio::sync::{broadcast, watch};
 
     fn text_event(sequence: u32) -> TsEvent {

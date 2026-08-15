@@ -1,4 +1,4 @@
-use crate::adapter::{TextMessageTarget, TsEvent};
+use crate::adapter::headless::{TextMessageTarget, TsEvent};
 use crate::skills::ExecutionContext;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

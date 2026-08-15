@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
+use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::{
     event::{GroupMessageEvent, NcEvent, PrivateMessageEvent},
     types::{segments_to_text, Segment},
     NapCatAdapter,
 };
-use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};

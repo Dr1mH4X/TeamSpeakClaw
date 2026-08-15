@@ -17,9 +17,8 @@ use crate::adapter::headless::speech::{
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
-use crate::adapter::headless::{VoiceBridgeState, INTERNAL_GRPC_ADDR};
+use crate::adapter::headless::{TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR};
 use crate::adapter::reconnect::{wait_for_retry, ReconnectState, RetryDecision};
-use crate::adapter::TsAdapter;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;

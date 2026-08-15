@@ -3,9 +3,7 @@ pub(crate) mod reconnect;
 pub mod headless;
 pub mod napcat;
 
-// 为向后兼容重新导出
-pub use headless::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
-
+use headless::{TsAdapter, TsEvent};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;

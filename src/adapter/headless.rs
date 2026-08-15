@@ -280,7 +280,7 @@ impl Runtime {
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
-        ts_adapter: Arc<crate::adapter::TsAdapter>,
+        ts_adapter: Arc<TsAdapter>,
         bridge_state: VoiceBridgeState,
     ) -> Result<Self> {
         let voice_enabled = voice_features_enabled(&config);
