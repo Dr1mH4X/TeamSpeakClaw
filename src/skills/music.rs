@@ -117,7 +117,7 @@ impl Skill for MusicControl {
     }
 }
 
-// ── Schema generators ──────────────────────────────────────────
+// ── Schema 生成器 ──────────────────────────────────────────
 
 fn ts3audiobot_schema() -> Value {
     json!({

@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-/// Reconnect delay sequence (monotonically increasing).
+/// 重连延迟序列（单调递增）
 pub(crate) const RECONNECT_DELAYS_MS: [u64; 5] = [10_000, 30_000, 60_000, 120_000, 300_000];
 
-/// Maximum number of reconnect attempts, derived from the delay array.
+/// 最大重连尝试次数，由延迟数组推导
 pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = RECONNECT_DELAYS_MS.len() as u32;
 
-/// Returns the delay for the n-th reconnect attempt (0-based).
+/// 返回第 n 次重连尝试的延迟（从 0 开始）
 pub(crate) fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_millis(
         RECONNECT_DELAYS_MS
@@ -18,7 +18,7 @@ pub(crate) fn reconnect_delay(attempt: u32) -> Duration {
     )
 }
 
-/// Returns the delay for the n-th reconnect attempt (1-based).
+/// 返回第 n 次重连尝试的延迟（从 1 开始）
 pub(crate) fn reconnect_delay_for_attempt(attempt_1_based: u32) -> Duration {
     reconnect_delay(attempt_1_based.saturating_sub(1))
 }

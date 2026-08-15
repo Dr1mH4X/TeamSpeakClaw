@@ -326,12 +326,12 @@ impl OpenAiSpeechProvider {
 
         let api_key = resolve_speech_api_key(&tts.api_key, &tts.base_url, &self.config.llm.api_key);
 
-        // MiMo TTS: uses /chat/completions with audio field
+        // MiMo TTS：使用 /chat/completions 的 audio 字段
         if tts.provider == "mimo" {
             return self.synthesize_mimo(text, api_key).await;
         }
 
-        // OpenAI-compatible format
+        // OpenAI 兼容格式
         if !is_openai_compatible_provider(&tts.provider) {
             error!("tts unavailable: unsupported provider {}", tts.provider);
             return Err(anyhow!("unsupported tts provider: {}", tts.provider));
@@ -364,10 +364,10 @@ impl OpenAiSpeechProvider {
         Ok(resp.bytes().await?.to_vec())
     }
 
-    /// MiMo TTS: uses /chat/completions with messages + audio field
+    /// MiMo TTS：使用 /chat/completions 的 messages + audio 字段
     async fn synthesize_mimo(&self, text: &str, api_key: &str) -> Result<Vec<u8>> {
         let tts = &self.config.headless.tts;
-        // Resolve URL: use base_url or fallback to llm.base_url
+        // 解析 URL：优先用 tts.base_url，为空则回退到 llm.base_url
         let base = if tts.base_url.is_empty() {
             &self.config.llm.base_url
         } else {
@@ -411,12 +411,12 @@ impl OpenAiSpeechProvider {
             ));
         }
 
-        // MiMo TTS returns JSON response with base64-encoded audio data
+        // MiMo TTS 返回含 base64 编码音频数据的 JSON 响应
         let resp_text = resp.text().await?;
         let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
             .context("Failed to parse MiMo TTS response as JSON")?;
 
-        // Extract base64 audio data from choices[0].message.audio.data
+        // 从 choices[0].message.audio.data 提取 base64 音频数据
         let audio_data = resp_json
             .get("choices")
             .and_then(|c| c.get(0))
@@ -426,7 +426,7 @@ impl OpenAiSpeechProvider {
             .and_then(|d| d.as_str())
             .context("MiMo TTS response missing audio data field")?;
 
-        // Decode base64 to raw audio bytes
+        // 将 base64 解码为原始音频字节
         let audio_bytes = base64::prelude::BASE64_STANDARD
             .decode(audio_data)
             .context("Failed to decode base64 audio data")?;

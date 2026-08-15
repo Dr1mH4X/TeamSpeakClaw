@@ -6,7 +6,7 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    /// Enable omni-modal model support (voice input/output directly)
+    /// 启用全模态模型支持（直接语音输入/输出）
     #[serde(default)]
     pub omni_model: bool,
     /// 最大上下文对话轮数（0 表示禁用上下文）

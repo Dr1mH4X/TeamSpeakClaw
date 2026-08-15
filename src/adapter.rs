@@ -3,7 +3,7 @@ pub(crate) mod reconnect;
 pub mod headless;
 pub mod napcat;
 
-// Re-export for backward compatibility
+// 为向后兼容重新导出
 pub use headless::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 
 use std::future::Future;

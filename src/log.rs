@@ -100,12 +100,12 @@ pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
         .with(file_layer)
         .init();
 
-    // Bridge slog (used by tsclientlib) to tracing
+    // 将 tsclientlib 使用的 slog 日志桥接到 tracing
     let slog_logger = slog::Logger::root(TracingSlogDrain.fuse(), slog::o!());
     let _slog_guard = slog_scope::set_global_logger(slog_logger);
     std::mem::forget(_slog_guard);
 
-    // Periodic cleanup
+    // 定期清理旧日志
     {
         let dir = log_dir;
         let days = log_cfg.max_log_days;
