@@ -14,7 +14,7 @@ impl HttpBackend {
     pub(crate) fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: shared_client(TIMEOUT_SECS).clone(),
+            client: shared_client(TIMEOUT_SECS),
         }
     }
 
