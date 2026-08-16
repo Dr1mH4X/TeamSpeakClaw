@@ -4,7 +4,9 @@ pub mod moderation;
 pub mod music;
 pub mod web_search;
 
-use crate::adapter::headless::TsAdapter;
+mod http;
+
+use crate::adapter::headless::{parse_server_groups, TsAdapter};
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::AppConfig;
 use crate::config::MusicBackendConfig;
@@ -30,6 +32,28 @@ pub(crate) fn is_skill_allowed(name: &str, allowed_skills: &[String]) -> bool {
     allowed_skills
         .iter()
         .any(|allowed| allowed == "*" || allowed == name)
+}
+
+/// 统一上下文中取 TS 适配器（NapCat 跨适配器分支共用）
+pub(crate) fn unified_ts_adapter(ctx: &UnifiedExecutionContext) -> Result<Arc<TsAdapter>> {
+    ctx.ts_adapter
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))
+}
+
+/// 按 clid 在 TS 在线列表中解析目标客户端及其服务器组（NapCat 跨适配器分支共用）
+pub(crate) async fn resolve_ts_client(
+    ctx: &UnifiedExecutionContext,
+    clid: u32,
+) -> Result<(tsclient_rs::ClientInfo, Vec<u32>)> {
+    let ts_adapter = unified_ts_adapter(ctx)?;
+    let clients = ts_adapter.list_clients().await?;
+    let client = clients
+        .into_iter()
+        .find(|c| u32::try_from(c.id).ok() == Some(clid))
+        .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+    let groups = parse_server_groups(&client.server_groups);
+    Ok((client, groups))
 }
 
 // ─────────────────────────────────────────────
@@ -146,21 +170,6 @@ impl UnifiedExecutionContext {
             config: self.config.clone(),
         })
     }
-
-    pub fn to_nc_ctx(&self) -> Result<NcExecutionContext> {
-        Ok(NcExecutionContext {
-            adapter: self
-                .nc_adapter
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("NapCat adapter not available"))?,
-            caller_id: self.caller_id_nc,
-            caller_name: self.caller_name.clone(),
-            caller_groups: self.caller_groups.clone(),
-            caller_group_id: self.nc_group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        })
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -193,20 +202,14 @@ pub trait Skill: Send + Sync {
     /// TeamSpeak 执行（原有）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
-    /// NapCat/QQ 执行（默认返回"不支持"，各 Skill 按需覆盖）
-    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value> {
-        let _ = args;
-        Err(anyhow::anyhow!(
-            "Skill '{}' does not support the NapCat platform",
-            self.name()
-        ))
-    }
-
-    /// 统一执行，默认分派到当前平台的原生实现
+    /// 统一执行：TeamSpeak 分派到原生实现，NapCat 默认返回不支持
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         match ctx.platform {
             Platform::TeamSpeak => self.execute(args, &ctx.to_ts_ctx()?).await,
-            Platform::NapCat => self.execute_nc(args, &ctx.to_nc_ctx()?).await,
+            Platform::NapCat => Err(anyhow::anyhow!(
+                "Skill '{}' does not support the NapCat platform",
+                self.name()
+            )),
         }
     }
 
@@ -259,35 +262,51 @@ impl SkillRegistry {
         skills
     }
 
+    /// 统一技能执行入口：ACL 检查 → 取技能 → 执行 → 结果/错误格式化。
+    /// 双平台共用，日志文案按平台区分，NapCat 保留 NC 前缀语义。
     pub async fn execute_skill(
         &self,
         call: &ToolCall,
-        exec_ctx: ExecutionContext,
+        ctx: UnifiedExecutionContext,
         allowed_skills: &[String],
-        nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> String {
         if !is_skill_allowed(&call.name, allowed_skills) {
-            warn!(skill = %call.name, "Skill execution denied by ACL");
+            match ctx.platform {
+                Platform::NapCat => warn!(skill = %call.name, "NC Skill execution denied by ACL"),
+                Platform::TeamSpeak => warn!(skill = %call.name, "Skill execution denied by ACL"),
+            }
             return "Skill execution denied".to_string();
         }
 
         if let Some(skill) = self.get(&call.name) {
-            let ts_adapter = Some(exec_ctx.adapter.clone());
-            let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
-                .with_cross_adapters(ts_adapter, nc_adapter);
-
-            match skill
-                .execute_unified(call.arguments.clone(), &unified_ctx)
-                .await
-            {
-                Ok(val) => val.to_string(),
+            match skill.execute_unified(call.arguments.clone(), &ctx).await {
+                Ok(val) => {
+                    if matches!(ctx.platform, Platform::NapCat) {
+                        info!(
+                            skill = %call.name,
+                            caller = %ctx.caller_name,
+                            "NC Unified Skill executed"
+                        );
+                    }
+                    val.to_string()
+                }
                 Err(e) => {
-                    error!(skill = %call.name, error = %e, "Skill execution failed");
+                    match ctx.platform {
+                        Platform::NapCat => {
+                            error!(skill = %call.name, error = %e, "NC Skill failed");
+                        }
+                        Platform::TeamSpeak => {
+                            error!(skill = %call.name, error = %e, "Skill execution failed");
+                        }
+                    }
                     format!("Skill execution failed: {}", e)
                 }
             }
         } else {
-            warn!(skill = %call.name, "Skill not found");
+            match ctx.platform {
+                Platform::NapCat => warn!(skill = %call.name, "NC Skill not found"),
+                Platform::TeamSpeak => warn!(skill = %call.name, "Skill not found"),
+            }
             "Skill not found".to_string()
         }
     }
@@ -431,6 +450,9 @@ mod tests {
             .execute_unified(json!({}), &unified_context(Platform::NapCat))
             .await
             .unwrap_err();
-        assert_eq!(nc_error.to_string(), "NapCat adapter not available");
+        assert_eq!(
+            nc_error.to_string(),
+            "Skill 'test' does not support the NapCat platform"
+        );
     }
 }

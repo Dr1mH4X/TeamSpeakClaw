@@ -42,12 +42,14 @@ impl Default for TtsPrompts {
 impl PromptsConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).context(format!(
-            "Prompts config file not found: {}. Please copy examples/config/prompts.toml to config/",
-            path.display()
-        ))?;
-        let config: PromptsConfig =
-            toml::from_str(&content).context("Failed to parse prompts config")?;
+        let config: PromptsConfig = crate::config::load_toml(
+            path,
+            &format!(
+                "Prompts config file not found: {}. Please copy examples/config/prompts.toml to config/",
+                path.display()
+            ),
+        )
+        .context("Failed to parse prompts config")?;
         Ok(config)
     }
 }

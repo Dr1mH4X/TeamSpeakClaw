@@ -1,4 +1,6 @@
-use crate::skills::{required_u32, ExecutionContext, Platform, Skill, UnifiedExecutionContext};
+use crate::skills::{
+    required_u32, unified_ts_adapter, ExecutionContext, Platform, Skill, UnifiedExecutionContext,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -54,10 +56,7 @@ impl Skill for PokeClient {
                 return self.execute(args.clone(), &ts_ctx).await;
             }
             Platform::NapCat => {
-                let ts_adapter = ctx
-                    .ts_adapter
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
+                let ts_adapter = unified_ts_adapter(ctx)?;
 
                 let clid = required_u32(&args, "clid")?;
 

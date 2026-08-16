@@ -52,11 +52,7 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
     let clients = ctx.adapter.list_clients().await?;
     let audiobot = clients
         .iter()
-        .find(|c| {
-            c.nickname
-                .to_ascii_lowercase()
-                .contains(&target_name.to_ascii_lowercase())
-        })
+        .find(|c| ctx.config.is_music_bot_name(&c.nickname))
         .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
     let audiobot_id =
         u32::try_from(audiobot.id).context("Music bot returned an invalid client ID")?;

@@ -1,48 +1,22 @@
-use async_trait::async_trait;
-
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::{
     event::{GroupMessageEvent, NcEvent, PrivateMessageEvent},
     types::{segments_to_text, Segment},
     NapCatAdapter,
 };
+use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
+use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
-use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
-use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::router::{
+    run_llm_turn, strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent, LLM_ERROR_REPLY,
+};
+use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
-use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
-
-struct NcExecutor<'a> {
-    router: &'a NcRouter,
-    user_id: i64,
-    group_id: Option<i64>,
-    sender_name: &'a str,
-    caller_groups: &'a [u32],
-    allowed_skills: &'a [String],
-}
-
-#[async_trait]
-impl ToolExecutor for NcExecutor<'_> {
-    async fn execute(&self, call: &ToolCall) -> String {
-        self.router
-            .execute_skill(
-                call,
-                self.user_id,
-                self.group_id,
-                self.sender_name,
-                self.caller_groups,
-                self.allowed_skills,
-            )
-            .await
-    }
-}
 
 pub struct NcRouter {
     config: Arc<AppConfig>,
@@ -118,7 +92,7 @@ impl NcRouter {
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    drain_nc_tasks(tasks).await;
+                    drain_managed_tasks(&mut tasks, "NC message").await;
                     return Err(anyhow::anyhow!("NcRouter event stream closed"));
                 }
             };
@@ -131,7 +105,17 @@ impl NcRouter {
                         info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
-                    self.spawn_handle_private(&mut tasks, msg).await;
+                    let user_id = msg.user_id;
+                    self.spawn_handle(
+                        &mut tasks,
+                        msg,
+                        SessionSource::NapCatPrivate { user_id },
+                        || warn!(user_id, "NC LLM turn queue full; dropping message"),
+                        |router, msg, capacity, session| async move {
+                            router.handle_private(msg, capacity, session).await
+                        },
+                    )
+                    .await;
                 }
                 NcEvent::GroupMessage(msg) => {
                     if msg.user_id == self.adapter.get_self_id() {
@@ -148,7 +132,17 @@ impl NcRouter {
                         );
                         continue;
                     }
-                    self.spawn_handle_group(&mut tasks, msg).await;
+                    let group_id = msg.group_id;
+                    self.spawn_handle(
+                        &mut tasks,
+                        msg,
+                        SessionSource::NapCatGroup { group_id },
+                        || warn!(group_id, "NC LLM turn queue full; dropping message"),
+                        |router, msg, capacity, session| async move {
+                            router.handle_group(msg, capacity, session).await
+                        },
+                    )
+                    .await;
                 }
                 NcEvent::Heartbeat => {
                     debug!("NapCat heartbeat");
@@ -157,7 +151,19 @@ impl NcRouter {
         }
     }
 
-    async fn spawn_handle_private(&self, tasks: &mut JoinSet<()>, msg: PrivateMessageEvent) {
+    // clone 依赖 → 容量检查 → spawn 任务，重建 NcRouter 后分派给对应 handler
+    async fn spawn_handle<M, F, Fut>(
+        &self,
+        tasks: &mut JoinSet<()>,
+        msg: M,
+        source: SessionSource,
+        on_queue_full: impl FnOnce(),
+        handler: F,
+    ) where
+        M: Send + 'static,
+        F: FnOnce(NcRouter, M, TurnCapacityPermit, TurnSessionGuard) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let config = self.config.clone();
         let prompts = self.prompts.clone();
         let adapter = self.adapter.clone();
@@ -166,14 +172,8 @@ impl NcRouter {
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
 
-        let source = SessionSource::NapCatPrivate {
-            user_id: msg.user_id,
-        };
         let Ok(capacity) = llm.try_reserve_turn_capacity() else {
-            warn!(
-                user_id = msg.user_id,
-                "NC LLM turn queue full; dropping message"
-            );
+            on_queue_full();
             return;
         };
 
@@ -188,42 +188,7 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_private(msg, capacity, session).await;
-        });
-    }
-
-    async fn spawn_handle_group(&self, tasks: &mut JoinSet<()>, msg: GroupMessageEvent) {
-        let config = self.config.clone();
-        let prompts = self.prompts.clone();
-        let adapter = self.adapter.clone();
-        let gate = self.gate.clone();
-        let llm = self.llm.clone();
-        let registry = self.registry.clone();
-        let ts_adapter = self.ts_adapter.clone();
-
-        let source = SessionSource::NapCatGroup {
-            group_id: msg.group_id,
-        };
-        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
-            warn!(
-                group_id = msg.group_id,
-                "NC LLM turn queue full; dropping message"
-            );
-            return;
-        };
-
-        tasks.spawn(async move {
-            let session = llm.acquire_turn_session(&source).await;
-            let router = NcRouter {
-                config,
-                prompts,
-                adapter: adapter.clone(),
-                gate,
-                llm,
-                registry,
-                ts_adapter,
-            };
-            router.handle_group(msg, capacity, session).await;
+            handler(router, msg, capacity, session).await;
         });
     }
 
@@ -245,7 +210,7 @@ impl NcRouter {
             should_trigger_llm = unified_event.should_trigger_llm,
             "NC private unified inbound event"
         );
-        if !unified_event.should_respond {
+        if !unified_event.should_trigger_llm {
             return;
         }
         debug!("NC private event timestamp={}", msg.timestamp);
@@ -309,7 +274,7 @@ impl NcRouter {
             should_trigger_llm = unified_event.should_trigger_llm,
             "NC group unified inbound event"
         );
-        if !unified_event.should_respond {
+        if !unified_event.should_trigger_llm {
             return;
         }
         debug!("NC group event timestamp={}", msg.timestamp);
@@ -387,58 +352,6 @@ impl NcRouter {
         strip_trigger_prefix(text, &self.config.napcat.trigger_prefixes).unwrap_or(text)
     }
 
-    /// 执行单个工具调用，返回结果字符串
-    async fn execute_skill(
-        &self,
-        call: &ToolCall,
-        user_id: i64,
-        group_id: Option<i64>,
-        sender_name: &str,
-        caller_groups: &[u32],
-        allowed_skills: &[String],
-    ) -> String {
-        if !is_skill_allowed(&call.name, allowed_skills) {
-            warn!(skill = %call.name, "NC Skill execution denied by ACL");
-            return "Skill execution denied".to_string();
-        }
-
-        if let Some(skill) = self.registry.get(&call.name) {
-            let nc_ctx = NcExecutionContext {
-                adapter: self.adapter.clone(),
-                caller_id: user_id,
-                caller_name: sender_name.to_string(),
-                caller_groups: caller_groups.to_vec(),
-                caller_group_id: group_id,
-                gate: self.gate.clone(),
-                config: self.config.clone(),
-            };
-            let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
-                .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
-
-            match skill
-                .execute_unified(call.arguments.clone(), &unified_ctx)
-                .await
-            {
-                Ok(val) => {
-                    info!(
-                        skill = %call.name,
-                        caller = %sender_name,
-                        "NC Unified Skill executed"
-                    );
-                    val.to_string()
-                }
-                Err(e) => {
-                    let msg = format!("Skill execution failed: {}", e);
-                    error!(skill = %call.name, error = %e, "NC Skill failed");
-                    msg
-                }
-            }
-        } else {
-            warn!(skill = %call.name, "NC Skill not found");
-            "Skill not found".to_string()
-        }
-    }
-
     /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复
     async fn run_llm(
         &self,
@@ -448,8 +361,6 @@ impl NcRouter {
         group_id: Option<i64>,
         caller_groups: &[u32],
     ) -> String {
-        let error_msg = "AI backend unavailable. Please try again later.".to_string();
-
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
             None => SessionSource::NapCatPrivate { user_id },
@@ -458,21 +369,11 @@ impl NcRouter {
         let system_prompt = &self.prompts.system.content;
 
         let online_suffix = if let Some(ref adapter) = self.ts_adapter {
-            match adapter.list_clients().await {
-                Ok(clients) => {
-                    let arr: Vec<serde_json::Value> = clients
-                        .iter()
-                        .map(|c| {
-                            json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
-                        })
-                        .collect();
-                    debug!("Fetched {} online clients for LLM context", clients.len());
-                    format!(
-                        "\nOnline: {}",
-                        serde_json::to_string(&arr).unwrap_or_default()
-                    )
-                }
-                Err(_) => String::new(),
+            let (online_clients, _) = adapter.list_clients_json(0).await;
+            if online_clients.is_empty() {
+                String::new()
+            } else {
+                format!("\nOnline: {}", online_clients)
             }
         } else {
             String::new()
@@ -489,27 +390,30 @@ impl NcRouter {
             ),
         };
 
-        let mut messages = self
-            .llm
-            .build_messages(&source, system_prompt, &user_ctx, user_msg);
-
         let allowed_skills = self.gate.get_allowed_skills(caller_groups, 0);
         debug!("NC allowed skills: {:?}", allowed_skills);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
 
-        let executor = NcExecutor {
-            router: self,
-            user_id,
-            group_id,
-            sender_name,
-            caller_groups,
-            allowed_skills: &allowed_skills,
-        };
-
-        match self
-            .llm
-            .run_tool_loop(&mut messages, &tools, &executor, None)
-            .await
+        match run_llm_turn(
+            &self.llm,
+            &self.registry,
+            |llm| llm.build_messages(&source, system_prompt, &user_ctx, user_msg),
+            &allowed_skills,
+            None,
+            || {
+                let nc_ctx = NcExecutionContext {
+                    adapter: self.adapter.clone(),
+                    caller_id: user_id,
+                    caller_name: sender_name.to_string(),
+                    caller_groups: caller_groups.to_vec(),
+                    caller_group_id: group_id,
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                };
+                UnifiedExecutionContext::from_nc(&nc_ctx)
+                    .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()))
+            },
+        )
+        .await
         {
             Ok(result) => {
                 let content = result.content;
@@ -521,32 +425,7 @@ impl NcRouter {
             }
             Err(e) => {
                 error!("NC LLM error: {}", e);
-                error_msg
-            }
-        }
-    }
-}
-
-/// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
-const NC_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-async fn drain_nc_tasks(mut tasks: JoinSet<()>) {
-    loop {
-        let result = tokio::time::timeout(NC_TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
-        match result {
-            Ok(Some(Ok(()))) => {}
-            Ok(Some(Err(error))) => {
-                error!("NC message task failed: {error}");
-            }
-            Ok(None) => break,
-            Err(_) => {
-                warn!(
-                    timeout_secs = NC_TASK_DRAIN_TIMEOUT.as_secs(),
-                    "NC message tasks exceeded drain timeout; aborting"
-                );
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                break;
+                LLM_ERROR_REPLY.to_string()
             }
         }
     }

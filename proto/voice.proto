@@ -2,19 +2,11 @@ syntax = "proto3";
 
 package tsbot.voice.v1;
 
-message Empty {}
-
 service VoiceService {
-  rpc Ping(Empty) returns (PingResponse);
-
   rpc SendNotice(NoticeRequest) returns (CommandResponse);
   rpc StreamTtsAudio(stream TtsAudioChunk) returns (CommandResponse);
 
   rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
-}
-
-message PingResponse {
-  string version = 1;
 }
 
 message CommandResponse {
@@ -37,16 +29,12 @@ message TtsAudioChunk {
 
 message SubscribeRequest {
   bool include_chat = 1;
-  bool include_log = 2;
   bool include_audio = 3;
 }
 
 message Event {
-  int64 unix_ms = 1;
-
   oneof payload {
     ChatEvent chat = 2;
-    LogEvent log = 3;
     AudioFrameEvent audio = 4;
   }
 }
@@ -63,40 +51,10 @@ message ChatEvent {
   string invoker_unique_id = 2;
   string invoker_name = 3;
   string message = 4;
-  string invoker_avatar_hash = 5;
-  string invoker_description = 6;
   bool should_trigger_llm = 7;
-  bool should_respond = 8;
   TargetMode reply_target_mode = 9;
   uint32 reply_target_client_id = 10;
   uint32 invoker_client_id = 11;
-}
-
-message PlaybackEvent {
-  enum Type {
-    TYPE_UNSPECIFIED = 0;
-    TYPE_STARTED = 1;
-    TYPE_FINISHED = 2;
-    TYPE_ERROR = 3;
-  }
-
-  Type type = 1;
-  string title = 2;
-  string source_url = 3;
-  string detail = 4;
-}
-
-message LogEvent {
-  enum Level {
-    LEVEL_UNSPECIFIED = 0;
-    LEVEL_DEBUG = 1;
-    LEVEL_INFO = 2;
-    LEVEL_WARN = 3;
-    LEVEL_ERROR = 4;
-  }
-
-  Level level = 1;
-  string message = 2;
 }
 
 message AudioFrameEvent {
@@ -113,6 +71,5 @@ message AudioFrameEvent {
   uint32 from_client_id = 1;
   string from_client_name = 2;
   Codec codec = 3;
-  bool is_whisper = 4;
   bytes frame = 5;
 }

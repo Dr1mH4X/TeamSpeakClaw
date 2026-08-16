@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     adapter::reconnect::{wait_for_retry, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS},
-    config::NapCatConfig,
+    config::{AppConfig, NapCatConfig},
 };
 use anyhow::{anyhow, Context as _, Result};
 use dashmap::DashMap;
@@ -37,6 +37,18 @@ type WsSink = futures_util::stream::SplitSink<WsConnection, Message>;
 type WsStream = futures_util::stream::SplitStream<WsConnection>;
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub async fn connect_if_enabled(
+    config: Arc<AppConfig>,
+    shutdown: CancellationToken,
+) -> Result<Option<Arc<NapCatAdapter>>> {
+    if config.napcat.enabled {
+        let nc = NapCatAdapter::connect(config.napcat.clone(), shutdown).await?;
+        Ok(Some(nc))
+    } else {
+        Ok(None)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionExit {

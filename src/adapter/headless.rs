@@ -11,6 +11,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::adapter::reconnect::join_or_abort;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -31,9 +32,9 @@ mod actor;
 mod event;
 pub mod speech;
 pub(crate) mod text_util;
-mod types;
 mod voice_service;
 
+pub(crate) use self::event::{parse_server_groups, MainSubscriptions};
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
@@ -109,13 +110,6 @@ impl Drop for ServiceRunningGuard {
     }
 }
 
-#[derive(Clone)]
-pub struct HeadlessRuntimeConfig {
-    pub bot_respond_to_private: bool,
-    pub bot_default_reply_mode: String,
-    pub bot_trigger_prefixes: Vec<String>,
-}
-
 fn component_result(
     result: std::result::Result<Result<()>, JoinError>,
     component: &str,
@@ -123,24 +117,6 @@ fn component_result(
     result
         .with_context(|| format!("failed to join {component}"))?
         .with_context(|| format!("{component} failed"))
-}
-
-async fn join_with_timeout<T>(
-    handle: &mut JoinHandle<T>,
-    component: &str,
-    timeout: Duration,
-) -> Result<T> {
-    match tokio::time::timeout(timeout, &mut *handle).await {
-        Ok(result) => result.with_context(|| format!("failed to join {component}")),
-        Err(_) => {
-            handle.abort();
-            let _ = handle.await;
-            Err(anyhow!(
-                "timed out after {} seconds while stopping {component}",
-                timeout.as_secs()
-            ))
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -172,7 +148,7 @@ async fn bind_grpc_listener() -> Result<tokio::net::TcpListener> {
 pub async fn run(
     client: Arc<tsclient_rs::Client>,
     listener: tokio::net::TcpListener,
-    config: HeadlessRuntimeConfig,
+    config: Arc<AppConfig>,
     shutdown: CancellationToken,
     bridge_state: VoiceBridgeState,
 ) -> Result<()> {
@@ -202,7 +178,7 @@ pub async fn run(
         ts3_notice_tx,
         control_tx,
         audio_tx,
-        config.bot_default_reply_mode.clone(),
+        config.bot.default_reply_mode.clone(),
     );
 
     info!(
@@ -233,12 +209,12 @@ pub async fn run(
 
     let other_result = match first_component {
         HeadlessComponent::Actor => {
-            join_with_timeout(&mut server_task, "gRPC server", TASK_SHUTDOWN_TIMEOUT)
+            join_or_abort(&mut server_task, "gRPC server", TASK_SHUTDOWN_TIMEOUT)
                 .await
                 .and_then(|result| result)
         }
         HeadlessComponent::Server => {
-            join_with_timeout(&mut actor_task, "TS3 actor", TASK_SHUTDOWN_TIMEOUT)
+            join_or_abort(&mut actor_task, "TS3 actor", TASK_SHUTDOWN_TIMEOUT)
                 .await
                 .and_then(|result| result)
         }
@@ -302,21 +278,17 @@ impl Runtime {
 
         let shutdown = CancellationToken::new();
         let (failed_tx, _failed_rx) = watch::channel::<Option<&'static str>>(None);
-        let hl_runtime = HeadlessRuntimeConfig {
-            bot_respond_to_private: config.bot.respond_to_private,
-            bot_default_reply_mode: config.bot.default_reply_mode.clone(),
-            bot_trigger_prefixes: config.bot.trigger_prefixes.clone(),
-        };
 
         let shutdown_for_service = shutdown.clone();
         let service_bridge_state = bridge_state.clone();
         let failed_tx_for_service = failed_tx.clone();
         let ts_client = ts_adapter.get_client().clone();
+        let config_for_service = config.clone();
         let service_handle = Some(tokio::spawn(async move {
             let result = run(
                 ts_client,
                 listener,
-                hl_runtime,
+                config_for_service,
                 shutdown_for_service.clone(),
                 service_bridge_state.clone(),
             )
@@ -418,7 +390,7 @@ impl Runtime {
 
         if let Some(mut handle) = self.bridge_handle {
             if let Err(error) =
-                join_with_timeout(&mut handle, "voice router", TASK_SHUTDOWN_TIMEOUT).await
+                join_or_abort(&mut handle, "voice router", TASK_SHUTDOWN_TIMEOUT).await
             {
                 warn!("Failed to stop voice router: {error}");
             }
@@ -426,7 +398,7 @@ impl Runtime {
 
         if let Some(mut handle) = self.service_handle {
             if let Err(error) =
-                join_with_timeout(&mut handle, "headless service", TASK_SHUTDOWN_TIMEOUT).await
+                join_or_abort(&mut handle, "headless service", TASK_SHUTDOWN_TIMEOUT).await
             {
                 warn!("Failed to stop headless service: {error}");
             }
@@ -539,7 +511,7 @@ mod tests {
     async fn stalled_task_is_aborted_after_shutdown_timeout() {
         let mut task = tokio::spawn(std::future::pending::<()>());
 
-        let result = join_with_timeout(&mut task, "test task", Duration::from_millis(1)).await;
+        let result = join_or_abort(&mut task, "test task", Duration::from_millis(1)).await;
 
         assert!(result.is_err());
         assert!(task.is_finished());

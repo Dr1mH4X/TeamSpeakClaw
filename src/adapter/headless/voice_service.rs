@@ -2,7 +2,7 @@ use std::{io::ErrorKind, process::Stdio};
 
 use anyhow::{anyhow, Context};
 use audiopus::coder::Encoder;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
@@ -12,7 +12,6 @@ use tracing::{error, warn};
 
 use super::speech::detect_audio_format;
 use super::tsbot::voice::v1 as voicev1;
-use super::types::emit_log;
 use voicev1::voice_service_server::VoiceService;
 
 pub struct VoiceServiceImpl {
@@ -43,11 +42,7 @@ impl VoiceServiceImpl {
     }
 
     fn default_reply_mode(&self) -> i32 {
-        match self.bot_default_reply_mode.as_str() {
-            "channel" => 2,
-            "server" => 3,
-            _ => 1,
-        }
+        crate::config::reply_target_mode(&self.bot_default_reply_mode)
     }
 }
 
@@ -72,13 +67,11 @@ impl Drop for ChildKillOnDrop {
 fn map_subscribed_event(
     result: std::result::Result<voicev1::Event, BroadcastStreamRecvError>,
     include_chat: bool,
-    include_log: bool,
 ) -> Option<std::result::Result<voicev1::Event, Status>> {
     match result {
         Ok(event) => {
             let included = match event.payload.as_ref() {
                 Some(voicev1::event::Payload::Chat(_)) => include_chat,
-                Some(voicev1::event::Payload::Log(_)) => include_log,
                 // control 通道不承载音频事件；音频走独立广播
                 Some(voicev1::event::Payload::Audio(_)) => false,
                 None => false,
@@ -254,15 +247,6 @@ async fn stream_tts_audio_loop(
 
 #[tonic::async_trait]
 impl VoiceService for VoiceServiceImpl {
-    async fn ping(
-        &self,
-        _req: Request<voicev1::Empty>,
-    ) -> std::result::Result<Response<voicev1::PingResponse>, Status> {
-        Ok(Response::new(voicev1::PingResponse {
-            version: "0.1.0".to_string(),
-        }))
-    }
-
     async fn send_notice(
         &self,
         req: Request<voicev1::NoticeRequest>,
@@ -303,15 +287,6 @@ impl VoiceService for VoiceServiceImpl {
             }));
         }
 
-        emit_log(
-            &self.control_tx,
-            2,
-            format!(
-                "send_notice accepted: target_mode={} target_client_id={}",
-                mode, target
-            ),
-        );
-
         Ok(Response::new(voicev1::CommandResponse {
             ok: true,
             message: "ok".to_string(),
@@ -350,8 +325,7 @@ impl VoiceService for VoiceServiceImpl {
         let control_stream =
             BroadcastStream::new(self.control_tx.subscribe()).filter_map(move |r| {
                 let include_chat = cfg.include_chat;
-                let include_log = cfg.include_log;
-                async move { map_subscribed_event(r, include_chat, include_log) }
+                async move { map_subscribed_event(r, include_chat) }
             });
 
         if !include_audio {
@@ -362,7 +336,7 @@ impl VoiceService for VoiceServiceImpl {
 
         let audio_stream = BroadcastStream::new(self.audio_tx.subscribe())
             .filter_map(|r| async move { map_audio_event(r).map(Ok) });
-        let merged = futures::stream::select(control_stream, audio_stream);
+        let merged = futures_util::stream::select(control_stream, audio_stream);
         Ok(Response::new(
             Box::pin(merged) as Self::SubscribeEventsStream
         ))
@@ -379,7 +353,7 @@ mod tests {
 
     #[test]
     fn control_lag_becomes_resource_exhausted_status() {
-        let result = map_subscribed_event(Err(BroadcastStreamRecvError::Lagged(7)), true, true);
+        let result = map_subscribed_event(Err(BroadcastStreamRecvError::Lagged(7)), true);
 
         let Some(Err(status)) = result else {
             panic!("control lag must produce a stream error");
@@ -398,7 +372,6 @@ mod tests {
     #[test]
     fn audio_event_passes_through_audio_mapper() {
         let event = voicev1::Event {
-            unix_ms: 1,
             payload: Some(voicev1::event::Payload::Audio(
                 voicev1::AudioFrameEvent::default(),
             )),

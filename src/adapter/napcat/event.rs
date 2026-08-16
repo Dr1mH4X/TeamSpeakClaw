@@ -1,7 +1,7 @@
 use super::types::{Segment, Sender};
+use crate::adapter::reconnect::now_unix_secs;
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub enum NcEvent {
@@ -25,13 +25,6 @@ pub struct GroupMessageEvent {
     pub message: Vec<Segment>,
     pub sender: Sender,
     pub timestamp: u64,
-}
-
-fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +57,7 @@ fn parse_message_event(ev: RawEvent) -> NcEvent {
     };
     let message = parse_segments(ev.message.as_ref().unwrap_or(&Value::Array(vec![])));
     let sender = parse_sender(ev.sender.as_ref().unwrap_or(&Value::Null), user_id);
-    let timestamp = ev.time.unwrap_or_else(now_unix_seconds);
+    let timestamp = ev.time.unwrap_or_else(now_unix_secs);
 
     match ev.message_type.as_deref() {
         Some("private") => NcEvent::PrivateMessage(PrivateMessageEvent {

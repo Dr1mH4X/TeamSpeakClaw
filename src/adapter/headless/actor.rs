@@ -7,9 +7,10 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::config::AppConfig;
+
 use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
-use super::types::now_unix_ms;
 
 /// 客户端目录：clid -> nickname，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, String>>>;
@@ -42,7 +43,7 @@ pub async fn ts3_actor(
     mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
-    runtime_config: super::HeadlessRuntimeConfig,
+    config: Arc<AppConfig>,
     bridge_state: super::VoiceBridgeState,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
@@ -51,9 +52,9 @@ pub async fn ts3_actor(
 
     // 先注册 text handler，避免丢消息
     let control_tx_t = channels.control_tx.clone();
-    let respond_private = runtime_config.bot_respond_to_private;
-    let reply_mode = runtime_config.bot_default_reply_mode.clone();
-    let bot_trigger_prefixes = runtime_config.bot_trigger_prefixes.clone();
+    let respond_private = config.bot.respond_to_private;
+    let reply_mode = config.bot.default_reply_mode.clone();
+    let bot_trigger_prefixes = config.bot.trigger_prefixes.clone();
     client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::TextMessage(ref msg) = event {
             let target_mode = match msg.target_mode {
@@ -82,23 +83,17 @@ pub async fn ts3_actor(
             let (reply_target_mode, reply_target_client_id) = if target_mode == 1 {
                 (1, invoker_client_id)
             } else {
-                match reply_mode.as_str() {
-                    "channel" => (2, 0),
-                    "server" => (3, 0),
-                    _ => (1, invoker_client_id),
-                }
+                let mode = crate::config::reply_target_mode(reply_mode.as_str());
+                let target = if mode == 1 { invoker_client_id } else { 0 };
+                (mode, target)
             };
             let _ = control_tx_t.send(voicev1::Event {
-                unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Chat(voicev1::ChatEvent {
                     target_mode,
                     invoker_unique_id: msg.invoker_uid.clone(),
                     invoker_name: msg.invoker_name.clone(),
                     message: msg_content,
-                    invoker_avatar_hash: String::new(),
-                    invoker_description: String::new(),
                     should_trigger_llm,
-                    should_respond: should_trigger_llm,
                     reply_target_mode,
                     reply_target_client_id,
                     invoker_client_id,
@@ -151,12 +146,10 @@ pub async fn ts3_actor(
                 .cloned()
                 .unwrap_or_default();
             let _ = audio_tx_v.send(voicev1::Event {
-                unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
                     from_client_name,
                     codec: vd.codec,
-                    is_whisper: false,
                     frame: vd.data.to_vec(),
                 })),
             });

@@ -16,10 +16,27 @@ pub use napcat::NapCatConfig;
 pub use prompts::PromptsConfig;
 
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::config::music_backend::VALID_BACKENDS;
+
+/// 读取并解析 TOML 配置文件；`hint` 为文件缺失/不可读时的提示文案。
+pub(crate) fn load_toml<T: DeserializeOwned>(path: &Path, hint: &str) -> Result<T> {
+    let content = std::fs::read_to_string(path).context(hint.to_string())?;
+    let config: T = toml::from_str(&content)?;
+    Ok(config)
+}
+
+/// bot.default_reply_mode 字符串 → TS target_mode 数字（private=1/channel=2/server=3）
+pub(crate) fn reply_target_mode(mode: &str) -> i32 {
+    match mode {
+        "channel" => 2,
+        "server" => 3,
+        _ => 1,
+    }
+}
 
 pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
@@ -86,13 +103,25 @@ impl AppConfig {
 
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).context(format!(
-            "Config file not found: {}. Please copy examples/config/settings.toml to config/",
-            path.display()
-        ))?;
-        let config: AppConfig = toml::from_str(&content)?;
+        let config: AppConfig = load_toml(
+            path,
+            &format!(
+                "Config file not found: {}. Please copy examples/config/settings.toml to config/",
+                path.display()
+            ),
+        )?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// 判断客户端名称是否命中音乐 bot（忽略大小写子串匹配；未配置或名称为空时恒 false）
+    pub(crate) fn is_music_bot_name(&self, name: &str) -> bool {
+        self.music_backend.as_ref().is_some_and(|config| {
+            !config.musicbot_name.is_empty()
+                && name
+                    .to_ascii_lowercase()
+                    .contains(&config.musicbot_name.to_ascii_lowercase())
+        })
     }
 }
 

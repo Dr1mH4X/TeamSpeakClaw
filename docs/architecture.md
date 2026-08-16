@@ -38,7 +38,7 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 ## 技能系统
 
-`skills.rs` 定义 `Skill` trait 与 `SkillRegistry` 注册表。平台执行上下文为 `ExecutionContext`（TeamSpeak）与 `NcExecutionContext`（QQ），跨平台统一用 `UnifiedExecutionContext`；技能实现 `execute`（TS）、`execute_nc`（QQ，默认返回不支持）、`execute_unified`（双平台共用，默认分派到当前平台实现）。注册表按 ACL 白名单生成工具 schema 并执行技能调用。技能按目录分为 `communication`、`information`、`moderation`、`music`（后端见 `skills/music/`：`ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`，默认注册表在 `DEFAULT_SKILLS`。
+`skills.rs` 定义 `Skill` trait 与 `SkillRegistry` 注册表。平台执行上下文为 `ExecutionContext`（TeamSpeak）与 `NcExecutionContext`（QQ），跨平台统一用 `UnifiedExecutionContext`；技能实现 `execute`（TS）与 `execute_unified`（双平台共用，NapCat 分支默认返回不支持）。注册表按 ACL 白名单生成工具 schema 并执行技能调用。技能按目录分为 `communication`、`information`、`moderation`、`music`（后端见 `skills/music/`：`ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`，默认注册表在 `DEFAULT_SKILLS`。
 
 ## 层级规范
 

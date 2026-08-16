@@ -15,16 +15,65 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use self::ts_router::TsRouterExit;
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::{AppConfig, PromptsConfig};
-use crate::llm::LlmEngine;
+use crate::llm::tool_loop::{ToolLoopError, ToolLoopResult};
+use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::skills::SkillRegistry;
+use crate::skills::{SkillRegistry, UnifiedExecutionContext};
+
+/// LLM 后端不可用时的固定回复文案（ts/nc/voice 四调用点共用）
+pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
+
+/// 工具循环执行器：调用点注入 UnifiedExecutionContext 构造闭包，替代原各 router 的薄包装 Executor
+struct TurnExecutor<'a, F> {
+    registry: &'a SkillRegistry,
+    allowed_skills: &'a [String],
+    build_exec_ctx: F,
+}
+
+#[async_trait]
+impl<F> ToolExecutor for TurnExecutor<'_, F>
+where
+    F: Fn() -> UnifiedExecutionContext + Send + Sync,
+{
+    async fn execute(&self, call: &ToolCall) -> String {
+        self.registry
+            .execute_skill(call, (self.build_exec_ctx)(), self.allowed_skills)
+            .await
+    }
+}
+
+/// 共享的单回合 LLM 执行骨架：构建消息 → 筛选工具 schema → 构造执行器 → 运行工具循环。
+/// 差异点（user_ctx 构建、发送通道、save_turn 时机、错误处理）由调用点各自实现。
+pub(crate) async fn run_llm_turn<F, M>(
+    llm: &LlmEngine,
+    registry: &SkillRegistry,
+    build_messages: M,
+    allowed_skills: &[String],
+    callbacks: Option<&StreamCallbacks>,
+    build_exec_ctx: F,
+) -> Result<ToolLoopResult, ToolLoopError>
+where
+    F: Fn() -> UnifiedExecutionContext + Send + Sync,
+    M: FnOnce(&LlmEngine) -> Vec<Value>,
+{
+    let mut messages = build_messages(llm);
+    let tools = registry.to_tool_schemas(allowed_skills);
+    let executor = TurnExecutor {
+        registry,
+        allowed_skills,
+        build_exec_ctx,
+    };
+    llm.run_tool_loop(&mut messages, &tools, &executor, callbacks)
+        .await
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterExit {
@@ -166,9 +215,9 @@ async fn describe_bot(adapter: &TsAdapter, bot_clid: u32, napcat_enabled: bool) 
     }
 }
 
-fn map_ts_router_result(res: Result<TsRouterExit>) -> Result<RouterExit> {
+fn map_ts_router_result(res: Result<()>) -> Result<RouterExit> {
     match res {
-        Ok(TsRouterExit::Disconnected) => {
+        Ok(()) => {
             warn!("TeamSpeak connection lost");
             Ok(RouterExit::TeamSpeakDisconnected)
         }
@@ -194,37 +243,32 @@ fn map_nc_router_result(res: Result<()>) -> Result<RouterExit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        map_ts_router_result, wait_for_ready_or_router, ReadyWait, RouterExit, TsRouterExit,
-    };
+    use super::{map_ts_router_result, wait_for_ready_or_router, ReadyWait, RouterExit};
     use std::future::pending;
     use tokio_util::sync::CancellationToken;
 
     #[test]
     fn disconnected_router_has_explicit_exit_reason() {
         assert_eq!(
-            map_ts_router_result(Ok(TsRouterExit::Disconnected)).unwrap(),
+            map_ts_router_result(Ok(())).unwrap(),
             RouterExit::TeamSpeakDisconnected
         );
     }
 
     #[tokio::test]
     async fn router_exit_interrupts_stalled_ready_query() {
-        let mut router = Box::pin(async { TsRouterExit::Disconnected });
+        let mut router = Box::pin(async {});
 
         let outcome =
             wait_for_ready_or_router(pending::<()>(), router.as_mut(), &CancellationToken::new())
                 .await;
 
-        assert!(matches!(
-            outcome,
-            ReadyWait::Router(TsRouterExit::Disconnected)
-        ));
+        assert!(matches!(outcome, ReadyWait::Router(())));
     }
 
     #[tokio::test]
     async fn shutdown_interrupts_stalled_ready_query() {
-        let mut router = Box::pin(pending::<TsRouterExit>());
+        let mut router = Box::pin(pending::<()>());
         let shutdown = CancellationToken::new();
         shutdown.cancel();
 
