@@ -105,7 +105,17 @@ impl NcRouter {
                         info!("NC: Ignored untrusted user {}", msg.user_id);
                         continue;
                     }
-                    self.spawn_handle_private(&mut tasks, msg).await;
+                    let user_id = msg.user_id;
+                    self.spawn_handle(
+                        &mut tasks,
+                        msg,
+                        SessionSource::NapCatPrivate { user_id },
+                        || warn!(user_id, "NC LLM turn queue full; dropping message"),
+                        |router, msg, capacity, session| async move {
+                            router.handle_private(msg, capacity, session).await
+                        },
+                    )
+                    .await;
                 }
                 NcEvent::GroupMessage(msg) => {
                     if msg.user_id == self.adapter.get_self_id() {
@@ -122,7 +132,17 @@ impl NcRouter {
                         );
                         continue;
                     }
-                    self.spawn_handle_group(&mut tasks, msg).await;
+                    let group_id = msg.group_id;
+                    self.spawn_handle(
+                        &mut tasks,
+                        msg,
+                        SessionSource::NapCatGroup { group_id },
+                        || warn!(group_id, "NC LLM turn queue full; dropping message"),
+                        |router, msg, capacity, session| async move {
+                            router.handle_group(msg, capacity, session).await
+                        },
+                    )
+                    .await;
                 }
                 NcEvent::Heartbeat => {
                     debug!("NapCat heartbeat");
@@ -131,7 +151,19 @@ impl NcRouter {
         }
     }
 
-    async fn spawn_handle_private(&self, tasks: &mut JoinSet<()>, msg: PrivateMessageEvent) {
+    // clone 依赖 → 容量检查 → spawn 任务，重建 NcRouter 后分派给对应 handler
+    async fn spawn_handle<M, F, Fut>(
+        &self,
+        tasks: &mut JoinSet<()>,
+        msg: M,
+        source: SessionSource,
+        on_queue_full: impl FnOnce(),
+        handler: F,
+    ) where
+        M: Send + 'static,
+        F: FnOnce(NcRouter, M, TurnCapacityPermit, TurnSessionGuard) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         let config = self.config.clone();
         let prompts = self.prompts.clone();
         let adapter = self.adapter.clone();
@@ -140,14 +172,8 @@ impl NcRouter {
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
 
-        let source = SessionSource::NapCatPrivate {
-            user_id: msg.user_id,
-        };
         let Ok(capacity) = llm.try_reserve_turn_capacity() else {
-            warn!(
-                user_id = msg.user_id,
-                "NC LLM turn queue full; dropping message"
-            );
+            on_queue_full();
             return;
         };
 
@@ -162,42 +188,7 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            router.handle_private(msg, capacity, session).await;
-        });
-    }
-
-    async fn spawn_handle_group(&self, tasks: &mut JoinSet<()>, msg: GroupMessageEvent) {
-        let config = self.config.clone();
-        let prompts = self.prompts.clone();
-        let adapter = self.adapter.clone();
-        let gate = self.gate.clone();
-        let llm = self.llm.clone();
-        let registry = self.registry.clone();
-        let ts_adapter = self.ts_adapter.clone();
-
-        let source = SessionSource::NapCatGroup {
-            group_id: msg.group_id,
-        };
-        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
-            warn!(
-                group_id = msg.group_id,
-                "NC LLM turn queue full; dropping message"
-            );
-            return;
-        };
-
-        tasks.spawn(async move {
-            let session = llm.acquire_turn_session(&source).await;
-            let router = NcRouter {
-                config,
-                prompts,
-                adapter: adapter.clone(),
-                gate,
-                llm,
-                registry,
-                ts_adapter,
-            };
-            router.handle_group(msg, capacity, session).await;
+            handler(router, msg, capacity, session).await;
         });
     }
 

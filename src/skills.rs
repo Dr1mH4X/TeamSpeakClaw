@@ -6,7 +6,7 @@ pub mod web_search;
 
 mod http;
 
-use crate::adapter::headless::TsAdapter;
+use crate::adapter::headless::{parse_server_groups, TsAdapter};
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::AppConfig;
 use crate::config::MusicBackendConfig;
@@ -32,6 +32,28 @@ pub(crate) fn is_skill_allowed(name: &str, allowed_skills: &[String]) -> bool {
     allowed_skills
         .iter()
         .any(|allowed| allowed == "*" || allowed == name)
+}
+
+/// 统一上下文中取 TS 适配器（NapCat 跨适配器分支共用）
+pub(crate) fn unified_ts_adapter(ctx: &UnifiedExecutionContext) -> Result<Arc<TsAdapter>> {
+    ctx.ts_adapter
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))
+}
+
+/// 按 clid 在 TS 在线列表中解析目标客户端及其服务器组（NapCat 跨适配器分支共用）
+pub(crate) async fn resolve_ts_client(
+    ctx: &UnifiedExecutionContext,
+    clid: u32,
+) -> Result<(tsclient_rs::ClientInfo, Vec<u32>)> {
+    let ts_adapter = unified_ts_adapter(ctx)?;
+    let clients = ts_adapter.list_clients().await?;
+    let client = clients
+        .into_iter()
+        .find(|c| u32::try_from(c.id).ok() == Some(clid))
+        .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
+    let groups = parse_server_groups(&client.server_groups);
+    Ok((client, groups))
 }
 
 // ─────────────────────────────────────────────

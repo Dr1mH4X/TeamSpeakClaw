@@ -1,4 +1,6 @@
-use crate::skills::{required_u32, ExecutionContext, Platform, Skill, UnifiedExecutionContext};
+use crate::skills::{
+    required_u32, resolve_ts_client, ExecutionContext, Platform, Skill, UnifiedExecutionContext,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -104,19 +106,7 @@ impl Skill for GetClientInfo {
             Platform::NapCat => {
                 let clid = required_u32(&args, "clid")?;
 
-                let ts_adapter = ctx
-                    .ts_adapter
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?;
-
-                let clients = ts_adapter.list_clients().await?;
-                let client = clients
-                    .iter()
-                    .find(|c| u32::try_from(c.id).ok() == Some(clid))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Client {} is not online or does not exist", clid)
-                    })?;
-                let groups = crate::adapter::headless::parse_server_groups(&client.server_groups);
+                let (client, groups) = resolve_ts_client(ctx, clid).await?;
                 let reply = format!(
                     "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
                     client.nickname, client.id, groups, client.channel_id
