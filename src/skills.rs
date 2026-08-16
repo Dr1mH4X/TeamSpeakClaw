@@ -146,21 +146,6 @@ impl UnifiedExecutionContext {
             config: self.config.clone(),
         })
     }
-
-    pub fn to_nc_ctx(&self) -> Result<NcExecutionContext> {
-        Ok(NcExecutionContext {
-            adapter: self
-                .nc_adapter
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("NapCat adapter not available"))?,
-            caller_id: self.caller_id_nc,
-            caller_name: self.caller_name.clone(),
-            caller_groups: self.caller_groups.clone(),
-            caller_group_id: self.nc_group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        })
-    }
 }
 
 // ─────────────────────────────────────────────
@@ -193,20 +178,14 @@ pub trait Skill: Send + Sync {
     /// TeamSpeak 执行（原有）
     async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
 
-    /// NapCat/QQ 执行（默认返回"不支持"，各 Skill 按需覆盖）
-    async fn execute_nc(&self, args: Value, _ctx: &NcExecutionContext) -> Result<Value> {
-        let _ = args;
-        Err(anyhow::anyhow!(
-            "Skill '{}' does not support the NapCat platform",
-            self.name()
-        ))
-    }
-
-    /// 统一执行，默认分派到当前平台的原生实现
+    /// 统一执行：TeamSpeak 分派到原生实现，NapCat 默认返回不支持
     async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         match ctx.platform {
             Platform::TeamSpeak => self.execute(args, &ctx.to_ts_ctx()?).await,
-            Platform::NapCat => self.execute_nc(args, &ctx.to_nc_ctx()?).await,
+            Platform::NapCat => Err(anyhow::anyhow!(
+                "Skill '{}' does not support the NapCat platform",
+                self.name()
+            )),
         }
     }
 
@@ -431,6 +410,9 @@ mod tests {
             .execute_unified(json!({}), &unified_context(Platform::NapCat))
             .await
             .unwrap_err();
-        assert_eq!(nc_error.to_string(), "NapCat adapter not available");
+        assert_eq!(
+            nc_error.to_string(),
+            "Skill 'test' does not support the NapCat platform"
+        );
     }
 }

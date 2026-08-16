@@ -40,7 +40,7 @@ pub enum ToolLoopError {
 #[derive(Debug)]
 pub struct ToolLoopResult {
     pub content: String,
-    pub finish_reason: String,
+    finish_reason: String,
 }
 
 #[derive(Debug)]

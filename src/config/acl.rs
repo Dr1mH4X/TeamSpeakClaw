@@ -10,7 +10,6 @@ pub struct AclConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AclRule {
-    pub name: String,
     pub server_group_ids: Vec<u32>,
     pub channel_group_ids: Vec<u32>,
     pub allowed_skills: Vec<String>,

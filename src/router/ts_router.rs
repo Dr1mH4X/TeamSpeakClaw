@@ -1,6 +1,6 @@
 use crate::adapter::headless::{
-    should_route_text_through_bridge, voice_features_enabled, TextMessageEvent, TsAdapter, TsEvent,
-    VoiceBridgeState,
+    should_route_text_through_bridge, voice_features_enabled, MainSubscriptions, TextMessageEvent,
+    TsAdapter, TsEvent, VoiceBridgeState,
 };
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::{AppConfig, PromptsConfig};
@@ -51,17 +51,7 @@ pub struct EventRouter {
     registry: Arc<SkillRegistry>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
     voice_bridge_state: VoiceBridgeState,
-    subscriptions: Arc<Mutex<Option<TsSubscriptions>>>,
-}
-
-struct TsSubscriptions {
-    events: broadcast::Receiver<TsEvent>,
-    disconnected: watch::Receiver<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TsRouterExit {
-    Disconnected,
+    subscriptions: Arc<Mutex<Option<MainSubscriptions>>>,
 }
 
 impl EventRouter {
@@ -90,14 +80,14 @@ impl EventRouter {
             registry,
             nc_adapter,
             voice_bridge_state,
-            subscriptions: Arc::new(Mutex::new(Some(TsSubscriptions {
+            subscriptions: Arc::new(Mutex::new(Some(MainSubscriptions {
                 events: event_rx,
                 disconnected: disconnect_rx,
             }))),
         }
     }
 
-    pub async fn run(&self) -> Result<TsRouterExit> {
+    pub async fn run(&self) -> Result<()> {
         let mut subscriptions = self
             .subscriptions
             .lock()
@@ -191,7 +181,7 @@ impl EventRouter {
         let Some(unified_event) = UnifiedInboundEvent::from_ts(&event, &self.config) else {
             return;
         };
-        if !unified_event.should_respond {
+        if !unified_event.should_trigger_llm {
             return;
         }
 
@@ -325,7 +315,7 @@ Online: {}"#,
 /// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
 const TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn drain_ts_tasks(mut tasks: JoinSet<()>) -> Result<TsRouterExit> {
+async fn drain_ts_tasks(mut tasks: JoinSet<()>) -> Result<()> {
     loop {
         let result = tokio::time::timeout(TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
         match result {
@@ -345,7 +335,7 @@ async fn drain_ts_tasks(mut tasks: JoinSet<()>) -> Result<TsRouterExit> {
             }
         }
     }
-    Ok(TsRouterExit::Disconnected)
+    Ok(())
 }
 
 async fn receive_ts_event(

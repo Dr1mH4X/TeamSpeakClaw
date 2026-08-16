@@ -31,25 +31,18 @@ struct SpeakerState {
     name: String,
 }
 
+const VAD_ENERGY_THRESHOLD: f32 = 0.015;
+const VAD_SILENCE_MS: u64 = 600;
+const MIN_CHUNK_MS: u64 = 400;
+const MAX_CHUNK_MS: u64 = 12000;
+
 pub struct OpusSttPipeline {
-    vad_energy_threshold: f32,
-    vad_silence_ms: u64,
-    min_chunk_ms: u64,
-    max_chunk_ms: u64,
     speakers: HashMap<u32, SpeakerState>,
 }
 
 impl OpusSttPipeline {
     pub fn new() -> Self {
-        const VAD_ENERGY_THRESHOLD: f32 = 0.015;
-        const VAD_SILENCE_MS: u64 = 600;
-        const MIN_CHUNK_MS: u64 = 400;
-        const MAX_CHUNK_MS: u64 = 12000;
         Self {
-            vad_energy_threshold: VAD_ENERGY_THRESHOLD,
-            vad_silence_ms: VAD_SILENCE_MS,
-            min_chunk_ms: MIN_CHUNK_MS,
-            max_chunk_ms: MAX_CHUNK_MS,
             speakers: HashMap::new(),
         }
     }
@@ -146,7 +139,7 @@ impl OpusSttPipeline {
 
         let frame_ms = ((samples_per_channel as u64) * 1000 / 48000).max(1);
         let energy = normalized_average_abs(&mono_16k);
-        let is_voiced = energy >= self.vad_energy_threshold;
+        let is_voiced = energy >= VAD_ENERGY_THRESHOLD;
 
         if is_voiced {
             state.speaking = true;
@@ -155,14 +148,14 @@ impl OpusSttPipeline {
             state.pcm16_mono_16k.extend_from_slice(&mono_16k);
         } else if state.speaking {
             state.silence_ms = state.silence_ms.saturating_add(frame_ms);
-            if state.silence_ms <= self.vad_silence_ms {
+            if state.silence_ms <= VAD_SILENCE_MS {
                 state.pcm16_mono_16k.extend_from_slice(&mono_16k);
             }
         }
 
         let should_flush = state.speaking
-            && state.speech_ms >= self.min_chunk_ms
-            && (state.silence_ms >= self.vad_silence_ms || state.speech_ms >= self.max_chunk_ms);
+            && state.speech_ms >= MIN_CHUNK_MS
+            && (state.silence_ms >= VAD_SILENCE_MS || state.speech_ms >= MAX_CHUNK_MS);
 
         if !should_flush {
             return Ok(None);
@@ -198,7 +191,7 @@ impl OpusSttPipeline {
                 continue;
             }
 
-            if state.speech_ms >= self.min_chunk_ms {
+            if state.speech_ms >= MIN_CHUNK_MS {
                 // 达到最短语音长度：冲刷为完整 utterance
                 chunks.push(SpeechChunk {
                     speaker_client_id: *client_id,

@@ -53,7 +53,7 @@ proposed 骨架：
 
 ## 技能规范（SKILL.md）
 
-此处「技能」指 agent 侧自有技能（`.agents/skills/`，本地、git 忽略），与 `src/skills.rs` 的代码级 Skill（`execute` / `execute_nc` / `execute_unified` 三方法）无关。每个技能一个目录 `<name>/SKILL.md`，YAML frontmatter 固定 `name`（ASCII）与 `description`（写触发条件，供 agent 检索）。
+此处「技能」指 agent 侧自有技能（`.agents/skills/`，本地、git 忽略），与 `src/skills.rs` 的代码级 Skill（`execute` / `execute_unified` 两方法）无关。每个技能一个目录 `<name>/SKILL.md`，YAML frontmatter 固定 `name`（ASCII）与 `description`（写触发条件，供 agent 检索）。
 
 SKILL.md 正文结构固定四段，全中文：
 

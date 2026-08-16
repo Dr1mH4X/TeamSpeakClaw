@@ -1,12 +1,12 @@
 use crate::skills::{required_u32, ExecutionContext, Skill, UnifiedExecutionContext};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
 
 /// 检查是否可以对目标执行操作
 /// 返回目标的组信息（如果存在）和权限检查结果
-async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> {
+async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<()> {
     // 自操作防护
     if clid == ctx.caller_id {
         return Err(anyhow::anyhow!("Cannot perform this action on yourself"));
@@ -18,15 +18,11 @@ async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> 
         .iter()
         .find(|c| u32::try_from(c.id).ok() == Some(clid))
         .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
-    let target_groups = target
+    let target_groups: Vec<u32> = target
         .server_groups
         .iter()
-        .map(|group| {
-            group
-                .parse::<u32>()
-                .with_context(|| format!("Invalid server group ID '{}'", group))
-        })
-        .collect::<Result<Vec<_>>>()?;
+        .filter_map(|group| group.parse().ok())
+        .collect();
 
     // 检查是否可以对目标执行操作
     if !ctx.gate.can_target(
@@ -39,7 +35,7 @@ async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<Vec<u32>> 
         ));
     }
 
-    Ok(target_groups)
+    Ok(())
 }
 
 async fn validate_channel_exists(ctx: &ExecutionContext, channel_id: u32) -> Result<()> {

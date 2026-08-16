@@ -245,7 +245,7 @@ impl NcRouter {
             should_trigger_llm = unified_event.should_trigger_llm,
             "NC private unified inbound event"
         );
-        if !unified_event.should_respond {
+        if !unified_event.should_trigger_llm {
             return;
         }
         debug!("NC private event timestamp={}", msg.timestamp);
@@ -309,7 +309,7 @@ impl NcRouter {
             should_trigger_llm = unified_event.should_trigger_llm,
             "NC group unified inbound event"
         );
-        if !unified_event.should_respond {
+        if !unified_event.should_trigger_llm {
             return;
         }
         debug!("NC group event timestamp={}", msg.timestamp);

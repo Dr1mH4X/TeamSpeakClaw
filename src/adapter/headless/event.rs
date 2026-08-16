@@ -65,9 +65,9 @@ pub struct TsAdapter {
     main_subscriptions: Mutex<Option<MainSubscriptions>>,
 }
 
-struct MainSubscriptions {
-    events: broadcast::Receiver<TsEvent>,
-    disconnected: watch::Receiver<bool>,
+pub(crate) struct MainSubscriptions {
+    pub(crate) events: broadcast::Receiver<TsEvent>,
+    pub(crate) disconnected: watch::Receiver<bool>,
 }
 
 impl TsAdapter {

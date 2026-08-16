@@ -33,6 +33,7 @@ pub mod speech;
 pub(crate) mod text_util;
 mod voice_service;
 
+pub(crate) use self::event::MainSubscriptions;
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
@@ -108,13 +109,6 @@ impl Drop for ServiceRunningGuard {
     }
 }
 
-#[derive(Clone)]
-pub struct HeadlessRuntimeConfig {
-    pub bot_respond_to_private: bool,
-    pub bot_default_reply_mode: String,
-    pub bot_trigger_prefixes: Vec<String>,
-}
-
 fn component_result(
     result: std::result::Result<Result<()>, JoinError>,
     component: &str,
@@ -171,7 +165,7 @@ async fn bind_grpc_listener() -> Result<tokio::net::TcpListener> {
 pub async fn run(
     client: Arc<tsclient_rs::Client>,
     listener: tokio::net::TcpListener,
-    config: HeadlessRuntimeConfig,
+    config: Arc<AppConfig>,
     shutdown: CancellationToken,
     bridge_state: VoiceBridgeState,
 ) -> Result<()> {
@@ -201,7 +195,7 @@ pub async fn run(
         ts3_notice_tx,
         control_tx,
         audio_tx,
-        config.bot_default_reply_mode.clone(),
+        config.bot.default_reply_mode.clone(),
     );
 
     info!(
@@ -301,21 +295,17 @@ impl Runtime {
 
         let shutdown = CancellationToken::new();
         let (failed_tx, _failed_rx) = watch::channel::<Option<&'static str>>(None);
-        let hl_runtime = HeadlessRuntimeConfig {
-            bot_respond_to_private: config.bot.respond_to_private,
-            bot_default_reply_mode: config.bot.default_reply_mode.clone(),
-            bot_trigger_prefixes: config.bot.trigger_prefixes.clone(),
-        };
 
         let shutdown_for_service = shutdown.clone();
         let service_bridge_state = bridge_state.clone();
         let failed_tx_for_service = failed_tx.clone();
         let ts_client = ts_adapter.get_client().clone();
+        let config_for_service = config.clone();
         let service_handle = Some(tokio::spawn(async move {
             let result = run(
                 ts_client,
                 listener,
-                hl_runtime,
+                config_for_service,
                 shutdown_for_service.clone(),
                 service_bridge_state.clone(),
             )

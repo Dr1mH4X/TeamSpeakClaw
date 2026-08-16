@@ -33,7 +33,6 @@ pub struct UnifiedInboundEvent {
     pub sender_name: String,
     pub text: String,
     pub should_trigger_llm: bool,
-    pub should_respond: bool,
     pub reply_policy: ReplyPolicy,
     pub trace_id: String,
 }
@@ -84,7 +83,6 @@ impl UnifiedInboundEvent {
             sender_name: event.invoker_name.clone(),
             text,
             should_trigger_llm,
-            should_respond: should_trigger_llm,
             reply_policy,
             trace_id: format!("ts-{}-{}", event.invoker_id, event.invoker_uid),
         })
@@ -102,7 +100,6 @@ impl UnifiedInboundEvent {
             sender_name: msg.sender.nickname.clone(),
             text: text.to_string(),
             should_trigger_llm: true,
-            should_respond: true,
             reply_policy: ReplyPolicy::NapCatPrivate {
                 user_id: msg.user_id,
             },
@@ -122,7 +119,6 @@ impl UnifiedInboundEvent {
             sender_name: msg.sender.nickname.clone(),
             text: text.to_string(),
             should_trigger_llm: is_triggered,
-            should_respond: is_triggered,
             reply_policy: ReplyPolicy::NapCatGroup {
                 group_id: msg.group_id,
                 at_user_id: Some(msg.user_id),

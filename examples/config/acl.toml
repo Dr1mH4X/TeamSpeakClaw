@@ -24,14 +24,12 @@
 #   - web_search: 搜索最新网络信息
 
 [[rules]]
-name = "superadmin"
 server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
 channel_group_ids = []
 allowed_skills = ["*"]
 can_target_admins = true
 
 [[rules]]
-name = "channel_admin"
 server_group_ids = []
 channel_group_ids = [5]   # 频道管理员组 ID
 allowed_skills = [
@@ -44,7 +42,6 @@ allowed_skills = [
 can_target_admins = false
 
 [[rules]]
-name = "default_user"
 server_group_ids = [8]    # 普通用户组 ID
 channel_group_ids = []
 allowed_skills = [
@@ -57,7 +54,6 @@ can_target_admins = false
 
 # NapCat 映射规则（可按需启用）
 [[rules]]
-name = "napcat_default"
 server_group_ids = [9000]  # 任意 NapCat 用户
 channel_group_ids = []
 allowed_skills = [
@@ -69,7 +65,6 @@ can_target_admins = false
 
 # 默认规则 (匹配所有人)
 [[rules]]
-name = "default"
 server_group_ids = []
 channel_group_ids = []
 allowed_skills = ["music_control"]

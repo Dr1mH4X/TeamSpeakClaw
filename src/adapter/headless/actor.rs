@@ -7,6 +7,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::config::AppConfig;
+
 use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
 
@@ -41,7 +43,7 @@ pub async fn ts3_actor(
     mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
-    runtime_config: super::HeadlessRuntimeConfig,
+    config: Arc<AppConfig>,
     bridge_state: super::VoiceBridgeState,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
@@ -50,9 +52,9 @@ pub async fn ts3_actor(
 
     // 先注册 text handler，避免丢消息
     let control_tx_t = channels.control_tx.clone();
-    let respond_private = runtime_config.bot_respond_to_private;
-    let reply_mode = runtime_config.bot_default_reply_mode.clone();
-    let bot_trigger_prefixes = runtime_config.bot_trigger_prefixes.clone();
+    let respond_private = config.bot.respond_to_private;
+    let reply_mode = config.bot.default_reply_mode.clone();
+    let bot_trigger_prefixes = config.bot.trigger_prefixes.clone();
     client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::TextMessage(ref msg) = event {
             let target_mode = match msg.target_mode {

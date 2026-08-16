@@ -168,7 +168,7 @@ async fn run_connected_session(
 ) -> SessionCompletion {
     let napcat_shutdown = shutdown.child_token();
     let nc_adapter = match wait_for_initialization(
-        napcat::connect_if_enabled(context.config.clone(), napcat_shutdown.clone()),
+        napcat::ws::connect_if_enabled(context.config.clone(), napcat_shutdown.clone()),
         &mut disconnect_rx,
         &shutdown,
     )

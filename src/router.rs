@@ -18,7 +18,6 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use self::ts_router::TsRouterExit;
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::{AppConfig, PromptsConfig};
@@ -166,9 +165,9 @@ async fn describe_bot(adapter: &TsAdapter, bot_clid: u32, napcat_enabled: bool) 
     }
 }
 
-fn map_ts_router_result(res: Result<TsRouterExit>) -> Result<RouterExit> {
+fn map_ts_router_result(res: Result<()>) -> Result<RouterExit> {
     match res {
-        Ok(TsRouterExit::Disconnected) => {
+        Ok(()) => {
             warn!("TeamSpeak connection lost");
             Ok(RouterExit::TeamSpeakDisconnected)
         }
@@ -194,37 +193,32 @@ fn map_nc_router_result(res: Result<()>) -> Result<RouterExit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        map_ts_router_result, wait_for_ready_or_router, ReadyWait, RouterExit, TsRouterExit,
-    };
+    use super::{map_ts_router_result, wait_for_ready_or_router, ReadyWait, RouterExit};
     use std::future::pending;
     use tokio_util::sync::CancellationToken;
 
     #[test]
     fn disconnected_router_has_explicit_exit_reason() {
         assert_eq!(
-            map_ts_router_result(Ok(TsRouterExit::Disconnected)).unwrap(),
+            map_ts_router_result(Ok(())).unwrap(),
             RouterExit::TeamSpeakDisconnected
         );
     }
 
     #[tokio::test]
     async fn router_exit_interrupts_stalled_ready_query() {
-        let mut router = Box::pin(async { TsRouterExit::Disconnected });
+        let mut router = Box::pin(async {});
 
         let outcome =
             wait_for_ready_or_router(pending::<()>(), router.as_mut(), &CancellationToken::new())
                 .await;
 
-        assert!(matches!(
-            outcome,
-            ReadyWait::Router(TsRouterExit::Disconnected)
-        ));
+        assert!(matches!(outcome, ReadyWait::Router(())));
     }
 
     #[tokio::test]
     async fn shutdown_interrupts_stalled_ready_query() {
-        let mut router = Box::pin(pending::<TsRouterExit>());
+        let mut router = Box::pin(pending::<()>());
         let shutdown = CancellationToken::new();
         shutdown.cancel();
 
