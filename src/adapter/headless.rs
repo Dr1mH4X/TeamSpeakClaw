@@ -31,7 +31,6 @@ mod actor;
 mod event;
 pub mod speech;
 pub(crate) mod text_util;
-mod types;
 mod voice_service;
 
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};

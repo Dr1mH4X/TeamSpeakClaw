@@ -9,7 +9,6 @@ use tracing::warn;
 
 use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
-use super::types::now_unix_ms;
 
 /// 客户端目录：clid -> nickname，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, String>>>;
@@ -89,16 +88,12 @@ pub async fn ts3_actor(
                 }
             };
             let _ = control_tx_t.send(voicev1::Event {
-                unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Chat(voicev1::ChatEvent {
                     target_mode,
                     invoker_unique_id: msg.invoker_uid.clone(),
                     invoker_name: msg.invoker_name.clone(),
                     message: msg_content,
-                    invoker_avatar_hash: String::new(),
-                    invoker_description: String::new(),
                     should_trigger_llm,
-                    should_respond: should_trigger_llm,
                     reply_target_mode,
                     reply_target_client_id,
                     invoker_client_id,
@@ -151,12 +146,10 @@ pub async fn ts3_actor(
                 .cloned()
                 .unwrap_or_default();
             let _ = audio_tx_v.send(voicev1::Event {
-                unix_ms: now_unix_ms(),
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
                     from_client_name,
                     codec: vd.codec,
-                    is_whisper: false,
                     frame: vd.data.to_vec(),
                 })),
             });

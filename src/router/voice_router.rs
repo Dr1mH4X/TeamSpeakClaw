@@ -232,7 +232,6 @@ impl VoiceRouter {
 
         let req = tonic::Request::new(voicev1::SubscribeRequest {
             include_chat: true,
-            include_log: true,
             include_audio: self.config.headless.stt.enabled || self.config.llm.omni_model,
         });
         let mut stream = client.subscribe_events(req).await?.into_inner();
@@ -353,7 +352,6 @@ impl VoiceRouter {
                                 }
                             }
                         }
-                        _ => {}
                     }
                 }
                 _ = drain_tick.tick() => {
@@ -370,7 +368,6 @@ impl VoiceRouter {
                             from_client_id: chunk.speaker_client_id,
                             from_client_name: chunk.speaker_name.clone(),
                             codec: 4,
-                            is_whisper: false,
                             frame: Vec::new(),
                         };
                         if let Err(error) = audio_chunk_tx.try_send((audio, chunk)) {
