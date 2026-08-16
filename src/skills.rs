@@ -4,6 +4,8 @@ pub mod moderation;
 pub mod music;
 pub mod web_search;
 
+mod http;
+
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::config::AppConfig;

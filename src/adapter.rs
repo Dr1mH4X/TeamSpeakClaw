@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 use crate::adapter::reconnect::{
-    wait_for_retry, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS,
+    wait_for_retry, wait_with_timeout, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS,
 };
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
@@ -354,10 +354,10 @@ async fn shutdown_napcat(adapter: Option<&napcat::NapCatAdapter>, shutdown: &Can
         return;
     };
 
-    if matches!(
-        wait_with_timeout(adapter.shutdown(), COMPONENT_SHUTDOWN_TIMEOUT).await,
-        TimedWait::TimedOut
-    ) {
+    if wait_with_timeout(adapter.shutdown(), COMPONENT_SHUTDOWN_TIMEOUT)
+        .await
+        .is_none()
+    {
         warn!(
             timeout_secs = COMPONENT_SHUTDOWN_TIMEOUT.as_secs(),
             "Timed out while shutting down NapCat adapter"
@@ -367,11 +367,11 @@ async fn shutdown_napcat(adapter: Option<&napcat::NapCatAdapter>, shutdown: &Can
 
 async fn disconnect_adapter(adapter: &TsAdapter) {
     match wait_with_timeout(adapter.quit(), COMPONENT_SHUTDOWN_TIMEOUT).await {
-        TimedWait::Completed(Ok(())) => {}
-        TimedWait::Completed(Err(error)) => {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
             error!("Failed to send quit command: {error}");
         }
-        TimedWait::TimedOut => {
+        None => {
             warn!(
                 timeout_secs = COMPONENT_SHUTDOWN_TIMEOUT.as_secs(),
                 "Timed out while disconnecting TeamSpeak adapter"
@@ -380,26 +380,11 @@ async fn disconnect_adapter(adapter: &TsAdapter) {
     }
 }
 
-enum TimedWait<T> {
-    Completed(T),
-    TimedOut,
-}
-
-async fn wait_with_timeout<F, T>(future: F, timeout: Duration) -> TimedWait<T>
-where
-    F: Future<Output = T>,
-{
-    match tokio::time::timeout(timeout, future).await {
-        Ok(output) => TimedWait::Completed(output),
-        Err(_) => TimedWait::TimedOut,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         wait_for_initialization, wait_headless_failure, wait_nc_supervisor_failure,
-        wait_with_timeout, InitializationWait, SessionCompletion, TimedWait,
+        wait_with_timeout, InitializationWait, SessionCompletion,
     };
     use crate::adapter::napcat::ConnectionExit;
     use crate::router::RouterExit;
@@ -450,7 +435,7 @@ mod tests {
     async fn timed_wait_stops_a_stalled_quit() {
         let outcome = wait_with_timeout(pending::<()>(), Duration::from_millis(1)).await;
 
-        assert!(matches!(outcome, TimedWait::TimedOut));
+        assert!(outcome.is_none());
     }
 
     #[tokio::test]

@@ -1,24 +1,13 @@
+use crate::skills::http::shared_client;
 use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use std::time::Duration;
 use tracing::debug;
 
 const EXA_MCP_URL: &str = "https://mcp.exa.ai/mcp";
 const MAX_RESULTS: u8 = 20;
 const TIMEOUT_SECS: u64 = 25;
-
-fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .build()
-            .expect("failed to build reqwest::Client with configured timeout")
-    })
-}
 
 async fn search_exa(query: &str, num_results: u8, search_type: &str) -> Result<String> {
     let body = json!({
@@ -36,7 +25,7 @@ async fn search_exa(query: &str, num_results: u8, search_type: &str) -> Result<S
         }
     });
 
-    let resp = shared_client()
+    let resp = shared_client(TIMEOUT_SECS)
         .post(EXA_MCP_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")

@@ -18,11 +18,7 @@ async fn validate_target(ctx: &ExecutionContext, clid: u32) -> Result<()> {
         .iter()
         .find(|c| u32::try_from(c.id).ok() == Some(clid))
         .ok_or_else(|| anyhow::anyhow!("Client {} is not online or does not exist", clid))?;
-    let target_groups: Vec<u32> = target
-        .server_groups
-        .iter()
-        .filter_map(|group| group.parse().ok())
-        .collect();
+    let target_groups = crate::adapter::headless::parse_server_groups(&target.server_groups);
 
     // 检查是否可以对目标执行操作
     if !ctx.gate.can_target(

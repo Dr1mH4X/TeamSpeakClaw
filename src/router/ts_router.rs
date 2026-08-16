@@ -1,8 +1,9 @@
 use crate::adapter::headless::{
-    should_route_text_through_bridge, voice_features_enabled, MainSubscriptions, TextMessageEvent,
-    TsAdapter, TsEvent, VoiceBridgeState,
+    parse_server_groups, should_route_text_through_bridge, voice_features_enabled,
+    MainSubscriptions, TextMessageEvent, TsAdapter, TsEvent, VoiceBridgeState,
 };
 use crate::adapter::napcat::NapCatAdapter;
+use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
@@ -11,12 +12,10 @@ use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
 use crate::skills::{ExecutionContext, SkillRegistry};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 struct SqExecutor<'a> {
     router: &'a EventRouter,
@@ -118,7 +117,8 @@ impl EventRouter {
                     });
                 }
                 TsEvent::Disconnected => {
-                    return drain_ts_tasks(tasks).await;
+                    drain_managed_tasks(&mut tasks, "TS message").await;
+                    return Ok(());
                 }
             }
         }
@@ -156,17 +156,7 @@ impl EventRouter {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
-        let musicbot_name = self
-            .config
-            .music_backend
-            .as_ref()
-            .map_or("", |c| c.musicbot_name.as_str());
-        if !musicbot_name.is_empty()
-            && event
-                .invoker_name
-                .to_ascii_lowercase()
-                .contains(&musicbot_name.to_ascii_lowercase())
-        {
+        if self.config.is_music_bot_name(&event.invoker_name) {
             return;
         }
 
@@ -201,11 +191,7 @@ impl EventRouter {
             "Message received"
         );
 
-        let groups: Vec<u32> = event
-            .invoker_groups
-            .iter()
-            .filter_map(|g| g.parse().ok())
-            .collect();
+        let groups = parse_server_groups(&event.invoker_groups);
         let channel_group_id = match self
             .adapter
             .get_client_channel_group_id(event.invoker_id)
@@ -231,28 +217,8 @@ impl EventRouter {
         }
         let system_prompt = &self.prompts.system.content;
 
-        let (online_clients, invoker_channel) = match self.adapter.list_clients().await {
-            Ok(clients) => {
-                let arr: Vec<serde_json::Value> = clients
-                    .iter()
-                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
-                    .collect();
-                let invoker_chan = clients
-                    .iter()
-                    .find(|c| c.id as u32 == event.invoker_id)
-                    .map(|c| c.channel_id)
-                    .unwrap_or(0);
-                debug!("Fetched {} online clients for LLM context", clients.len());
-                (
-                    serde_json::to_string(&arr).unwrap_or_default(),
-                    invoker_chan,
-                )
-            }
-            Err(e) => {
-                warn!("Failed to fetch online clients: {e}");
-                (String::new(), 0)
-            }
-        };
+        let (online_clients, invoker_channel) =
+            self.adapter.list_clients_json(event.invoker_id).await;
 
         let user_ctx = format!(
             r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
@@ -310,32 +276,6 @@ Online: {}"#,
             }
         }
     }
-}
-
-/// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
-const TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-async fn drain_ts_tasks(mut tasks: JoinSet<()>) -> Result<()> {
-    loop {
-        let result = tokio::time::timeout(TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
-        match result {
-            Ok(Some(Ok(()))) => {}
-            Ok(Some(Err(error))) => {
-                error!("TS message task failed: {error}");
-            }
-            Ok(None) => break,
-            Err(_) => {
-                warn!(
-                    timeout_secs = TASK_DRAIN_TIMEOUT.as_secs(),
-                    "TS message tasks exceeded drain timeout; aborting"
-                );
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                break;
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn receive_ts_event(

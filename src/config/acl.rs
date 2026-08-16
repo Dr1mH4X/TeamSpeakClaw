@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -32,11 +32,13 @@ impl Default for AclSettings {
 impl AclConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).context(format!(
-            "ACL config file not found: {}. Please copy examples/config/acl.toml to config/",
-            path.display()
-        ))?;
-        let config: AclConfig = toml::from_str(&content)?;
+        let config: AclConfig = crate::config::load_toml(
+            path,
+            &format!(
+                "ACL config file not found: {}. Please copy examples/config/acl.toml to config/",
+                path.display()
+            ),
+        )?;
         Ok(config)
     }
 }

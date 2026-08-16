@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use serde_json::json;
 use tokio::sync::{broadcast, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{config_dir, AppConfig};
 
@@ -54,6 +55,11 @@ fn parse_client_channel_group_id(info: &std::collections::HashMap<String, String
     value
         .parse()
         .map_err(|error| anyhow!("invalid client_channel_group_id '{value}': {error}"))
+}
+
+/// 把客户端 server_groups 字符串 ID 列表解析为 u32，忽略无法解析的项
+pub(crate) fn parse_server_groups(groups: &[String]) -> Vec<u32> {
+    groups.iter().filter_map(|g| g.parse().ok()).collect()
 }
 
 /// 封装 tsclient-rs::Client，提供管理命令和事件订阅。
@@ -351,6 +357,33 @@ impl TsAdapter {
         tsclient_rs::listClients(&self.client)
             .await
             .map_err(|e| check_ts_error(e, "listClients"))
+    }
+
+    /// 在线客户端摘要 JSON（LLM 上下文用）与调用者所在频道 ID（同一快照）。
+    /// 查询失败返回空串与 0。
+    pub async fn list_clients_json(&self, caller_clid: u32) -> (String, u64) {
+        match self.list_clients().await {
+            Ok(clients) => {
+                let arr: Vec<serde_json::Value> = clients
+                    .iter()
+                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
+                    .collect();
+                let caller_channel = clients
+                    .iter()
+                    .find(|c| c.id as u32 == caller_clid)
+                    .map(|c| c.channel_id)
+                    .unwrap_or(0);
+                debug!("Fetched {} online clients for LLM context", clients.len());
+                (
+                    serde_json::to_string(&arr).unwrap_or_default(),
+                    caller_channel,
+                )
+            }
+            Err(e) => {
+                warn!("Failed to fetch online clients: {e}");
+                (String::new(), 0)
+            }
+        }
     }
 
     pub async fn get_client_info(

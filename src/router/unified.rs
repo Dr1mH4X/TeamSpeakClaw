@@ -61,19 +61,16 @@ impl UnifiedInboundEvent {
                 target: event.invoker_id,
             }
         } else {
-            match config.bot.default_reply_mode.as_str() {
-                "channel" => ReplyPolicy::TeamSpeak {
-                    target_mode: 2,
-                    target: 0,
-                },
-                "server" => ReplyPolicy::TeamSpeak {
-                    target_mode: 3,
-                    target: 0,
-                },
-                _ => ReplyPolicy::TeamSpeak {
-                    target_mode: 1,
-                    target: event.invoker_id,
-                },
+            let target_mode =
+                crate::config::reply_target_mode(config.bot.default_reply_mode.as_str());
+            let target = if target_mode == 1 {
+                event.invoker_id
+            } else {
+                0
+            };
+            ReplyPolicy::TeamSpeak {
+                target_mode: target_mode as u8,
+                target,
             }
         };
 

@@ -42,11 +42,7 @@ impl VoiceServiceImpl {
     }
 
     fn default_reply_mode(&self) -> i32 {
-        match self.bot_default_reply_mode.as_str() {
-            "channel" => 2,
-            "server" => 3,
-            _ => 1,
-        }
+        crate::config::reply_target_mode(&self.bot_default_reply_mode)
     }
 }
 

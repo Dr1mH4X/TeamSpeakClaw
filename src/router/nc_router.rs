@@ -6,6 +6,7 @@ use crate::adapter::napcat::{
     types::{segments_to_text, Segment},
     NapCatAdapter,
 };
+use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
@@ -13,9 +14,7 @@ use crate::permission::PermissionGate;
 use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
 use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
-use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -118,7 +117,7 @@ impl NcRouter {
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    drain_nc_tasks(tasks).await;
+                    drain_managed_tasks(&mut tasks, "NC message").await;
                     return Err(anyhow::anyhow!("NcRouter event stream closed"));
                 }
             };
@@ -458,21 +457,11 @@ impl NcRouter {
         let system_prompt = &self.prompts.system.content;
 
         let online_suffix = if let Some(ref adapter) = self.ts_adapter {
-            match adapter.list_clients().await {
-                Ok(clients) => {
-                    let arr: Vec<serde_json::Value> = clients
-                        .iter()
-                        .map(|c| {
-                            json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id})
-                        })
-                        .collect();
-                    debug!("Fetched {} online clients for LLM context", clients.len());
-                    format!(
-                        "\nOnline: {}",
-                        serde_json::to_string(&arr).unwrap_or_default()
-                    )
-                }
-                Err(_) => String::new(),
+            let (online_clients, _) = adapter.list_clients_json(0).await;
+            if online_clients.is_empty() {
+                String::new()
+            } else {
+                format!("\nOnline: {}", online_clients)
             }
         } else {
             String::new()
@@ -522,31 +511,6 @@ impl NcRouter {
             Err(e) => {
                 error!("NC LLM error: {}", e);
                 error_msg
-            }
-        }
-    }
-}
-
-/// 路由退出前回收在途任务：优先限时 join，超时后 abort 并收割。
-const NC_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-async fn drain_nc_tasks(mut tasks: JoinSet<()>) {
-    loop {
-        let result = tokio::time::timeout(NC_TASK_DRAIN_TIMEOUT, tasks.join_next()).await;
-        match result {
-            Ok(Some(Ok(()))) => {}
-            Ok(Some(Err(error))) => {
-                error!("NC message task failed: {error}");
-            }
-            Ok(None) => break,
-            Err(_) => {
-                warn!(
-                    timeout_secs = NC_TASK_DRAIN_TIMEOUT.as_secs(),
-                    "NC message tasks exceeded drain timeout; aborting"
-                );
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                break;
             }
         }
     }

@@ -1,17 +1,9 @@
+use crate::skills::http::shared_client;
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use std::time::Duration;
 
-fn shared_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("failed to build reqwest::Client for music HTTP backend")
-    })
-}
+/// 音乐 HTTP 后端的请求总超时（秒）
+const TIMEOUT_SECS: u64 = 15;
 
 pub(crate) struct HttpBackend {
     base_url: String,
@@ -22,7 +14,7 @@ impl HttpBackend {
     pub(crate) fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: shared_client().clone(),
+            client: shared_client(TIMEOUT_SECS).clone(),
         }
     }
 

@@ -116,11 +116,7 @@ impl Skill for GetClientInfo {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Client {} is not online or does not exist", clid)
                     })?;
-                let groups: Vec<u32> = client
-                    .server_groups
-                    .iter()
-                    .filter_map(|g| g.parse().ok())
-                    .collect();
+                let groups = crate::adapter::headless::parse_server_groups(&client.server_groups);
                 let reply = format!(
                     "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
                     client.nickname, client.id, groups, client.channel_id

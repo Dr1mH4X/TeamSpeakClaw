@@ -83,11 +83,9 @@ pub async fn ts3_actor(
             let (reply_target_mode, reply_target_client_id) = if target_mode == 1 {
                 (1, invoker_client_id)
             } else {
-                match reply_mode.as_str() {
-                    "channel" => (2, 0),
-                    "server" => (3, 0),
-                    _ => (1, invoker_client_id),
-                }
+                let mode = crate::config::reply_target_mode(reply_mode.as_str());
+                let target = if mode == 1 { invoker_client_id } else { 0 };
+                (mode, target)
             };
             let _ = control_tx_t.send(voicev1::Event {
                 payload: Some(voicev1::event::Payload::Chat(voicev1::ChatEvent {
