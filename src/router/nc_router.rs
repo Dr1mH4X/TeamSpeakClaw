@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::{
     event::{GroupMessageEvent, NcEvent, PrivateMessageEvent},
@@ -9,39 +7,16 @@ use crate::adapter::napcat::{
 use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
+use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
-use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
+use crate::router::{
+    run_llm_turn, strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent, LLM_ERROR_REPLY,
+};
 use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
-
-struct NcExecutor<'a> {
-    router: &'a NcRouter,
-    user_id: i64,
-    group_id: Option<i64>,
-    sender_name: &'a str,
-    caller_groups: &'a [u32],
-    allowed_skills: &'a [String],
-}
-
-#[async_trait]
-impl ToolExecutor for NcExecutor<'_> {
-    async fn execute(&self, call: &ToolCall) -> String {
-        self.router
-            .execute_skill(
-                call,
-                self.user_id,
-                self.group_id,
-                self.sender_name,
-                self.caller_groups,
-                self.allowed_skills,
-            )
-            .await
-    }
-}
 
 pub struct NcRouter {
     config: Arc<AppConfig>,
@@ -386,32 +361,6 @@ impl NcRouter {
         strip_trigger_prefix(text, &self.config.napcat.trigger_prefixes).unwrap_or(text)
     }
 
-    /// 执行单个工具调用，返回结果字符串
-    async fn execute_skill(
-        &self,
-        call: &ToolCall,
-        user_id: i64,
-        group_id: Option<i64>,
-        sender_name: &str,
-        caller_groups: &[u32],
-        allowed_skills: &[String],
-    ) -> String {
-        let nc_ctx = NcExecutionContext {
-            adapter: self.adapter.clone(),
-            caller_id: user_id,
-            caller_name: sender_name.to_string(),
-            caller_groups: caller_groups.to_vec(),
-            caller_group_id: group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        };
-        let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
-            .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
-        self.registry
-            .execute_skill(call, unified_ctx, allowed_skills)
-            .await
-    }
-
     /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复
     async fn run_llm(
         &self,
@@ -421,8 +370,6 @@ impl NcRouter {
         group_id: Option<i64>,
         caller_groups: &[u32],
     ) -> String {
-        let error_msg = "AI backend unavailable. Please try again later.".to_string();
-
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
             None => SessionSource::NapCatPrivate { user_id },
@@ -452,27 +399,30 @@ impl NcRouter {
             ),
         };
 
-        let mut messages = self
-            .llm
-            .build_messages(&source, system_prompt, &user_ctx, user_msg);
-
         let allowed_skills = self.gate.get_allowed_skills(caller_groups, 0);
         debug!("NC allowed skills: {:?}", allowed_skills);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
 
-        let executor = NcExecutor {
-            router: self,
-            user_id,
-            group_id,
-            sender_name,
-            caller_groups,
-            allowed_skills: &allowed_skills,
-        };
-
-        match self
-            .llm
-            .run_tool_loop(&mut messages, &tools, &executor, None)
-            .await
+        match run_llm_turn(
+            &self.llm,
+            &self.registry,
+            |llm| llm.build_messages(&source, system_prompt, &user_ctx, user_msg),
+            &allowed_skills,
+            None,
+            || {
+                let nc_ctx = NcExecutionContext {
+                    adapter: self.adapter.clone(),
+                    caller_id: user_id,
+                    caller_name: sender_name.to_string(),
+                    caller_groups: caller_groups.to_vec(),
+                    caller_group_id: group_id,
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                };
+                UnifiedExecutionContext::from_nc(&nc_ctx)
+                    .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()))
+            },
+        )
+        .await
         {
             Ok(result) => {
                 let content = result.content;
@@ -484,7 +434,7 @@ impl NcRouter {
             }
             Err(e) => {
                 error!("NC LLM error: {}", e);
-                error_msg
+                LLM_ERROR_REPLY.to_string()
             }
         }
     }

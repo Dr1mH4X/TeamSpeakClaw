@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
 use serde_json::json;
@@ -24,8 +23,9 @@ use crate::adapter::reconnect::{
     abort_managed_tasks, now_unix_ms, wait_for_retry, ReconnectState, RetryDecision,
 };
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
-use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
+use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
+use crate::router::{run_llm_turn, LLM_ERROR_REPLY};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
@@ -133,12 +133,6 @@ impl TtsTurnRuntime {
     }
 }
 
-struct SkillExecutor<'a> {
-    router: &'a VoiceRouter,
-    ctx: &'a CallerContext,
-    allowed_skills: &'a [String],
-}
-
 struct VoiceBridgeReadyGuard {
     bridge_state: VoiceBridgeState,
 }
@@ -153,15 +147,6 @@ impl VoiceBridgeReadyGuard {
 impl Drop for VoiceBridgeReadyGuard {
     fn drop(&mut self) {
         self.bridge_state.set_stream_ready(false);
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for SkillExecutor<'_> {
-    async fn execute(&self, call: &ToolCall) -> String {
-        self.router
-            .execute_skill(call, self.ctx, self.allowed_skills)
-            .await
     }
 }
 
@@ -519,28 +504,6 @@ impl VoiceRouter {
         Ok(ctx)
     }
 
-    async fn execute_skill(
-        &self,
-        call: &ToolCall,
-        ctx: &CallerContext,
-        allowed_skills: &[String],
-    ) -> String {
-        let exec_ctx = ExecutionContext {
-            adapter: self.ts_adapter.clone(),
-            caller_id: ctx.caller_id,
-            caller_name: ctx.caller_name.clone(),
-            caller_groups: ctx.groups.clone(),
-            caller_channel_group_id: ctx.channel_group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        };
-        let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
-            .with_cross_adapters(Some(self.ts_adapter.clone()), None);
-        self.registry
-            .execute_skill(call, unified_ctx, allowed_skills)
-            .await
-    }
-
     async fn handle_chat_event(
         &self,
         client: &mut VoiceServiceClient<Channel>,
@@ -634,28 +597,39 @@ impl VoiceRouter {
             None
         };
 
-        let (mut messages, tools, allowed_skills, session_source) =
-            self.build_omni_llm_request(&ctx, audio_data).await;
-        let executor = SkillExecutor {
-            router: self,
-            ctx: &ctx,
-            allowed_skills: &allowed_skills,
-        };
+        let (system_prompt, user_ctx, allowed_skills, session_source) =
+            self.build_llm_request(&ctx).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
             None
         };
 
-        match self
-            .llm
-            .run_tool_loop(
-                &mut messages,
-                &tools,
-                &executor,
-                tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-            )
-            .await
+        match run_llm_turn(
+            &self.llm,
+            &self.registry,
+            |llm| {
+                let content =
+                    vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
+                llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, content)
+            },
+            &allowed_skills,
+            tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            || {
+                let exec_ctx = ExecutionContext {
+                    adapter: self.ts_adapter.clone(),
+                    caller_id: ctx.caller_id,
+                    caller_name: ctx.caller_name.clone(),
+                    caller_groups: ctx.groups.clone(),
+                    caller_channel_group_id: ctx.channel_group_id,
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                };
+                UnifiedExecutionContext::from_ts(&exec_ctx)
+                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+            },
+        )
+        .await
         {
             Ok(result) => {
                 if !result.content.is_empty() {
@@ -674,12 +648,7 @@ impl VoiceRouter {
                 if let Some(runtime) = tts_runtime {
                     runtime.abort().await;
                 }
-                self.send_reply(
-                    client,
-                    &ctx,
-                    "AI backend unavailable. Please try again later.",
-                )
-                .await?;
+                self.send_reply(client, &ctx, LLM_ERROR_REPLY).await?;
                 return Err(e.into());
             }
         };
@@ -711,13 +680,8 @@ impl VoiceRouter {
             warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
             return Ok(());
         }
-        let (mut messages, tools, allowed_skills, session_source) =
-            self.build_llm_request(&ctx, user_msg.clone()).await;
-        let executor = SkillExecutor {
-            router: self,
-            ctx: &ctx,
-            allowed_skills: &allowed_skills,
-        };
+        let (system_prompt, user_ctx, allowed_skills, session_source) =
+            self.build_llm_request(&ctx).await;
 
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
@@ -725,27 +689,34 @@ impl VoiceRouter {
             None
         };
 
-        let result = match self
-            .llm
-            .run_tool_loop(
-                &mut messages,
-                &tools,
-                &executor,
-                tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-            )
-            .await
+        let result = match run_llm_turn(
+            &self.llm,
+            &self.registry,
+            |llm| llm.build_messages(&session_source, &system_prompt, &user_ctx, &user_msg),
+            &allowed_skills,
+            tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            || {
+                let exec_ctx = ExecutionContext {
+                    adapter: self.ts_adapter.clone(),
+                    caller_id: ctx.caller_id,
+                    caller_name: ctx.caller_name.clone(),
+                    caller_groups: ctx.groups.clone(),
+                    caller_channel_group_id: ctx.channel_group_id,
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                };
+                UnifiedExecutionContext::from_ts(&exec_ctx)
+                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+            },
+        )
+        .await
         {
             Ok(r) => r,
             Err(e) => {
                 if let Some(runtime) = tts_runtime {
                     runtime.abort().await;
                 }
-                self.send_reply(
-                    client,
-                    &ctx,
-                    "AI backend unavailable. Please try again later.",
-                )
-                .await?;
+                self.send_reply(client, &ctx, LLM_ERROR_REPLY).await?;
                 return Err(e.into());
             }
         };
@@ -920,10 +891,7 @@ impl VoiceRouter {
         })
     }
 
-    async fn build_llm_base_context(
-        &self,
-        ctx: &CallerContext,
-    ) -> (String, String, Vec<serde_json::Value>, Vec<String>) {
+    async fn build_llm_base_context(&self, ctx: &CallerContext) -> (String, String, Vec<String>) {
         let system_prompt = self.prompts.system.content.clone();
 
         let (online_clients, _) = self.ts_adapter.list_clients_json(0).await;
@@ -936,51 +904,18 @@ Online: {}"#,
         let allowed_skills = self
             .gate
             .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
-        (system_prompt, user_ctx, tools, allowed_skills)
+        (system_prompt, user_ctx, allowed_skills)
     }
 
     async fn build_llm_request(
         &self,
         ctx: &CallerContext,
-        user_msg: String,
-    ) -> (
-        Vec<serde_json::Value>,
-        Vec<serde_json::Value>,
-        Vec<String>,
-        SessionSource,
-    ) {
-        let (system_prompt, user_ctx, tools, allowed_skills) =
-            self.build_llm_base_context(ctx).await;
+    ) -> (String, String, Vec<String>, SessionSource) {
+        let (system_prompt, user_ctx, allowed_skills) = self.build_llm_base_context(ctx).await;
         let source = SessionSource::Headless {
             uid: ctx.caller_uid.clone(),
         };
-        let messages = self
-            .llm
-            .build_messages(&source, &system_prompt, &user_ctx, &user_msg);
-        (messages, tools, allowed_skills, source)
-    }
-
-    async fn build_omni_llm_request(
-        &self,
-        ctx: &CallerContext,
-        audio_data: String,
-    ) -> (
-        Vec<serde_json::Value>,
-        Vec<serde_json::Value>,
-        Vec<String>,
-        SessionSource,
-    ) {
-        let (system_prompt, user_ctx, tools, allowed_skills) =
-            self.build_llm_base_context(ctx).await;
-        let source = SessionSource::Headless {
-            uid: ctx.caller_uid.clone(),
-        };
-        let content = vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
-        let messages = self
-            .llm
-            .build_omni_messages(&source, &system_prompt, &user_ctx, content);
-        (messages, tools, allowed_skills, source)
+        (system_prompt, user_ctx, allowed_skills, source)
     }
 
     async fn send_reply(

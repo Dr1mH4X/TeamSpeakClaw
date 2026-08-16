@@ -6,39 +6,17 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
+use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
-use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
+use crate::router::{
+    run_llm_turn, ReplyPolicy, RouterContext, UnifiedInboundEvent, LLM_ERROR_REPLY,
+};
 use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
-use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
-
-struct SqExecutor<'a> {
-    router: &'a EventRouter,
-    event: &'a TextMessageEvent,
-    groups: &'a [u32],
-    channel_group_id: u32,
-    allowed_skills: &'a [String],
-}
-
-#[async_trait]
-impl ToolExecutor for SqExecutor<'_> {
-    async fn execute(&self, call: &ToolCall) -> String {
-        self.router
-            .execute_skill(
-                call,
-                self.event,
-                self.groups,
-                self.channel_group_id,
-                self.allowed_skills,
-            )
-            .await
-    }
-}
 
 #[derive(Clone)]
 pub struct EventRouter {
@@ -124,30 +102,6 @@ impl EventRouter {
         }
     }
 
-    async fn execute_skill(
-        &self,
-        call: &ToolCall,
-        event: &TextMessageEvent,
-        groups: &[u32],
-        channel_group_id: u32,
-        allowed_skills: &[String],
-    ) -> String {
-        let ctx = ExecutionContext {
-            adapter: self.adapter.clone(),
-            caller_id: event.invoker_id,
-            caller_name: event.invoker_name.clone(),
-            caller_groups: groups.to_vec(),
-            caller_channel_group_id: channel_group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        };
-        let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
-            .with_cross_adapters(Some(self.adapter.clone()), self.nc_adapter.clone());
-        self.registry
-            .execute_skill(call, unified_ctx, allowed_skills)
-            .await
-    }
-
     async fn handle_message(
         &self,
         event: TextMessageEvent,
@@ -228,25 +182,30 @@ Online: {}"#,
             event.invoker_name, event.invoker_id, invoker_channel, online_clients
         );
 
-        let mut messages = self
-            .llm
-            .build_messages(&source, system_prompt, &user_ctx, msg_content);
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
-        let tools = self.registry.to_tool_schemas(&allowed_skills);
-
-        let executor = SqExecutor {
-            router: self,
-            event: &event,
-            groups: &groups,
-            channel_group_id,
-            allowed_skills: &allowed_skills,
-        };
 
         // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
-        match self
-            .llm
-            .run_tool_loop(&mut messages, &tools, &executor, None)
-            .await
+        match run_llm_turn(
+            &self.llm,
+            &self.registry,
+            |llm| llm.build_messages(&source, system_prompt, &user_ctx, msg_content),
+            &allowed_skills,
+            None,
+            || {
+                let ctx = ExecutionContext {
+                    adapter: self.adapter.clone(),
+                    caller_id: event.invoker_id,
+                    caller_name: event.invoker_name.clone(),
+                    caller_groups: groups.clone(),
+                    caller_channel_group_id: channel_group_id,
+                    gate: self.gate.clone(),
+                    config: self.config.clone(),
+                };
+                UnifiedExecutionContext::from_ts(&ctx)
+                    .with_cross_adapters(Some(self.adapter.clone()), self.nc_adapter.clone())
+            },
+        )
+        .await
         {
             Ok(result) => {
                 if !result.content.is_empty() {
@@ -269,11 +228,7 @@ Online: {}"#,
                 error!("LLM error: {}", e);
                 let _ = self
                     .adapter
-                    .send_text_message(
-                        reply_mode,
-                        reply_target,
-                        "AI backend unavailable. Please try again later.",
-                    )
+                    .send_text_message(reply_mode, reply_target, LLM_ERROR_REPLY)
                     .await;
             }
         }
