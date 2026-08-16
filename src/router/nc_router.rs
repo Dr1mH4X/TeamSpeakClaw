@@ -12,7 +12,7 @@ use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
 use crate::router::{strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent};
-use crate::skills::{is_skill_allowed, NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -396,46 +396,20 @@ impl NcRouter {
         caller_groups: &[u32],
         allowed_skills: &[String],
     ) -> String {
-        if !is_skill_allowed(&call.name, allowed_skills) {
-            warn!(skill = %call.name, "NC Skill execution denied by ACL");
-            return "Skill execution denied".to_string();
-        }
-
-        if let Some(skill) = self.registry.get(&call.name) {
-            let nc_ctx = NcExecutionContext {
-                adapter: self.adapter.clone(),
-                caller_id: user_id,
-                caller_name: sender_name.to_string(),
-                caller_groups: caller_groups.to_vec(),
-                caller_group_id: group_id,
-                gate: self.gate.clone(),
-                config: self.config.clone(),
-            };
-            let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
-                .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
-
-            match skill
-                .execute_unified(call.arguments.clone(), &unified_ctx)
-                .await
-            {
-                Ok(val) => {
-                    info!(
-                        skill = %call.name,
-                        caller = %sender_name,
-                        "NC Unified Skill executed"
-                    );
-                    val.to_string()
-                }
-                Err(e) => {
-                    let msg = format!("Skill execution failed: {}", e);
-                    error!(skill = %call.name, error = %e, "NC Skill failed");
-                    msg
-                }
-            }
-        } else {
-            warn!(skill = %call.name, "NC Skill not found");
-            "Skill not found".to_string()
-        }
+        let nc_ctx = NcExecutionContext {
+            adapter: self.adapter.clone(),
+            caller_id: user_id,
+            caller_name: sender_name.to_string(),
+            caller_groups: caller_groups.to_vec(),
+            caller_group_id: group_id,
+            gate: self.gate.clone(),
+            config: self.config.clone(),
+        };
+        let unified_ctx = UnifiedExecutionContext::from_nc(&nc_ctx)
+            .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()));
+        self.registry
+            .execute_skill(call, unified_ctx, allowed_skills)
+            .await
     }
 
     /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复

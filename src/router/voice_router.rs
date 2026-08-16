@@ -26,7 +26,7 @@ use crate::adapter::reconnect::{
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::skills::{ExecutionContext, SkillRegistry};
+use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -534,8 +534,10 @@ impl VoiceRouter {
             gate: self.gate.clone(),
             config: self.config.clone(),
         };
+        let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
+            .with_cross_adapters(Some(self.ts_adapter.clone()), None);
         self.registry
-            .execute_skill(call, exec_ctx, allowed_skills, None)
+            .execute_skill(call, unified_ctx, allowed_skills)
             .await
     }
 

@@ -9,7 +9,7 @@ use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, ToolCall, ToolExecutor, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
 use crate::router::{ReplyPolicy, RouterContext, UnifiedInboundEvent};
-use crate::skills::{ExecutionContext, SkillRegistry};
+use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -141,8 +141,10 @@ impl EventRouter {
             gate: self.gate.clone(),
             config: self.config.clone(),
         };
+        let unified_ctx = UnifiedExecutionContext::from_ts(&ctx)
+            .with_cross_adapters(Some(self.adapter.clone()), self.nc_adapter.clone());
         self.registry
-            .execute_skill(call, ctx, allowed_skills, self.nc_adapter.clone())
+            .execute_skill(call, unified_ctx, allowed_skills)
             .await
     }
 

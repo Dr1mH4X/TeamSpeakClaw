@@ -240,35 +240,51 @@ impl SkillRegistry {
         skills
     }
 
+    /// 统一技能执行入口：ACL 检查 → 取技能 → 执行 → 结果/错误格式化。
+    /// 双平台共用，日志文案按平台区分，NapCat 保留 NC 前缀语义。
     pub async fn execute_skill(
         &self,
         call: &ToolCall,
-        exec_ctx: ExecutionContext,
+        ctx: UnifiedExecutionContext,
         allowed_skills: &[String],
-        nc_adapter: Option<Arc<NapCatAdapter>>,
     ) -> String {
         if !is_skill_allowed(&call.name, allowed_skills) {
-            warn!(skill = %call.name, "Skill execution denied by ACL");
+            match ctx.platform {
+                Platform::NapCat => warn!(skill = %call.name, "NC Skill execution denied by ACL"),
+                Platform::TeamSpeak => warn!(skill = %call.name, "Skill execution denied by ACL"),
+            }
             return "Skill execution denied".to_string();
         }
 
         if let Some(skill) = self.get(&call.name) {
-            let ts_adapter = Some(exec_ctx.adapter.clone());
-            let unified_ctx = UnifiedExecutionContext::from_ts(&exec_ctx)
-                .with_cross_adapters(ts_adapter, nc_adapter);
-
-            match skill
-                .execute_unified(call.arguments.clone(), &unified_ctx)
-                .await
-            {
-                Ok(val) => val.to_string(),
+            match skill.execute_unified(call.arguments.clone(), &ctx).await {
+                Ok(val) => {
+                    if matches!(ctx.platform, Platform::NapCat) {
+                        info!(
+                            skill = %call.name,
+                            caller = %ctx.caller_name,
+                            "NC Unified Skill executed"
+                        );
+                    }
+                    val.to_string()
+                }
                 Err(e) => {
-                    error!(skill = %call.name, error = %e, "Skill execution failed");
+                    match ctx.platform {
+                        Platform::NapCat => {
+                            error!(skill = %call.name, error = %e, "NC Skill failed");
+                        }
+                        Platform::TeamSpeak => {
+                            error!(skill = %call.name, error = %e, "Skill execution failed");
+                        }
+                    }
                     format!("Skill execution failed: {}", e)
                 }
             }
         } else {
-            warn!(skill = %call.name, "Skill not found");
+            match ctx.platform {
+                Platform::NapCat => warn!(skill = %call.name, "NC Skill not found"),
+                Platform::TeamSpeak => warn!(skill = %call.name, "Skill not found"),
+            }
             "Skill not found".to_string()
         }
     }
