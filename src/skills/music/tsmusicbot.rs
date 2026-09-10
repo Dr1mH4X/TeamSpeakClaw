@@ -1,35 +1,13 @@
-use crate::adapter::headless::{TextMessageTarget, TsEvent};
-use crate::skills::ExecutionContext;
-use anyhow::{Context, Result};
-use serde_json::{json, Value};
-use std::sync::LazyLock;
-use std::time::Duration;
-use tokio::sync::Mutex;
-use tracing::{debug, info};
+use super::chat::send_and_await_reply;
+use crate::adapter::headless::TextMessageTarget;
+use crate::skills::UnifiedExecutionContext;
+use anyhow::Result;
+use serde_json::Value;
 
-static TSMUSICBOT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) -> Result<Value> {
-    let needs_value = matches!(
-        action,
-        "play" | "add" | "search" | "playlist" | "vol" | "mode"
-    );
-    if needs_value
-        && args["value"].as_str().unwrap_or("").is_empty()
-        && args["keywords"].as_str().unwrap_or("").is_empty()
-    {
-        return Err(anyhow::anyhow!(
-            "Action '{}' requires a 'value' or 'keywords' parameter",
-            action
-        ));
-    }
-
-    let value = args["value"]
-        .as_str()
-        .or_else(|| args["keywords"].as_str())
-        .unwrap_or("");
-
-    let bot_cmd = match action {
+/// TSMusicBot 聊天命令（上游 README「TeamSpeak 文字命令」）
+/// https://github.com/ZHANGTIANYAO1/teamspeak-music-bot
+fn build_bot_cmd(action: &str, value: &str) -> Result<String> {
+    let cmd = match action {
         "play" => format!("!play {value}"),
         "add" => format!("!add {value}"),
         "search" => format!("!search {value}"),
@@ -51,67 +29,75 @@ pub(crate) async fn execute(action: &str, args: &Value, ctx: &ExecutionContext) 
             ))
         }
     };
+    Ok(cmd)
+}
 
-    let target_name = ctx
-        .config
-        .music_backend
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("MusicControl registered but music_backend is None"))?
-        .musicbot_name
-        .as_str();
-    let clients = ctx.adapter.list_clients().await?;
-    let audiobot = clients
-        .iter()
-        .find(|c| ctx.config.is_music_bot_name(&c.nickname))
-        .ok_or_else(|| anyhow::anyhow!("Music bot '{}' not found online", target_name))?;
-    let audiobot_id =
-        u32::try_from(audiobot.id).context("Music bot returned an invalid client ID")?;
+fn needs_value(action: &str) -> bool {
+    matches!(
+        action,
+        "play" | "add" | "search" | "playlist" | "vol" | "mode"
+    )
+}
 
-    let _guard = TSMUSICBOT_LOCK.lock().await;
-    let mut ts_rx = ctx.adapter.subscribe();
+pub(crate) async fn execute(
+    action: &str,
+    args: &Value,
+    ctx: &UnifiedExecutionContext,
+) -> Result<Value> {
+    if needs_value(action)
+        && args["value"].as_str().unwrap_or("").is_empty()
+        && args["keywords"].as_str().unwrap_or("").is_empty()
+    {
+        return Err(anyhow::anyhow!(
+            "Action '{}' requires a 'value' or 'keywords' parameter",
+            action
+        ));
+    }
 
-    ctx.adapter
-        .send_text_message(1, audiobot_id, &bot_cmd)
-        .await?;
+    let value = args["value"]
+        .as_str()
+        .or_else(|| args["keywords"].as_str())
+        .unwrap_or("");
 
-    let reply = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match ts_rx.recv().await {
-                Ok(TsEvent::TextMessage(msg))
-                    if msg.invoker_id == audiobot_id
-                        && msg.target_mode == TextMessageTarget::Channel =>
-                {
-                    return msg.message;
-                }
-                Ok(_) => continue,
-                Err(e) => {
-                    debug!("TS event channel error while waiting for TSMusicBot reply: {e}");
-                    return String::new();
-                }
-            }
-        }
-    })
-    .await;
+    let bot_cmd = build_bot_cmd(action, value)?;
 
-    drop(_guard);
+    send_and_await_reply(ctx, &bot_cmd, TextMessageTarget::Channel, "TSMusicBot").await
+}
 
-    match reply {
-        Ok(content) if !content.is_empty() => {
-            info!("TSMusicBot replied: {content}");
-            Ok(content.into())
-        }
-        Err(_) => {
-            debug!("Timed out waiting for TSMusicBot reply");
-            Ok(json!({
-                "status": "timeout",
-                "sent_to": "TSMusicBot",
-                "command": bot_cmd
-            }))
-        }
-        _ => Ok(json!({
-            "status": "ok",
-            "sent_to": "TSMusicBot",
-            "command": bot_cmd
-        })),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_all_documented_chat_commands() {
+        assert_eq!(build_bot_cmd("play", "稻香").unwrap(), "!play 稻香");
+        assert_eq!(build_bot_cmd("add", "稻香").unwrap(), "!add 稻香");
+        assert_eq!(build_bot_cmd("search", "稻香").unwrap(), "!search 稻香");
+        assert_eq!(build_bot_cmd("playlist", "热歌").unwrap(), "!playlist 热歌");
+        assert_eq!(build_bot_cmd("pause", "").unwrap(), "!pause");
+        assert_eq!(build_bot_cmd("resume", "").unwrap(), "!resume");
+        assert_eq!(build_bot_cmd("next", "").unwrap(), "!next");
+        assert_eq!(build_bot_cmd("skip", "").unwrap(), "!next");
+        assert_eq!(build_bot_cmd("prev", "").unwrap(), "!prev");
+        assert_eq!(build_bot_cmd("previous", "").unwrap(), "!prev");
+        assert_eq!(build_bot_cmd("stop", "").unwrap(), "!stop");
+        assert_eq!(build_bot_cmd("vol", "50").unwrap(), "!vol 50");
+        assert_eq!(build_bot_cmd("volume", "50").unwrap(), "!vol 50");
+        assert_eq!(build_bot_cmd("mode", "loop").unwrap(), "!mode loop");
+        assert_eq!(build_bot_cmd("queue", "").unwrap(), "!queue");
+        assert_eq!(build_bot_cmd("now", "").unwrap(), "!now");
+        assert_eq!(build_bot_cmd("fm", "").unwrap(), "!fm");
+    }
+
+    #[test]
+    fn rejects_unknown_action() {
+        assert!(build_bot_cmd("login", "").is_err());
+    }
+
+    #[test]
+    fn value_or_keywords_satisfies_needs_value() {
+        assert!(needs_value("play"));
+        assert!(needs_value("vol"));
+        assert!(!needs_value("pause"));
     }
 }

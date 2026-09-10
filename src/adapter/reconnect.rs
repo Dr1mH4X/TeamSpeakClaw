@@ -147,14 +147,6 @@ pub(crate) fn now_unix_ms() -> u128 {
         .as_millis()
 }
 
-/// 当前 Unix 秒时间戳
-pub(crate) fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

@@ -1,5 +1,5 @@
 use crate::skills::http::shared_client;
-use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
+use crate::skills::{Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -93,11 +93,7 @@ impl Skill for WebSearch {
         })
     }
 
-    async fn execute(&self, args: Value, _ctx: &ExecutionContext) -> Result<Value> {
-        execute_search(args).await
-    }
-
-    async fn execute_unified(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
+    async fn execute(&self, args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
         execute_search(args).await
     }
 }

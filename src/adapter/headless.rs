@@ -19,6 +19,8 @@ use crate::skills::SkillRegistry;
 
 pub mod tsbot {
     pub mod voice {
+        // tonic 生成代码：Status 变体过大来自库签名，手写层无法改根因
+        #[allow(clippy::result_large_err)]
         pub mod v1 {
             tonic::include_proto!("tsbot.voice.v1");
         }
@@ -153,7 +155,6 @@ pub async fn run(
     bridge_state: VoiceBridgeState,
 ) -> Result<()> {
     let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
-    let (ts3_notice_tx, ts3_notice_rx) = mpsc::channel::<(i32, u32, String)>(50);
 
     // 控制事件（chat/log）与音频事件分离广播：音频洪峰不能挤掉聊天
     let (control_tx, _) = broadcast::channel::<voicev1::Event>(256);
@@ -161,21 +162,19 @@ pub async fn run(
 
     let actor_bridge_state = bridge_state.clone();
     let mut actor_task = tokio::spawn(actor::ts3_actor(
-        client,
+        client.clone(),
         ts3_audio_rx,
-        ts3_notice_rx,
         actor::ActorEventChannels {
             control_tx: control_tx.clone(),
             audio_tx: audio_tx.clone(),
         },
         shutdown.clone(),
-        config.clone(),
         actor_bridge_state,
     ));
 
     let svc = voice_service::VoiceServiceImpl::new(
         ts3_audio_tx,
-        ts3_notice_tx,
+        client,
         control_tx,
         audio_tx,
         config.bot.default_reply_mode.clone(),

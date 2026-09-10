@@ -11,7 +11,7 @@ use crate::permission::PermissionGate;
 use crate::router::{
     run_llm_turn, ReplyPolicy, RouterContext, UnifiedInboundEvent, LLM_ERROR_REPLY,
 };
-use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex};
@@ -131,13 +131,10 @@ impl EventRouter {
             return;
         }
 
-        let (reply_mode, reply_target) = match unified_event.reply_policy {
-            ReplyPolicy::TeamSpeak {
-                target_mode,
-                target,
-            } => (target_mode, target),
-            _ => return,
-        };
+        let ReplyPolicy::TeamSpeak {
+            target_mode: reply_mode,
+            target: reply_target,
+        } = unified_event.reply_policy;
 
         let msg_content = unified_event.text.as_str();
         info!(
@@ -192,17 +189,18 @@ Online: {}"#,
             &allowed_skills,
             None,
             || {
-                let ctx = ExecutionContext {
-                    adapter: self.adapter.clone(),
-                    caller_id: event.invoker_id,
-                    caller_name: event.invoker_name.clone(),
-                    caller_groups: groups.clone(),
-                    caller_channel_group_id: channel_group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_ts(&ctx)
-                    .with_cross_adapters(Some(self.adapter.clone()), self.nc_adapter.clone())
+                UnifiedExecutionContext::for_ts(
+                    TsCaller {
+                        adapter: self.adapter.clone(),
+                        caller_id: event.invoker_id,
+                        caller_name: event.invoker_name.clone(),
+                        caller_groups: groups.clone(),
+                        caller_channel_group_id: channel_group_id,
+                        nc_adapter: self.nc_adapter.clone(),
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await

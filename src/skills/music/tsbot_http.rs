@@ -188,12 +188,6 @@ pub(crate) async fn execute(action: &str, args: &Value, base_url: &str) -> Resul
             http.put("/voice/fx", body).await
         }
 
-        ts if ts.starts_with("ts_") => Err(anyhow::anyhow!(
-            "Action '{}' is only available with the ts3audiobot backend. \
-             Current backend is tsbot_backend.",
-            action
-        )),
-
         _ => Err(anyhow::anyhow!("Unknown action: {}", action)),
     }
 }

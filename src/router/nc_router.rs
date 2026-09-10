@@ -1,6 +1,6 @@
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::{
-    event::{GroupMessageEvent, NcEvent, PrivateMessageEvent},
+    event::NcEvent,
     types::{segments_to_text, Segment},
     NapCatAdapter,
 };
@@ -9,14 +9,19 @@ use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
-use crate::router::{
-    run_llm_turn, strip_trigger_prefix, ReplyPolicy, UnifiedInboundEvent, LLM_ERROR_REPLY,
-};
-use crate::skills::{NcExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::router::{run_llm_turn, strip_trigger_prefix, LLM_ERROR_REPLY};
+use crate::skills::{NcCaller, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
+
+struct NcInboundText {
+    user_id: i64,
+    sender_name: String,
+    group_id: Option<i64>,
+    is_triggered: bool,
+}
 
 pub struct NcRouter {
     config: Arc<AppConfig>,
@@ -112,7 +117,19 @@ impl NcRouter {
                         SessionSource::NapCatPrivate { user_id },
                         || warn!(user_id, "NC LLM turn queue full; dropping message"),
                         |router, msg, capacity, session| async move {
-                            router.handle_private(msg, capacity, session).await
+                            router
+                                .handle_text(
+                                    NcInboundText {
+                                        user_id: msg.user_id,
+                                        sender_name: msg.sender.nickname,
+                                        group_id: None,
+                                        is_triggered: true,
+                                    },
+                                    &msg.message,
+                                    capacity,
+                                    session,
+                                )
+                                .await
                         },
                     )
                     .await;
@@ -133,13 +150,26 @@ impl NcRouter {
                         continue;
                     }
                     let group_id = msg.group_id;
+                    let triggered = self.is_triggered(&msg.message);
                     self.spawn_handle(
                         &mut tasks,
                         msg,
                         SessionSource::NapCatGroup { group_id },
                         || warn!(group_id, "NC LLM turn queue full; dropping message"),
-                        |router, msg, capacity, session| async move {
-                            router.handle_group(msg, capacity, session).await
+                        move |router, msg, capacity, session| async move {
+                            router
+                                .handle_text(
+                                    NcInboundText {
+                                        user_id: msg.user_id,
+                                        sender_name: msg.sender.nickname,
+                                        group_id: Some(msg.group_id),
+                                        is_triggered: triggered,
+                                    },
+                                    &msg.message,
+                                    capacity,
+                                    session,
+                                )
+                                .await
                         },
                     )
                     .await;
@@ -193,137 +223,81 @@ impl NcRouter {
     }
 
     // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
-    async fn handle_private(
+    async fn handle_text(
         &self,
-        msg: PrivateMessageEvent,
+        inbound: NcInboundText,
+        segments: &[Segment],
         _capacity: TurnCapacityPermit,
         _session: TurnSessionGuard,
     ) {
-        let Some(unified_event) = UnifiedInboundEvent::from_nc_private(&msg) else {
-            return;
-        };
-        debug!(
-            source = ?unified_event.source,
-            sender_id = %unified_event.sender_id,
-            sender_name = %unified_event.sender_name,
-            trace_id = %unified_event.trace_id,
-            should_trigger_llm = unified_event.should_trigger_llm,
-            "NC private unified inbound event"
-        );
-        if !unified_event.should_trigger_llm {
-            return;
-        }
-        debug!("NC private event timestamp={}", msg.timestamp);
-
-        let stripped = self.strip_prefix(&unified_event.text);
-
-        info!(
-            user_id = msg.user_id,
-            user = %msg.sender.nickname,
-            message_chars = stripped.chars().count(),
-            "[NC Private] message received"
-        );
-
-        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
-            warn!(error = %error, "NC message dropped for exceeding size limit");
-            return;
-        }
-
-        let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, None);
-
-        let reply_text = self
-            .run_llm(
-                stripped,
-                &msg.sender.nickname,
-                msg.user_id,
-                None,
-                &caller_groups,
-            )
-            .await;
-
-        if let ReplyPolicy::NapCatPrivate { user_id } = unified_event.reply_policy {
-            let segs = vec![Segment::text(&reply_text)];
-            if let Err(e) = self.adapter.send_private(user_id, &segs).await {
-                error!("NC send_private failed: {e}");
-                return;
-            }
-        }
-        let source = SessionSource::NapCatPrivate {
-            user_id: msg.user_id,
-        };
-        self.llm
-            .save_turn(&source, stripped.to_string(), reply_text);
-    }
-
-    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
-    async fn handle_group(
-        &self,
-        msg: GroupMessageEvent,
-        _capacity: TurnCapacityPermit,
-        _session: TurnSessionGuard,
-    ) {
-        let triggered = self.is_triggered(&msg.message);
-        let Some(unified_event) = UnifiedInboundEvent::from_nc_group(&msg, triggered) else {
-            return;
-        };
-        debug!(
-            source = ?unified_event.source,
-            sender_id = %unified_event.sender_id,
-            sender_name = %unified_event.sender_name,
-            trace_id = %unified_event.trace_id,
-            should_trigger_llm = unified_event.should_trigger_llm,
-            "NC group unified inbound event"
-        );
-        if !unified_event.should_trigger_llm {
-            return;
-        }
-        debug!("NC group event timestamp={}", msg.timestamp);
-
-        let stripped = self.strip_prefix(&unified_event.text);
-
-        info!(
-            group_id = msg.group_id,
-            user_id = msg.user_id,
-            user = %msg.sender.nickname,
-            message_chars = stripped.chars().count(),
-            "[NC Group] message received"
-        );
-
-        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
-            warn!(error = %error, "NC message dropped for exceeding size limit");
-            return;
-        }
-
-        let caller_groups = nc_pseudo_groups(&self.config.napcat, msg.user_id, Some(msg.group_id));
-
-        let reply_text = self
-            .run_llm(
-                stripped,
-                &msg.sender.nickname,
-                msg.user_id,
-                Some(msg.group_id),
-                &caller_groups,
-            )
-            .await;
-
-        if let ReplyPolicy::NapCatGroup {
+        let NcInboundText {
+            user_id,
+            sender_name,
             group_id,
-            at_user_id,
-        } = unified_event.reply_policy
-        {
-            let mut segs = Vec::new();
-            if let Some(uid) = at_user_id {
-                segs.push(Segment::at(uid));
-                segs.push(Segment::text(" "));
-            }
-            segs.push(Segment::text(&reply_text));
-            if let Err(e) = self.adapter.send_group(group_id, &segs).await {
-                error!("NC send_group failed: {e}");
-                return;
-            }
+            is_triggered,
+        } = inbound;
+
+        if group_id.is_some() && !is_triggered {
+            return;
         }
-        let source = SessionSource::NapCatGroup {
-            group_id: msg.group_id,
+
+        let raw = segments_to_text(segments);
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return;
+        }
+        let stripped =
+            strip_trigger_prefix(raw, &self.config.napcat.trigger_prefixes).unwrap_or(raw);
+
+        if group_id.is_some() {
+            info!(
+                group_id = ?group_id,
+                user_id,
+                user = %sender_name,
+                message_chars = stripped.chars().count(),
+                "[NC Group] message received"
+            );
+        } else {
+            info!(
+                user_id,
+                user = %sender_name,
+                message_chars = stripped.chars().count(),
+                "[NC Private] message received"
+            );
+        }
+
+        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
+            warn!(error = %error, "NC message dropped for exceeding size limit");
+            return;
+        }
+
+        let caller_groups = nc_pseudo_groups(&self.config.napcat, user_id, group_id);
+        let reply_text = self
+            .run_llm(stripped, &sender_name, user_id, group_id, &caller_groups)
+            .await;
+
+        let send_result = match group_id {
+            Some(gid) => {
+                let segs = vec![
+                    Segment::at(user_id),
+                    Segment::text(" "),
+                    Segment::text(&reply_text),
+                ];
+                self.adapter.send_group(gid, &segs).await
+            }
+            None => {
+                let segs = vec![Segment::text(&reply_text)];
+                self.adapter.send_private(user_id, &segs).await
+            }
+        };
+        if let Err(e) = send_result {
+            error!("NC send failed: {e}");
+            return;
+        }
+
+        let source = match group_id {
+            Some(gid) => SessionSource::NapCatGroup { group_id: gid },
+            None => SessionSource::NapCatPrivate { user_id },
         };
         self.llm
             .save_turn(&source, stripped.to_string(), reply_text);
@@ -346,10 +320,6 @@ impl NcRouter {
         nc.trigger_prefixes
             .iter()
             .any(|p| text.starts_with(p.as_str()))
-    }
-
-    fn strip_prefix<'a>(&self, text: &'a str) -> &'a str {
-        strip_trigger_prefix(text, &self.config.napcat.trigger_prefixes).unwrap_or(text)
     }
 
     /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复
@@ -400,17 +370,18 @@ impl NcRouter {
             &allowed_skills,
             None,
             || {
-                let nc_ctx = NcExecutionContext {
-                    adapter: self.adapter.clone(),
-                    caller_id: user_id,
-                    caller_name: sender_name.to_string(),
-                    caller_groups: caller_groups.to_vec(),
-                    caller_group_id: group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_nc(&nc_ctx)
-                    .with_cross_adapters(self.ts_adapter.clone(), Some(self.adapter.clone()))
+                UnifiedExecutionContext::for_nc(
+                    NcCaller {
+                        adapter: self.adapter.clone(),
+                        caller_id: user_id,
+                        caller_name: sender_name.to_string(),
+                        caller_groups: caller_groups.to_vec(),
+                        group_id,
+                        ts_adapter: self.ts_adapter.clone(),
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await

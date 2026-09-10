@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{io::ErrorKind, process::Stdio};
 
 use anyhow::{anyhow, Context};
@@ -5,7 +6,7 @@ use audiopus::coder::Encoder;
 use futures_util::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::{error, warn};
@@ -15,8 +16,8 @@ use super::tsbot::voice::v1 as voicev1;
 use voicev1::voice_service_server::VoiceService;
 
 pub struct VoiceServiceImpl {
-    ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
-    ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
+    ts3_audio_tx: tokio::sync::mpsc::Sender<(Vec<u8>, i32)>,
+    ts_client: Arc<tsclient_rs::Client>,
     control_tx: broadcast::Sender<voicev1::Event>,
     audio_tx: broadcast::Sender<voicev1::Event>,
     bot_default_reply_mode: String,
@@ -25,15 +26,15 @@ pub struct VoiceServiceImpl {
 
 impl VoiceServiceImpl {
     pub fn new(
-        ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
-        ts3_notice_tx: mpsc::Sender<(i32, u32, String)>,
+        ts3_audio_tx: tokio::sync::mpsc::Sender<(Vec<u8>, i32)>,
+        ts_client: Arc<tsclient_rs::Client>,
         control_tx: broadcast::Sender<voicev1::Event>,
         audio_tx: broadcast::Sender<voicev1::Event>,
         bot_default_reply_mode: String,
     ) -> Self {
         Self {
             ts3_audio_tx,
-            ts3_notice_tx,
+            ts_client,
             control_tx,
             audio_tx,
             bot_default_reply_mode,
@@ -102,7 +103,7 @@ fn map_audio_event(
 
 async fn stream_tts_audio_loop(
     mut stream: tonic::Streaming<voicev1::TtsAudioChunk>,
-    ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>,
+    ts3_audio_tx: tokio::sync::mpsc::Sender<(Vec<u8>, i32)>,
 ) -> anyhow::Result<()> {
     let encoder = Encoder::new(
         audiopus::SampleRate::Hz48000,
@@ -259,9 +260,9 @@ impl VoiceService for VoiceServiceImpl {
             }));
         }
 
-        let mode = match r.target_mode {
-            1..=3 => r.target_mode,
-            _ => self.default_reply_mode(),
+        let mode: u8 = match r.target_mode {
+            1..=3 => r.target_mode as u8,
+            _ => self.default_reply_mode() as u8,
         };
         let mut target = r.target_client_id;
 
@@ -276,14 +277,12 @@ impl VoiceService for VoiceServiceImpl {
             target = 0;
         }
 
-        if self
-            .ts3_notice_tx
-            .try_send((mode, target, r.message))
-            .is_err()
+        if let Err(e) =
+            super::text_util::send_text_message(&self.ts_client, mode, target, &r.message).await
         {
             return Ok(Response::new(voicev1::CommandResponse {
                 ok: false,
-                message: "notice queue is full".to_string(),
+                message: e.to_string(),
             }));
         }
 

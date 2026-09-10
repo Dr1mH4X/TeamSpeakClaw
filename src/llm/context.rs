@@ -6,14 +6,12 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 /// 会话来源
 #[derive(Debug, Clone)]
 pub enum SessionSource {
-    /// TeamSpeak 客户端
+    /// TeamSpeak 客户端（文本路由与语音桥共用同一 uid 空间）
     TeamSpeak { uid: String },
     /// NapCat 私聊
     NapCatPrivate { user_id: i64 },
     /// NapCat 群聊
     NapCatGroup { group_id: i64 },
-    /// Headless 模式
-    Headless { uid: String },
 }
 
 impl SessionSource {
@@ -23,7 +21,6 @@ impl SessionSource {
             SessionSource::TeamSpeak { uid } => format!("sq:{uid}"),
             SessionSource::NapCatPrivate { user_id } => format!("nc:private:{user_id}"),
             SessionSource::NapCatGroup { group_id } => format!("nc:group:{group_id}"),
-            SessionSource::Headless { uid } => format!("headless:{uid}"),
         }
     }
 }
@@ -235,15 +232,11 @@ mod tests {
         let teamspeak = SessionSource::TeamSpeak {
             uid: "42".to_string(),
         };
-        let headless = SessionSource::Headless {
-            uid: "42".to_string(),
-        };
         let private = SessionSource::NapCatPrivate { user_id: 42 };
         let group = SessionSource::NapCatGroup { group_id: 42 };
 
         let keys = [
             teamspeak.canonical_key(),
-            headless.canonical_key(),
             private.canonical_key(),
             group.canonical_key(),
         ];
@@ -261,7 +254,7 @@ mod tests {
             let context = context.clone();
             threads.push(std::thread::spawn(move || {
                 context.push(
-                    &SessionSource::Headless {
+                    &SessionSource::TeamSpeak {
                         uid: format!("uid-{caller_id}"),
                     },
                     turn(caller_id as usize),
@@ -326,10 +319,10 @@ mod tests {
     #[tokio::test]
     async fn stale_session_locks_are_removed_on_next_acquire() {
         let coordinator = TurnCoordinator::new(8);
-        let first_source = SessionSource::Headless {
+        let first_source = SessionSource::TeamSpeak {
             uid: "expired".to_string(),
         };
-        let second_source = SessionSource::Headless {
+        let second_source = SessionSource::TeamSpeak {
             uid: "active".to_string(),
         };
 

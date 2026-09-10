@@ -1,38 +1,15 @@
+mod chat;
 pub mod ts3audiobot;
 pub mod tsbot_http;
 pub mod tsmusicbot;
 
+use crate::config::music_backend::VALID_BACKENDS;
 use crate::config::MusicBackendConfig;
-use crate::skills::{ExecutionContext, Skill, UnifiedExecutionContext};
+use crate::skills::{Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::info;
-
-async fn dispatch_backend(
-    action: &str,
-    args: &Value,
-    cfg: &MusicBackendConfig,
-    ts_ctx: Option<&ExecutionContext>,
-) -> Result<Value> {
-    match cfg.backend.as_str() {
-        "tsbot_backend" => tsbot_http::execute(action, args, &cfg.base_url).await,
-        "ts3audiobot" => {
-            let ctx = ts_ctx
-                .ok_or_else(|| anyhow::anyhow!("ts3audiobot backend requires TeamSpeak context"))?;
-            ts3audiobot::execute(action, args, ctx).await
-        }
-        "tsmusicbot" => {
-            let ctx = ts_ctx
-                .ok_or_else(|| anyhow::anyhow!("tsmusicbot backend requires TeamSpeak context"))?;
-            tsmusicbot::execute(action, args, ctx).await
-        }
-        _ => Err(anyhow::anyhow!(
-            "Unknown music backend '{}', expected one of: ts3audiobot, tsmusicbot, tsbot_backend",
-            cfg.backend
-        )),
-    }
-}
 
 pub struct MusicControl {
     backend: String,
@@ -54,7 +31,7 @@ impl Skill for MusicControl {
     }
 
     fn should_register(&self) -> bool {
-        !self.backend.is_empty()
+        VALID_BACKENDS.contains(&self.backend.as_str())
     }
 
     fn description(&self) -> &'static str {
@@ -65,7 +42,7 @@ impl Skill for MusicControl {
                             Supports play, pause, resume, next/prev, stop, volume, mode, queue, search, add, playlist, fm.",
             "tsbot_backend" => "Control the NeteaseTSBot music player. Search and play songs from NetEase Music and QQ Music, \
                                 manage the queue, and control playback.",
-            _ => unreachable!(),
+            _ => "",
         }
     }
 
@@ -74,28 +51,11 @@ impl Skill for MusicControl {
             "ts3audiobot" => ts3audiobot_schema(),
             "tsmusicbot" => tsmusicbot_schema(),
             "tsbot_backend" => tsbot_schema(),
-            _ => unreachable!(),
+            _ => json!({"type": "object"}),
         }
     }
 
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
-        let action = args["action"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
-
-        let cfg =
-            ctx.config.music_backend.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("MusicControl registered but music_backend is None")
-            })?;
-        dispatch_backend(action, &args, cfg, Some(ctx)).await
-    }
-
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!(
-            "MusicControl: unified execution, platform={:?}",
-            ctx.platform
-        );
-
+    async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         let action = args["action"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing action"))?;
@@ -105,15 +65,25 @@ impl Skill for MusicControl {
                 anyhow::anyhow!("MusicControl registered but music_backend is None")
             })?;
 
-        let ts_ctx = if cfg.backend == "tsbot_backend" {
-            None
-        } else {
-            if ctx.platform == crate::skills::Platform::NapCat {
-                info!("MusicControl: NC request forwarded to TS");
+        match cfg.backend.as_str() {
+            "tsbot_backend" => tsbot_http::execute(action, &args, &cfg.base_url).await,
+            "ts3audiobot" => {
+                if ctx.platform == Platform::NapCat {
+                    info!("MusicControl: NC request forwarded to TS");
+                }
+                ts3audiobot::execute(action, &args, ctx).await
             }
-            Some(ctx.to_ts_ctx()?)
-        };
-        dispatch_backend(action, &args, cfg, ts_ctx.as_ref()).await
+            "tsmusicbot" => {
+                if ctx.platform == Platform::NapCat {
+                    info!("MusicControl: NC request forwarded to TS");
+                }
+                tsmusicbot::execute(action, &args, ctx).await
+            }
+            other => Err(anyhow::anyhow!(
+                "Unknown music backend '{}', expected one of: ts3audiobot, tsmusicbot, tsbot_backend",
+                other
+            )),
+        }
     }
 }
 

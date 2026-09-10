@@ -2,8 +2,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
@@ -25,8 +24,9 @@ use crate::adapter::reconnect::{
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
-use crate::router::{run_llm_turn, LLM_ERROR_REPLY};
-use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::router::{resolve_ts_inbound, run_llm_turn, LLM_ERROR_REPLY};
+
+use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -41,25 +41,6 @@ struct CallerContext {
     channel_id: u64,
     reply_target_mode: i32,
     reply_target_client_id: u32,
-}
-
-#[derive(Default)]
-struct SessionLocks {
-    locks: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
-}
-
-impl SessionLocks {
-    fn for_uid(&self, uid: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.locks.lock().expect("session lock map poisoned");
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(uid).and_then(Weak::upgrade) {
-            return lock;
-        }
-
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(uid.to_string(), Arc::downgrade(&lock));
-        lock
-    }
 }
 
 fn should_close_tts_turn(finish_reason: &str) -> bool {
@@ -158,7 +139,6 @@ pub struct VoiceRouter {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
-    session_locks: SessionLocks,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
     bridge_state: VoiceBridgeState,
     tts_lock: Mutex<()>,
@@ -185,7 +165,6 @@ impl VoiceRouter {
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
-            session_locks: SessionLocks::default(),
             config,
             prompts,
             gate,
@@ -376,7 +355,12 @@ impl VoiceRouter {
         result
     }
 
-    async fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> Result<CallerContext> {
+    async fn resolve_caller_from_chat(
+        &self,
+        chat: &voicev1::ChatEvent,
+        reply_target_mode: i32,
+        reply_target_client_id: u32,
+    ) -> Result<CallerContext> {
         let caller_uid = if chat.invoker_unique_id.is_empty() {
             format!("clid:{}", chat.invoker_client_id)
         } else {
@@ -418,8 +402,8 @@ impl VoiceRouter {
             groups,
             channel_group_id,
             channel_id: caller.channel_id,
-            reply_target_mode: chat.reply_target_mode,
-            reply_target_client_id: chat.reply_target_client_id,
+            reply_target_mode,
+            reply_target_client_id,
         })
     }
 
@@ -509,18 +493,30 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
-        if !chat.should_trigger_llm {
+        let Some(decision) = resolve_ts_inbound(
+            &chat.message,
+            chat.target_mode as u8,
+            chat.invoker_client_id,
+            &self.config.bot,
+        ) else {
+            return Ok(());
+        };
+        if !decision.should_trigger_llm {
             return Ok(());
         }
-        let ctx = self.resolve_caller_from_chat(&chat).await?;
+        let ctx = self
+            .resolve_caller_from_chat(
+                &chat,
+                i32::from(decision.reply_target_mode),
+                decision.reply_target,
+            )
+            .await?;
         if self.should_ignore_chat(&chat, ctx.caller_id) {
             return Ok(());
         }
-        let Some(clean_text) = preprocess_text_message(&chat.message) else {
+        let Some(clean_text) = preprocess_text_message(&decision.text) else {
             return Ok(());
         };
-        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
-        let _session_guard = session_lock.lock().await;
         self.handle_user_input(client, ctx, clean_text).await
     }
 
@@ -555,8 +551,6 @@ impl VoiceRouter {
         if self.config.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
         }
-        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
-        let _session_guard = session_lock.lock().await;
 
         if self.config.llm.omni_model {
             return self.handle_omni_audio_chunk(client, ctx, chunk).await;
@@ -599,6 +593,14 @@ impl VoiceRouter {
 
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
+        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+            warn!(
+                caller_uid = %ctx.caller_uid,
+                "Voice LLM turn queue full; dropping audio chunk"
+            );
+            return Ok(());
+        };
+        let _session = self.llm.acquire_turn_session(&session_source).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
@@ -616,17 +618,18 @@ impl VoiceRouter {
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             || {
-                let exec_ctx = ExecutionContext {
-                    adapter: self.ts_adapter.clone(),
-                    caller_id: ctx.caller_id,
-                    caller_name: ctx.caller_name.clone(),
-                    caller_groups: ctx.groups.clone(),
-                    caller_channel_group_id: ctx.channel_group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_ts(&exec_ctx)
-                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+                UnifiedExecutionContext::for_ts(
+                    TsCaller {
+                        adapter: self.ts_adapter.clone(),
+                        caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
+                        caller_groups: ctx.groups.clone(),
+                        caller_channel_group_id: ctx.channel_group_id,
+                        nc_adapter: None,
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await
@@ -682,6 +685,14 @@ impl VoiceRouter {
         }
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
+        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+            warn!(
+                caller_uid = %ctx.caller_uid,
+                "Voice LLM turn queue full; dropping message"
+            );
+            return Ok(());
+        };
+        let _session = self.llm.acquire_turn_session(&session_source).await;
 
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
@@ -696,17 +707,18 @@ impl VoiceRouter {
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             || {
-                let exec_ctx = ExecutionContext {
-                    adapter: self.ts_adapter.clone(),
-                    caller_id: ctx.caller_id,
-                    caller_name: ctx.caller_name.clone(),
-                    caller_groups: ctx.groups.clone(),
-                    caller_channel_group_id: ctx.channel_group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_ts(&exec_ctx)
-                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+                UnifiedExecutionContext::for_ts(
+                    TsCaller {
+                        adapter: self.ts_adapter.clone(),
+                        caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
+                        caller_groups: ctx.groups.clone(),
+                        caller_channel_group_id: ctx.channel_group_id,
+                        nc_adapter: None,
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await
@@ -912,7 +924,7 @@ Online: {}"#,
         ctx: &CallerContext,
     ) -> (String, String, Vec<String>, SessionSource) {
         let (system_prompt, user_ctx, allowed_skills) = self.build_llm_base_context(ctx).await;
-        let source = SessionSource::Headless {
+        let source = SessionSource::TeamSpeak {
             uid: ctx.caller_uid.clone(),
         };
         (system_prompt, user_ctx, allowed_skills, source)
@@ -1011,17 +1023,26 @@ mod tests {
 
     #[tokio::test]
     async fn session_locks_serialize_only_the_same_uid() {
-        let locks = SessionLocks::default();
-        let first = locks.for_uid("uid-1");
-        let first_guard = first.lock().await;
-        let same = locks.for_uid("uid-1");
-        let other = locks.for_uid("uid-2");
+        let engine =
+            crate::llm::LlmEngine::new(std::sync::Arc::new(crate::config::AppConfig::default()))
+                .unwrap();
+        let source = SessionSource::TeamSpeak {
+            uid: "uid-1".to_string(),
+        };
+        let _capacity = engine.try_reserve_turn_capacity().unwrap();
+        let first = engine.acquire_turn_session(&source).await;
 
-        assert!(same.try_lock().is_err());
-        assert!(other.try_lock().is_ok());
+        let engine = std::sync::Arc::new(engine);
+        let waiting_source = source.clone();
+        let waiting = {
+            let engine = engine.clone();
+            async move { engine.acquire_turn_session(&waiting_source).await }
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting)
+            .await
+            .is_err());
 
-        drop(first_guard);
-        assert!(same.try_lock().is_ok());
+        drop(first);
     }
 
     #[tokio::test]
