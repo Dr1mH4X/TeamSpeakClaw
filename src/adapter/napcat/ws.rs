@@ -243,6 +243,8 @@ impl NapCatAdapter {
                     Err(error) => {
                         // session_started 已为 true，record_failure 只会返回 Retry
                         let RetryDecision::Retry { attempt, delay } = retry.record_failure() else {
+                            error!("NapCat runtime reconnect exhausted unexpectedly");
+                            failed = true;
                             break 'runtime;
                         };
                         warn!(

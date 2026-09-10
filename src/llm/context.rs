@@ -64,7 +64,7 @@ pub(crate) struct TurnCoordinator {
 }
 
 impl TurnCoordinator {
-    /// total_capacity = MAX_CONCURRENT_REQUESTS + MAX_QUEUED_REQUESTS
+    /// 创建协调器。`total_capacity` 是同时可持有的许可上限（含执行中与等待会话锁的轮次）。
     pub(crate) fn new(total_capacity: usize) -> Self {
         Self {
             locks: AsyncMutex::new(HashMap::new()),

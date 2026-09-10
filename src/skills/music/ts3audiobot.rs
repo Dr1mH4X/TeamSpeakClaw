@@ -68,10 +68,7 @@ mod tests {
             build_bot_cmd("gedanid", "2139305008").unwrap(),
             "!yun gedanid 2139305008"
         );
-        assert_eq!(
-            build_bot_cmd("playid", "123").unwrap(),
-            "!yun playid 123"
-        );
+        assert_eq!(build_bot_cmd("playid", "123").unwrap(), "!yun playid 123");
         assert_eq!(build_bot_cmd("addid", "123").unwrap(), "!yun addid 123");
         assert_eq!(build_bot_cmd("mode", "2").unwrap(), "!yun mode 2");
         assert_eq!(build_bot_cmd("stop", "").unwrap(), "!yun stop");

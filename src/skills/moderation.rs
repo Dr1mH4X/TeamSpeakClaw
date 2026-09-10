@@ -1,7 +1,18 @@
-use crate::skills::{required_u32, unified_ts_adapter, Skill, UnifiedExecutionContext};
+use crate::skills::{required_u32, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+
+/// TS-only 管理操作：NapCat 调用者没有 TS clid，自操作保护与目标语义均不成立
+fn require_ts_platform(ctx: &UnifiedExecutionContext, skill: &str) -> Result<()> {
+    if ctx.platform == Platform::NapCat {
+        return Err(anyhow::anyhow!(
+            "Skill '{}' does not support the NapCat platform",
+            skill
+        ));
+    }
+    Ok(())
+}
 
 /// 检查是否可以对目标执行操作
 async fn validate_target(ctx: &UnifiedExecutionContext, clid: u32) -> Result<()> {
@@ -68,6 +79,7 @@ impl Skill for KickClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        require_ts_platform(ctx, "kick_client")?;
         let clid = required_u32(&args, "clid")?;
         let reason = args["reason"].as_str().unwrap_or("Kicked by bot");
 
@@ -100,6 +112,7 @@ impl Skill for BanClient {
         })
     }
     async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        require_ts_platform(ctx, "ban_client")?;
         let clid = required_u32(&args, "clid")?;
         let time = args["time"]
             .as_u64()
@@ -137,6 +150,7 @@ impl Skill for MoveClient {
     }
 
     async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
+        require_ts_platform(ctx, "move_client")?;
         let clid = required_u32(&args, "clid")?;
         let channel_id = required_u32(&args, "channel_id")?;
 
@@ -150,5 +164,57 @@ impl Skill for MoveClient {
             "status": "ok",
             "message": format!("Client {} moved to channel {}", clid, channel_id)
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AclConfig, AppConfig};
+    use crate::permission::PermissionGate;
+    use std::sync::Arc;
+
+    fn nc_ctx() -> UnifiedExecutionContext {
+        UnifiedExecutionContext {
+            platform: Platform::NapCat,
+            ts_adapter: None,
+            nc_adapter: None,
+            caller_id: 0,
+            caller_id_nc: 42,
+            caller_name: "qq-user".to_string(),
+            caller_groups: vec![],
+            caller_channel_group_id: 0,
+            nc_group_id: None,
+            gate: Arc::new(PermissionGate::new(AclConfig::default())),
+            config: Arc::new(AppConfig::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn moderation_skills_reject_napcat_callers() {
+        let ctx = nc_ctx();
+        let err = KickClient
+            .execute(json!({"clid": 1}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("does not support the NapCat platform"));
+
+        let err = BanClient
+            .execute(json!({"clid": 1, "time": 0}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("does not support the NapCat platform"));
+
+        let err = MoveClient
+            .execute(json!({"clid": 1, "channel_id": 2}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("does not support the NapCat platform"));
     }
 }
