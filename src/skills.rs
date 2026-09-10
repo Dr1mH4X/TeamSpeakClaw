@@ -67,35 +67,7 @@ pub enum Platform {
 }
 
 // ─────────────────────────────────────────────
-// TeamSpeak 执行上下文
-// ─────────────────────────────────────────────
-
-pub struct ExecutionContext {
-    pub adapter: Arc<TsAdapter>,
-    pub caller_id: u32,
-    pub caller_name: String,
-    pub caller_groups: Vec<u32>,
-    pub caller_channel_group_id: u32,
-    pub gate: Arc<PermissionGate>,
-    pub config: Arc<AppConfig>,
-}
-
-// ─────────────────────────────────────────────
-// NapCat / QQ 执行上下文
-// ─────────────────────────────────────────────
-
-pub struct NcExecutionContext {
-    pub adapter: Arc<NapCatAdapter>,
-    pub caller_id: i64,
-    pub caller_name: String,
-    pub caller_groups: Vec<u32>,
-    pub caller_group_id: Option<i64>,
-    pub gate: Arc<PermissionGate>,
-    pub config: Arc<AppConfig>,
-}
-
-// ─────────────────────────────────────────────
-// 统一执行上下文（跨平台）
+// 统一执行上下文
 // ─────────────────────────────────────────────
 
 pub struct UnifiedExecutionContext {
@@ -112,63 +84,57 @@ pub struct UnifiedExecutionContext {
     pub config: Arc<AppConfig>,
 }
 
+/// TeamSpeak 调用者信息
+pub struct TsCaller {
+    pub adapter: Arc<TsAdapter>,
+    pub caller_id: u32,
+    pub caller_name: String,
+    pub caller_groups: Vec<u32>,
+    pub caller_channel_group_id: u32,
+    pub nc_adapter: Option<Arc<NapCatAdapter>>,
+}
+
+/// NapCat 调用者信息
+pub struct NcCaller {
+    pub adapter: Arc<NapCatAdapter>,
+    pub caller_id: i64,
+    pub caller_name: String,
+    pub caller_groups: Vec<u32>,
+    pub group_id: Option<i64>,
+    pub ts_adapter: Option<Arc<TsAdapter>>,
+}
+
 impl UnifiedExecutionContext {
-    pub fn from_ts(ctx: &ExecutionContext) -> Self {
+    pub fn for_ts(caller: TsCaller, gate: Arc<PermissionGate>, config: Arc<AppConfig>) -> Self {
         Self {
             platform: Platform::TeamSpeak,
-            ts_adapter: Some(ctx.adapter.clone()),
-            nc_adapter: None,
-            caller_id: ctx.caller_id,
+            ts_adapter: Some(caller.adapter),
+            nc_adapter: caller.nc_adapter,
+            caller_id: caller.caller_id,
             caller_id_nc: 0,
-            caller_name: ctx.caller_name.clone(),
-            caller_groups: ctx.caller_groups.clone(),
-            caller_channel_group_id: ctx.caller_channel_group_id,
+            caller_name: caller.caller_name,
+            caller_groups: caller.caller_groups,
+            caller_channel_group_id: caller.caller_channel_group_id,
             nc_group_id: None,
-            gate: ctx.gate.clone(),
-            config: ctx.config.clone(),
+            gate,
+            config,
         }
     }
 
-    pub fn from_nc(ctx: &NcExecutionContext) -> Self {
+    pub fn for_nc(caller: NcCaller, gate: Arc<PermissionGate>, config: Arc<AppConfig>) -> Self {
         Self {
             platform: Platform::NapCat,
-            ts_adapter: None,
-            nc_adapter: Some(ctx.adapter.clone()),
+            ts_adapter: caller.ts_adapter,
+            nc_adapter: Some(caller.adapter),
             caller_id: 0,
-            caller_id_nc: ctx.caller_id,
-            caller_name: ctx.caller_name.clone(),
-            caller_groups: ctx.caller_groups.clone(),
+            caller_id_nc: caller.caller_id,
+            caller_name: caller.caller_name,
+            caller_groups: caller.caller_groups,
             caller_channel_group_id: 0,
-            nc_group_id: ctx.caller_group_id,
-            gate: ctx.gate.clone(),
-            config: ctx.config.clone(),
+            nc_group_id: caller.group_id,
+            gate,
+            config,
         }
-    }
-
-    pub fn with_cross_adapters(
-        mut self,
-        ts_adapter: Option<Arc<TsAdapter>>,
-        nc_adapter: Option<Arc<NapCatAdapter>>,
-    ) -> Self {
-        self.ts_adapter = ts_adapter;
-        self.nc_adapter = nc_adapter;
-        self
-    }
-
-    /// 从统一上下文还原 TeamSpeak 执行上下文
-    pub fn to_ts_ctx(&self) -> Result<ExecutionContext> {
-        Ok(ExecutionContext {
-            adapter: self
-                .ts_adapter
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("TeamSpeak adapter not available"))?,
-            caller_id: self.caller_id,
-            caller_name: self.caller_name.clone(),
-            caller_groups: self.caller_groups.clone(),
-            caller_channel_group_id: self.caller_channel_group_id,
-            gate: self.gate.clone(),
-            config: self.config.clone(),
-        })
     }
 }
 
@@ -199,19 +165,7 @@ pub trait Skill: Send + Sync {
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
 
-    /// TeamSpeak 执行（原有）
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value>;
-
-    /// 统一执行：TeamSpeak 分派到原生实现，NapCat 默认返回不支持
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        match ctx.platform {
-            Platform::TeamSpeak => self.execute(args, &ctx.to_ts_ctx()?).await,
-            Platform::NapCat => Err(anyhow::anyhow!(
-                "Skill '{}' does not support the NapCat platform",
-                self.name()
-            )),
-        }
-    }
+    async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value>;
 
     /// 是否应该注册此 skill，默认 true。覆盖返回 false 可阻止注册。
     fn should_register(&self) -> bool {
@@ -263,7 +217,6 @@ impl SkillRegistry {
     }
 
     /// 统一技能执行入口：ACL 检查 → 取技能 → 执行 → 结果/错误格式化。
-    /// 双平台共用，日志文案按平台区分，NapCat 保留 NC 前缀语义。
     pub async fn execute_skill(
         &self,
         call: &ToolCall,
@@ -271,42 +224,28 @@ impl SkillRegistry {
         allowed_skills: &[String],
     ) -> String {
         if !is_skill_allowed(&call.name, allowed_skills) {
-            match ctx.platform {
-                Platform::NapCat => warn!(skill = %call.name, "NC Skill execution denied by ACL"),
-                Platform::TeamSpeak => warn!(skill = %call.name, "Skill execution denied by ACL"),
-            }
+            warn!(skill = %call.name, platform = ?ctx.platform, "Skill execution denied by ACL");
             return "Skill execution denied".to_string();
         }
 
         if let Some(skill) = self.get(&call.name) {
-            match skill.execute_unified(call.arguments.clone(), &ctx).await {
+            match skill.execute(call.arguments.clone(), &ctx).await {
                 Ok(val) => {
-                    if matches!(ctx.platform, Platform::NapCat) {
-                        info!(
-                            skill = %call.name,
-                            caller = %ctx.caller_name,
-                            "NC Unified Skill executed"
-                        );
-                    }
+                    info!(
+                        skill = %call.name,
+                        platform = ?ctx.platform,
+                        caller = %ctx.caller_name,
+                        "Skill executed"
+                    );
                     val.to_string()
                 }
                 Err(e) => {
-                    match ctx.platform {
-                        Platform::NapCat => {
-                            error!(skill = %call.name, error = %e, "NC Skill failed");
-                        }
-                        Platform::TeamSpeak => {
-                            error!(skill = %call.name, error = %e, "Skill execution failed");
-                        }
-                    }
+                    error!(skill = %call.name, platform = ?ctx.platform, error = %e, "Skill failed");
                     format!("Skill execution failed: {}", e)
                 }
             }
         } else {
-            match ctx.platform {
-                Platform::NapCat => warn!(skill = %call.name, "NC Skill not found"),
-                Platform::TeamSpeak => warn!(skill = %call.name, "Skill not found"),
-            }
+            warn!(skill = %call.name, platform = ?ctx.platform, "Skill not found");
             "Skill not found".to_string()
         }
     }
@@ -389,7 +328,7 @@ mod tests {
             json!({"type": "object"})
         }
 
-        async fn execute(&self, _args: Value, _ctx: &ExecutionContext) -> Result<Value> {
+        async fn execute(&self, _args: Value, _ctx: &UnifiedExecutionContext) -> Result<Value> {
             Ok(json!("ts"))
         }
     }
@@ -437,22 +376,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unified_execution_uses_platform_native_context() {
+    async fn skill_execution_receives_unified_context() {
         let skill = TestSkill("test");
 
-        let ts_error = skill
-            .execute_unified(json!({}), &unified_context(Platform::TeamSpeak))
+        let ts_ok = skill
+            .execute(json!({}), &unified_context(Platform::TeamSpeak))
             .await
-            .unwrap_err();
-        assert_eq!(ts_error.to_string(), "TeamSpeak adapter not available");
+            .unwrap();
+        assert_eq!(ts_ok, json!("ts"));
 
-        let nc_error = skill
-            .execute_unified(json!({}), &unified_context(Platform::NapCat))
+        let nc_ok = skill
+            .execute(json!({}), &unified_context(Platform::NapCat))
             .await
-            .unwrap_err();
-        assert_eq!(
-            nc_error.to_string(),
-            "Skill 'test' does not support the NapCat platform"
-        );
+            .unwrap();
+        assert_eq!(nc_ok, json!("ts"));
+    }
+
+    #[test]
+    fn unified_ts_adapter_missing_is_error() {
+        let ctx = unified_context(Platform::TeamSpeak);
+        assert!(unified_ts_adapter(&ctx).is_err());
     }
 }

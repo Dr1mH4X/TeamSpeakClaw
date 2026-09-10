@@ -1,10 +1,7 @@
-use crate::skills::{
-    required_u32, unified_ts_adapter, ExecutionContext, Platform, Skill, UnifiedExecutionContext,
-};
+use crate::skills::{required_u32, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing::info;
 
 fn required_message<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     let message = args
@@ -37,38 +34,23 @@ impl Skill for PokeClient {
             "required": ["clid", "msg"]
         })
     }
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
+
+    async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         let clid = required_u32(&args, "clid")?;
         let msg = required_message(&args, "msg")?;
 
-        ctx.adapter.poke(clid, msg).await?;
-        Ok(json!({"status": "ok", "message": "Poke sent"}))
-    }
+        let ts_adapter = unified_ts_adapter(ctx)?;
+        ts_adapter.poke(clid, msg).await?;
 
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!("PokeClient: unified execution, platform={:?}", ctx.platform);
-
-        let msg = required_message(&args, "msg")?;
-
-        match ctx.platform {
-            Platform::TeamSpeak => {
-                let ts_ctx = ctx.to_ts_ctx()?;
-                return self.execute(args.clone(), &ts_ctx).await;
-            }
-            Platform::NapCat => {
-                let ts_adapter = unified_ts_adapter(ctx)?;
-
-                let clid = required_u32(&args, "clid")?;
-
-                ts_adapter.poke(clid, msg).await?;
-
-                Ok(json!({
-                    "status": "ok",
-                    "message": format!("Poked user {} in TS", clid),
-                    "platform": "teamspeak",
-                    "routed_by": "unified"
-                }))
-            }
+        if ctx.platform == Platform::NapCat {
+            Ok(json!({
+                "status": "ok",
+                "message": format!("Poked user {} in TS", clid),
+                "platform": "teamspeak",
+                "routed_by": "unified"
+            }))
+        } else {
+            Ok(json!({"status": "ok", "message": "Poke sent"}))
         }
     }
 }
@@ -123,44 +105,8 @@ impl Skill for SendMessage {
         })
     }
 
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
+    async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         let msg = required_message(&args, "msg")?;
-
-        let mode = args["mode"].as_str().unwrap_or("");
-
-        let (targetmode, target) = match mode {
-            "private" => {
-                let clid = required_u32(&args, "clid")?;
-
-                (1, clid)
-            }
-            "channel" => (2, 0),
-            "server" => (3, 0),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Invalid mode, must be private, channel, server"
-                ))
-            }
-        };
-
-        ctx.adapter
-            .send_text_message(targetmode, target, msg)
-            .await?;
-
-        Ok(json!({
-            "status": "ok",
-            "message": format!("Message sent in {} mode: {}", mode, msg)
-        }))
-    }
-
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!(
-            "SendMessage: unified execution, platform={:?}",
-            ctx.platform
-        );
-
-        let msg = required_message(&args, "msg")?;
-
         let mode = args["mode"].as_str().unwrap_or("");
         let ts_route = args["ts_route"].as_bool().unwrap_or(false);
         let nc_route = args["nc_route"].as_bool().unwrap_or(false);
@@ -168,18 +114,15 @@ impl Skill for SendMessage {
         match ctx.platform {
             Platform::TeamSpeak => {
                 if nc_route {
-                    // TS 请求 → NC 执行
                     let nc_adapter = ctx.nc_adapter.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("NapCat adapter not available for nc_route=true")
                     })?;
 
-                    // 添加发送者前缀
                     let prefixed_msg = if !ctx.caller_name.is_empty() {
                         format!("ts({}): {}", ctx.caller_name, msg)
                     } else {
                         msg.to_string()
                     };
-
                     let segs = vec![crate::adapter::napcat::types::Segment::text(&prefixed_msg)];
 
                     match mode {
@@ -210,92 +153,102 @@ impl Skill for SendMessage {
                         _ => Err(anyhow::anyhow!("Invalid mode, must be private, group")),
                     }
                 } else {
-                    // 默认：TS 原生发送
-                    let ts_ctx = ctx.to_ts_ctx()?;
-                    return self.execute(args.clone(), &ts_ctx).await;
+                    let ts_adapter = unified_ts_adapter(ctx)?;
+                    let (targetmode, target) = match mode {
+                        "private" => (1, required_u32(&args, "clid")?),
+                        "channel" => (2, 0),
+                        "server" => (3, 0),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "Invalid mode, must be private, channel, server"
+                            ))
+                        }
+                    };
+                    ts_adapter
+                        .send_text_message(targetmode, target, msg)
+                        .await?;
+                    Ok(json!({
+                        "status": "ok",
+                        "message": format!("Message sent in {} mode: {}", mode, msg)
+                    }))
                 }
             }
             Platform::NapCat => {
-                if let Some(ref nc_adapter) = ctx.nc_adapter {
-                    if ts_route {
-                        let ts_adapter = ctx.ts_adapter.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("TeamSpeak adapter not available for ts_route=true")
-                        })?;
-                        // NC 请求 → TS 执行
-                        let (targetmode, target_id) = match mode {
-                            "private" => (1, required_u32(&args, "clid")?),
-                            "channel" => (2, 0),
-                            "server" => (3, 0),
-                            _ => {
-                                return Err(anyhow::anyhow!(
-                                    "Invalid mode, must be private, channel, server"
-                                ));
-                            }
-                        };
+                let nc_adapter = ctx
+                    .nc_adapter
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("NapCat adapter not available"))?;
 
-                        // 添加发送者前缀
-                        let prefixed_msg = if !ctx.caller_name.is_empty() {
-                            format!("nc({}): {}", ctx.caller_name, msg)
-                        } else {
-                            msg.to_string()
-                        };
-
-                        ts_adapter
-                            .send_text_message(targetmode, target_id, &prefixed_msg)
-                            .await?;
-
-                        // 结果返回给 NC
-                        let reply = format!("Sent message in TS: {} -> {}", mode, prefixed_msg);
-                        return Ok(json!({
-                            "status": "ok",
-                            "message": reply,
-                            "platform": "teamspeak",
-                            "routed_by": "ts_route"
-                        }));
-                    }
-                    // 默认：NC 原生发送
-                    let segs = vec![crate::adapter::napcat::types::Segment::text(msg)];
-
-                    match mode {
-                        "private" => {
-                            let target = args["user_id"]
-                                .as_i64()
-                                .or_else(|| args["clid"].as_i64())
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("Missing required parameter: user_id")
-                                })?;
-                            if ctx.caller_id_nc != 0 && target == ctx.caller_id_nc {
-                                return Err(anyhow::anyhow!(
-                                    "Cannot perform this action on yourself"
-                                ));
-                            }
-                            nc_adapter.send_private(target, &segs).await?;
-                            Ok(json!({
-                                "status": "ok",
-                                "message": format!("Private message sent: {}", msg),
-                                "platform": "napcat",
-                                "routed_by": "default"
-                            }))
+                if ts_route {
+                    let ts_adapter = ctx.ts_adapter.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("TeamSpeak adapter not available for ts_route=true")
+                    })?;
+                    let (targetmode, target_id) = match mode {
+                        "private" => (1, required_u32(&args, "clid")?),
+                        "channel" => (2, 0),
+                        "server" => (3, 0),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "Invalid mode, must be private, channel, server"
+                            ));
                         }
-                        "group" => {
-                            let group_id = args["group_id"]
+                    };
+
+                    let prefixed_msg = if !ctx.caller_name.is_empty() {
+                        format!("nc({}): {}", ctx.caller_name, msg)
+                    } else {
+                        msg.to_string()
+                    };
+
+                    ts_adapter
+                        .send_text_message(targetmode, target_id, &prefixed_msg)
+                        .await?;
+
+                    return Ok(json!({
+                        "status": "ok",
+                        "message": format!("Sent message in TS: {} -> {}", mode, prefixed_msg),
+                        "platform": "teamspeak",
+                        "routed_by": "ts_route"
+                    }));
+                }
+
+                let segs = vec![crate::adapter::napcat::types::Segment::text(msg)];
+                match mode {
+                    "private" => {
+                        let target = args["user_id"]
+                            .as_i64()
+                            .or_else(|| args["clid"].as_i64())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Missing required parameter: user_id")
+                            })?;
+                        if ctx.caller_id_nc != 0 && target == ctx.caller_id_nc {
+                            return Err(anyhow::anyhow!("Cannot perform this action on yourself"));
+                        }
+                        nc_adapter.send_private(target, &segs).await?;
+                        Ok(json!({
+                            "status": "ok",
+                            "message": format!("Private message sent: {}", msg),
+                            "platform": "napcat",
+                            "routed_by": "default"
+                        }))
+                    }
+                    "group" => {
+                        let group_id =
+                            args["group_id"]
                                 .as_i64()
                                 .or(ctx.nc_group_id)
                                 .ok_or_else(|| {
                                     anyhow::anyhow!("Missing required parameter: group_id")
                                 })?;
-                            nc_adapter.send_group(group_id, &segs).await?;
-                            Ok(json!({
-                                "status": "ok",
-                                "message": format!("Group message sent: {}", msg),
-                                "platform": "napcat",
-                                "routed_by": "default"
-                            }))
-                        }
-                        _ => Err(anyhow::anyhow!("Invalid mode, must be private, group")),
+                        nc_adapter.send_group(group_id, &segs).await?;
+                        Ok(json!({
+                            "status": "ok",
+                            "message": format!("Group message sent: {}", msg),
+                            "platform": "napcat",
+                            "routed_by": "default"
+                        }))
                     }
-                } else {
-                    Err(anyhow::anyhow!("NapCat adapter not available"))
+                    _ => Err(anyhow::anyhow!("Invalid mode, must be private, group")),
                 }
             }
         }

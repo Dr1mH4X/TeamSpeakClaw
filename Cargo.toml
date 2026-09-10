@@ -31,9 +31,6 @@ dashmap = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry", "time", "local-time"] }
 tracing-appender = "0.2"
-slog = "2"
-slog-scope = "4.4"
-tracing-slog = "0.4"
 
 thiserror = "1"
 anyhow = "1"

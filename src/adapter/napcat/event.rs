@@ -1,5 +1,4 @@
 use super::types::{Segment, Sender};
-use crate::adapter::reconnect::now_unix_secs;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -15,7 +14,6 @@ pub struct PrivateMessageEvent {
     pub user_id: i64,
     pub message: Vec<Segment>,
     pub sender: Sender,
-    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +22,6 @@ pub struct GroupMessageEvent {
     pub user_id: i64,
     pub message: Vec<Segment>,
     pub sender: Sender,
-    pub timestamp: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,7 +32,6 @@ struct RawEvent {
     user_id: Option<i64>,
     message: Option<Value>,
     sender: Option<Value>,
-    time: Option<u64>,
 }
 
 pub fn parse_event(raw: Value) -> NcEvent {
@@ -57,14 +53,12 @@ fn parse_message_event(ev: RawEvent) -> NcEvent {
     };
     let message = parse_segments(ev.message.as_ref().unwrap_or(&Value::Array(vec![])));
     let sender = parse_sender(ev.sender.as_ref().unwrap_or(&Value::Null), user_id);
-    let timestamp = ev.time.unwrap_or_else(now_unix_secs);
 
     match ev.message_type.as_deref() {
         Some("private") => NcEvent::PrivateMessage(PrivateMessageEvent {
             user_id,
             message,
             sender,
-            timestamp,
         }),
         Some("group") => {
             let Some(group_id) = ev.group_id else {
@@ -75,7 +69,6 @@ fn parse_message_event(ev: RawEvent) -> NcEvent {
                 user_id,
                 message,
                 sender,
-                timestamp,
             })
         }
         _ => NcEvent::Heartbeat,

@@ -97,6 +97,9 @@ impl AppConfig {
                     VALID_BACKENDS.join(", "),
                 );
             }
+            if mc.backend == "tsbot_backend" && mc.base_url.trim().is_empty() {
+                anyhow::bail!("music_backend.base_url is required for tsbot_backend");
+            }
         }
         Ok(())
     }
@@ -162,5 +165,48 @@ max_context_turns = 3
         let error = config.validate().unwrap_err();
 
         assert!(error.to_string().contains("default_reply_mode"));
+    }
+
+    #[test]
+    fn chat_music_backends_allow_empty_base_url() {
+        let config = AppConfig {
+            music_backend: Some(MusicBackendConfig {
+                backend: "ts3audiobot".to_string(),
+                base_url: String::new(),
+                musicbot_name: "TS3AudioBot".to_string(),
+            }),
+            ..AppConfig::default()
+        };
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn tsbot_backend_requires_base_url() {
+        let config = AppConfig {
+            music_backend: Some(MusicBackendConfig {
+                backend: "tsbot_backend".to_string(),
+                base_url: "  ".to_string(),
+                musicbot_name: "TSBot".to_string(),
+            }),
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("base_url"));
+    }
+
+    #[test]
+    fn rejects_unknown_music_backend() {
+        let config = AppConfig {
+            music_backend: Some(MusicBackendConfig {
+                backend: "not-a-backend".to_string(),
+                base_url: String::new(),
+                musicbot_name: "bot".to_string(),
+            }),
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("Unsupported music backend"));
     }
 }

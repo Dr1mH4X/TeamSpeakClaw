@@ -5,7 +5,7 @@ mod unified;
 mod voice_router;
 
 pub use nc_router::NcRouter;
-pub use trigger::strip_trigger_prefix;
+pub use trigger::{resolve_ts_inbound, strip_trigger_prefix};
 pub use ts_router::EventRouter;
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 pub use voice_router::VoiceRouter;
