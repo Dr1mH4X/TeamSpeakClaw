@@ -1,0 +1,555 @@
+//! 分说话人稀疏环形录制：窗口内按段保存 48k 立体声 PCM，供 voice_replay 快照回放。
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use tracing::warn;
+
+use super::audio_codec::{
+    new_opus_stereo_decoder, pcm_stereo_48k_duration, stereo_48k_sample_count, CHANNELS,
+    SAMPLE_RATE_HZ,
+};
+
+const MAX_TRACKED_SPEAKERS: usize = 6;
+const MERGE_GAP: Duration = Duration::from_millis(2);
+const MAX_SEGMENT_MS: u64 = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayFilter {
+    All,
+    Speaker { clid: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeakerStat {
+    pub clid: u32,
+    pub name: String,
+    pub active_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RingSnapshot {
+    pub samples: Vec<i16>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub speakers: Vec<SpeakerStat>,
+    pub buffered_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameResolve {
+    Unique(u32),
+    Ambiguous(Vec<String>),
+    None,
+}
+
+pub struct SpeakerSegment {
+    pub start: Instant,
+    pub samples: Vec<i16>,
+}
+
+pub struct SpeakerTrack {
+    pub clid: u32,
+    pub name: String,
+    pub last_active: Instant,
+    pub segments: VecDeque<SpeakerSegment>,
+    pub decoder: audiopus::coder::Decoder,
+}
+
+struct Inner {
+    tracks: HashMap<u32, SpeakerTrack>,
+    window: Duration,
+    max_tracked_speakers: usize,
+    created_at: Instant,
+}
+
+pub struct SpeakerRings {
+    inner: Mutex<Inner>,
+}
+
+fn stereo_48k_duration(sample_count: usize) -> Duration {
+    pcm_stereo_48k_duration(sample_count)
+}
+
+/// active_ms 只统计 start 仍在窗口内的段；不缓存累计字段
+fn derive_active_ms(track: &SpeakerTrack, now: Instant, window: Duration) -> u64 {
+    let window_start = now - window;
+    track
+        .segments
+        .iter()
+        .filter(|seg| seg.start >= window_start)
+        .map(|seg| stereo_48k_duration(seg.samples.len()).as_millis() as u64)
+        .sum()
+}
+
+fn axis_ms(inner: &Inner, now: Instant, seconds: Option<u32>) -> u64 {
+    let window_ms = inner.window.as_millis() as u64;
+    let age_ms = now.duration_since(inner.created_at).as_millis() as u64;
+    let mut axis = window_ms.min(age_ms);
+    if let Some(secs) = seconds {
+        axis = axis.min(u64::from(secs) * 1000);
+    }
+    axis
+}
+
+impl SpeakerRings {
+    pub fn new(window: Duration) -> Self {
+        Self::new_with_created_at(window, Instant::now())
+    }
+
+    fn new_with_created_at(window: Duration, created_at: Instant) -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                tracks: HashMap::new(),
+                window,
+                max_tracked_speakers: MAX_TRACKED_SPEAKERS,
+                created_at,
+            }),
+        }
+    }
+
+    pub fn push_opus_frame(
+        &self,
+        clid: u32,
+        name: &str,
+        frame: &[u8],
+        received_at: Instant,
+    ) -> Result<()> {
+        let pcm = self.decode_opus_frame(clid, name, frame, received_at)?;
+        if let Some(samples) = pcm {
+            self.append_pcm(clid, name, samples, received_at);
+        }
+        Ok(())
+    }
+
+    fn decode_opus_frame(
+        &self,
+        clid: u32,
+        name: &str,
+        frame: &[u8],
+        received_at: Instant,
+    ) -> Result<Option<Vec<i16>>> {
+        let mut inner = self.inner.lock().expect("speaker rings poisoned");
+        Self::ensure_track(&mut inner, clid, name, received_at);
+        let track = inner
+            .tracks
+            .get_mut(&clid)
+            .ok_or_else(|| anyhow!("speaker track missing after ensure"))?;
+
+        let mut decoded = vec![0i16; 960 * CHANNELS as usize];
+        let packet = match frame.try_into() {
+            Ok(packet) => packet,
+            Err(error) => {
+                warn!(clid, error = %error, "speaker ring drop invalid opus packet");
+                return Ok(None);
+            }
+        };
+        let decoded_mut = (&mut decoded)
+            .try_into()
+            .map_err(|e: audiopus::Error| anyhow!("opus output buffer invalid: {e}"))?;
+        let samples_per_channel = match track.decoder.decode(Some(packet), decoded_mut, false) {
+            Ok(n) => n,
+            Err(error) => {
+                warn!(clid, error = %error, "speaker ring drop undecodable opus frame");
+                return Ok(None);
+            }
+        };
+        if samples_per_channel == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            decoded[..samples_per_channel * CHANNELS as usize].to_vec(),
+        ))
+    }
+
+    /// 写入路径：建轨/合并段/按 received_at 驱逐
+    fn append_pcm(&self, clid: u32, name: &str, samples: Vec<i16>, received_at: Instant) {
+        let mut inner = self.inner.lock().expect("speaker rings poisoned");
+        Self::ensure_track(&mut inner, clid, name, received_at);
+        let track = inner
+            .tracks
+            .get_mut(&clid)
+            .expect("speaker track missing after ensure");
+        Self::append_samples(track, samples, received_at);
+        Self::evict_locked(&mut inner, received_at);
+    }
+
+    fn ensure_track(inner: &mut Inner, clid: u32, name: &str, now: Instant) {
+        if let Some(track) = inner.tracks.get_mut(&clid) {
+            track.name = name.to_string();
+            track.last_active = now;
+            return;
+        }
+
+        if inner.tracks.len() >= inner.max_tracked_speakers {
+            let victim = inner
+                .tracks
+                .iter()
+                .filter(|(id, _)| **id != clid)
+                .min_by_key(|(_, track)| track.last_active)
+                .map(|(id, _)| *id);
+            if let Some(dropped) = victim {
+                if let Some(track) = inner.tracks.remove(&dropped) {
+                    warn!(
+                        clid = dropped,
+                        name = %track.name,
+                        "speaker ring LRU evicted track"
+                    );
+                }
+            }
+        }
+
+        let decoder = new_opus_stereo_decoder().expect("opus stereo decoder init");
+        inner.tracks.insert(
+            clid,
+            SpeakerTrack {
+                clid,
+                name: name.to_string(),
+                last_active: now,
+                segments: VecDeque::new(),
+                decoder,
+            },
+        );
+    }
+
+    fn append_samples(track: &mut SpeakerTrack, samples: Vec<i16>, at: Instant) {
+        if samples.is_empty() {
+            return;
+        }
+        track.last_active = at;
+        if let Some(last) = track.segments.back_mut() {
+            let last_end = last.start + stereo_48k_duration(last.samples.len());
+            let gap = at.saturating_duration_since(last_end);
+            let last_ms = stereo_48k_duration(last.samples.len()).as_millis() as u64;
+            if gap <= MERGE_GAP && last_ms < MAX_SEGMENT_MS {
+                last.samples.extend_from_slice(&samples);
+                return;
+            }
+        }
+        track
+            .segments
+            .push_back(SpeakerSegment { start: at, samples });
+    }
+
+    fn evict_locked(inner: &mut Inner, now: Instant) {
+        let window = inner.window;
+        for track in inner.tracks.values_mut() {
+            while let Some(seg) = track.segments.front() {
+                let end = seg.start + stereo_48k_duration(seg.samples.len());
+                if end < now - window {
+                    track.segments.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+        inner.tracks.retain(|_, track| {
+            !track.segments.is_empty() || now.duration_since(track.last_active) < window
+        });
+    }
+
+    pub fn snapshot(&self, filter: ReplayFilter, seconds: Option<u32>) -> RingSnapshot {
+        self.snapshot_at(filter, seconds, Instant::now())
+    }
+
+    pub fn snapshot_at(
+        &self,
+        filter: ReplayFilter,
+        seconds: Option<u32>,
+        now: Instant,
+    ) -> RingSnapshot {
+        let mut inner = self.inner.lock().expect("speaker rings poisoned");
+        Self::evict_locked(&mut inner, now);
+        let axis = axis_ms(&inner, now, seconds);
+        let sample_count = stereo_48k_sample_count(Duration::from_millis(axis));
+        let mut samples = vec![0i16; sample_count];
+        let axis_start = now - Duration::from_millis(axis);
+
+        match filter {
+            ReplayFilter::All => {
+                for track in inner.tracks.values() {
+                    mix_track_into(&mut samples, track, axis_start);
+                }
+            }
+            ReplayFilter::Speaker { clid } => {
+                if let Some(track) = inner.tracks.get(&clid) {
+                    mix_track_into(&mut samples, track, axis_start);
+                }
+            }
+        }
+
+        let speakers = inner
+            .tracks
+            .values()
+            .map(|track| SpeakerStat {
+                clid: track.clid,
+                name: track.name.clone(),
+                active_ms: derive_active_ms(track, now, inner.window),
+            })
+            .collect();
+
+        RingSnapshot {
+            buffered_ms: axis,
+            samples,
+            sample_rate: SAMPLE_RATE_HZ,
+            channels: CHANNELS,
+            speakers,
+        }
+    }
+
+    pub fn stats(&self) -> Vec<SpeakerStat> {
+        self.stats_at(Instant::now())
+    }
+
+    pub fn stats_at(&self, now: Instant) -> Vec<SpeakerStat> {
+        let mut inner = self.inner.lock().expect("speaker rings poisoned");
+        Self::evict_locked(&mut inner, now);
+        let window = inner.window;
+        inner
+            .tracks
+            .values()
+            .map(|track| SpeakerStat {
+                clid: track.clid,
+                name: track.name.clone(),
+                active_ms: derive_active_ms(track, now, window),
+            })
+            .collect()
+    }
+
+    /// 精确匹配；0 个 → None；多个同名 → Ambiguous
+    pub fn resolve_name(&self, name: &str) -> NameResolve {
+        let inner = self.inner.lock().expect("speaker rings poisoned");
+        let matches: Vec<&SpeakerTrack> = inner
+            .tracks
+            .values()
+            .filter(|track| track.name == name)
+            .collect();
+        match matches.len() {
+            0 => NameResolve::None,
+            1 => NameResolve::Unique(matches[0].clid),
+            _ => NameResolve::Ambiguous(matches.iter().map(|t| t.name.clone()).collect()),
+        }
+    }
+
+    #[cfg(test)]
+    fn segment_count(&self, clid: u32) -> usize {
+        let inner = self.inner.lock().expect("speaker rings poisoned");
+        inner
+            .tracks
+            .get(&clid)
+            .map(|track| track.segments.len())
+            .unwrap_or(0)
+    }
+}
+
+fn mix_track_into(out: &mut [i16], track: &SpeakerTrack, axis_start: Instant) {
+    for seg in &track.segments {
+        let offset = seg.start.saturating_duration_since(axis_start);
+        let start_idx = stereo_48k_sample_count(offset);
+        for (i, sample) in seg.samples.iter().enumerate() {
+            let idx = start_idx + i;
+            if idx >= out.len() {
+                break;
+            }
+            out[idx] = out[idx].saturating_add(*sample);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::headless::audio_codec::stereo_48k_sample_count;
+    use std::time::Duration;
+
+    const DEFAULT_REPLAY_WINDOW: Duration = Duration::from_secs(30);
+
+    fn pcm_ms(ms: u64) -> Vec<i16> {
+        vec![100i16; stereo_48k_sample_count(Duration::from_millis(ms))]
+    }
+
+    #[test]
+    fn rings_do_not_cross_pollute_speakers() {
+        let created = Instant::now() - Duration::from_secs(60);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let now = Instant::now();
+        // 音频完整落在 now 之前，避免轴终点截断
+        let alice_at = now - Duration::from_millis(300);
+        let bob_at = now - Duration::from_millis(200);
+        rings.append_pcm(1, "alice", pcm_ms(200), alice_at);
+        rings.append_pcm(2, "bob", pcm_ms(100), bob_at);
+
+        let snap = rings.snapshot_at(ReplayFilter::Speaker { clid: 1 }, None, now);
+        assert_eq!(snap.buffered_ms, 30_000);
+        assert_eq!(snap.sample_rate, 48_000);
+        assert_eq!(snap.channels, 2);
+        assert_eq!(snap.speakers.len(), 2);
+        let alice_nonzero = snap.samples.iter().filter(|s| **s == 100).count();
+        assert_eq!(
+            alice_nonzero,
+            stereo_48k_sample_count(Duration::from_millis(200))
+        );
+
+        let bob_only = rings.snapshot_at(ReplayFilter::Speaker { clid: 2 }, None, now);
+        let bob_nonzero = bob_only.samples.iter().filter(|s| **s == 100).count();
+        assert_eq!(
+            bob_nonzero,
+            stereo_48k_sample_count(Duration::from_millis(100))
+        );
+
+        let all = rings.snapshot_at(ReplayFilter::All, None, now);
+        assert_eq!(all.buffered_ms, 30_000);
+        let stats = rings.stats_at(now);
+        assert_eq!(stats.len(), 2);
+        for stat in &stats {
+            assert!(stat.name == "alice" || stat.name == "bob");
+            assert!(stat.active_ms > 0);
+        }
+        let live = rings.snapshot(ReplayFilter::All, None);
+        assert!(live.buffered_ms > 0);
+        let live_stats = rings.stats();
+        assert_eq!(live_stats.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_all_steady_state_duration_matches_window() {
+        let now = Instant::now();
+        let created = now - Duration::from_secs(60);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        rings.append_pcm(1, "alice", pcm_ms(500), now - Duration::from_millis(100));
+
+        let snap = rings.snapshot_at(ReplayFilter::All, None, now);
+        assert_eq!(snap.buffered_ms, 30_000);
+        assert_eq!(
+            snap.samples.len(),
+            stereo_48k_sample_count(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn partial_window_snapshot_uses_ring_age_not_full_window() {
+        let created = Instant::now() - Duration::from_secs(8);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let now = Instant::now();
+        rings.append_pcm(1, "alice", pcm_ms(200), now - Duration::from_millis(50));
+
+        let snap = rings.snapshot_at(ReplayFilter::All, None, now);
+        assert!(snap.buffered_ms >= 7_000 && snap.buffered_ms <= 9_000);
+        assert!(snap.buffered_ms < 20_000);
+        assert_eq!(
+            snap.buffered_ms,
+            u64::from(snap.samples.len() as u32) * 1000 / 96_000
+        );
+    }
+
+    #[test]
+    fn snapshot_speaker_keeps_full_timeline_axis() {
+        let created = Instant::now() - Duration::from_secs(20);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let now = Instant::now();
+        rings.append_pcm(1, "alice", pcm_ms(100), now - Duration::from_secs(10));
+        rings.append_pcm(2, "bob", pcm_ms(100), now - Duration::from_secs(5));
+
+        let snap = rings.snapshot_at(ReplayFilter::Speaker { clid: 1 }, None, now);
+        assert_eq!(snap.buffered_ms, 20_000);
+        assert_eq!(snap.speakers.len(), 2);
+        // Alice 的音频落在轴上约 10s 处，前后为空隙（0）
+        let nonzero: Vec<usize> = snap
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s != 0)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!nonzero.is_empty());
+        let first = nonzero[0] as u64 * 1000 / 96_000;
+        assert!((9_000..11_000).contains(&first));
+    }
+
+    #[test]
+    fn seconds_clamp_to_window() {
+        let created = Instant::now() - Duration::from_secs(60);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let snap = rings.snapshot_at(ReplayFilter::All, Some(120), Instant::now());
+        assert_eq!(snap.buffered_ms, 30_000);
+    }
+
+    #[test]
+    fn active_ms_derives_and_decreases_after_eviction() {
+        let rings = SpeakerRings::new(DEFAULT_REPLAY_WINDOW);
+        let t0 = Instant::now();
+        rings.append_pcm(1, "alice", pcm_ms(1000), t0);
+        rings.append_pcm(1, "alice", pcm_ms(1000), t0 + Duration::from_secs(20));
+
+        let mid = rings.stats_at(t0 + Duration::from_millis(25));
+        assert_eq!(mid.len(), 1);
+        assert_eq!(mid[0].active_ms, 2000);
+
+        let late = rings.stats_at(t0 + Duration::from_secs(35));
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].active_ms, 1000);
+        assert!(late[0].active_ms < mid[0].active_ms);
+    }
+
+    #[test]
+    fn segment_merge_on_tight_gap_and_split_on_long_gap() {
+        let rings = SpeakerRings::new(DEFAULT_REPLAY_WINDOW);
+        let t0 = Instant::now();
+        rings.append_pcm(1, "alice", pcm_ms(20), t0);
+        rings.append_pcm(1, "alice", pcm_ms(20), t0 + Duration::from_millis(20));
+        assert_eq!(rings.segment_count(1), 1);
+
+        rings.append_pcm(1, "alice", pcm_ms(20), t0 + Duration::from_millis(80));
+        assert_eq!(rings.segment_count(1), 2);
+    }
+
+    #[test]
+    fn lru_evicts_oldest_track_when_over_capacity() {
+        let rings = SpeakerRings::new(DEFAULT_REPLAY_WINDOW);
+        let t0 = Instant::now();
+        for i in 0..6u32 {
+            rings.append_pcm(
+                i,
+                &format!("s{i}"),
+                pcm_ms(20),
+                t0 + Duration::from_millis(u64::from(i)),
+            );
+        }
+        rings.append_pcm(99, "newcomer", pcm_ms(20), t0 + Duration::from_secs(1));
+
+        let stats = rings.stats_at(t0 + Duration::from_secs(1));
+        assert_eq!(stats.len(), 6);
+        assert!(stats.iter().all(|s| s.clid != 0));
+        assert!(stats.iter().any(|s| s.clid == 99));
+    }
+
+    #[test]
+    fn resolve_name_exact_ambiguous_and_none() {
+        let rings = SpeakerRings::new(DEFAULT_REPLAY_WINDOW);
+        let now = Instant::now();
+        rings.append_pcm(1, "Alice", pcm_ms(20), now);
+        rings.append_pcm(2, "Alice", pcm_ms(20), now);
+        rings.append_pcm(3, "Bob", pcm_ms(20), now);
+
+        assert_eq!(rings.resolve_name("Bob"), NameResolve::Unique(3));
+        assert!(matches!(
+            rings.resolve_name("Alice"),
+            NameResolve::Ambiguous(names) if names.len() == 2
+        ));
+        assert_eq!(rings.resolve_name("Carol"), NameResolve::None);
+    }
+
+    #[test]
+    fn speaker_filter_excludes_other_speakers_samples() {
+        let created = Instant::now() - Duration::from_secs(10);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let now = Instant::now();
+        rings.append_pcm(2, "bob", pcm_ms(500), now - Duration::from_millis(100));
+
+        let snap = rings.snapshot_at(ReplayFilter::Speaker { clid: 1 }, None, now);
+        assert!(snap.samples.iter().all(|s| *s == 0));
+        assert!(snap.speakers.iter().any(|s| s.clid == 2 && s.active_ms > 0));
+    }
+}

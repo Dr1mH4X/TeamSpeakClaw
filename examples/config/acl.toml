@@ -22,6 +22,7 @@
 #   - get_client_info: 获取用户详细信息
 #   - music_control: 音乐控制
 #   - web_search: 搜索最新网络信息
+#   - voice_replay: 语音窗口回放/status/stop（单人回放更敏感，按组收紧）
 
 [[rules]]
 server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
@@ -37,7 +38,8 @@ allowed_skills = [
   "send_message",
   "get_client_info",
   "music_control",
-  "kick_client"
+  "kick_client",
+  "voice_replay"
 ]
 can_target_admins = false
 

@@ -6,6 +6,7 @@ pub mod logging;
 pub mod music_backend;
 pub mod napcat;
 pub mod prompts;
+pub mod voice_replay;
 pub use acl::AclConfig;
 pub use bot::BotConfig;
 pub use headless::HeadlessConfig;
@@ -14,6 +15,7 @@ pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use napcat::NapCatConfig;
 pub use prompts::PromptsConfig;
+pub use voice_replay::VoiceReplayConfig;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -59,6 +61,7 @@ pub struct AppConfig {
     pub napcat: NapCatConfig,
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
+    pub voice_replay: VoiceReplayConfig,
 }
 
 impl AppConfig {
@@ -100,6 +103,10 @@ impl AppConfig {
             if mc.backend == "tsbot_backend" && mc.base_url.trim().is_empty() {
                 anyhow::bail!("music_backend.base_url is required for tsbot_backend");
             }
+        }
+
+        if self.voice_replay.window_secs == 0 || self.voice_replay.window_secs > 120 {
+            anyhow::bail!("voice_replay.window_secs must be in 1..=120");
         }
         Ok(())
     }
@@ -154,6 +161,21 @@ max_context_turns = 3
         assert_eq!(config.bot.default_reply_mode, "private");
         assert!(!config.napcat.enabled);
         assert_eq!(config.logging.max_log_days, 7);
+        assert!(!config.voice_replay.enabled);
+        assert_eq!(config.voice_replay.window_secs, 30);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_voice_replay_window() {
+        let mut config = AppConfig::default();
+        config.llm.model = "m".into();
+        config.llm.base_url = "http://127.0.0.1/v1".into();
+        config.voice_replay.window_secs = 0;
+        assert!(config.validate().is_err());
+        config.voice_replay.window_secs = 121;
+        assert!(config.validate().is_err());
+        config.voice_replay.window_secs = 120;
         config.validate().unwrap();
     }
 

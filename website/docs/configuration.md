@@ -79,6 +79,21 @@ sidebar_position: 3
 私聊触发的消息始终以私聊方式回复。
 语音 STT 触发后的回复也遵循该模式。
 
+### 语音回放 (voice_replay)
+
+`[voice_replay]` 区段控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否启用录制回放与 `voice_replay` 技能/直呼 |
+| `window_secs` | integer | `30` | 录音窗秒数，合法范围 **1–120**；`seconds` 超窗时 clamp |
+| `direct_commands` | 数组 | `["!replay", "!回放"]` | 频道直呼前缀 |
+
+- 技能 `voice_replay` 与直呼命令（`!replay [N] [@Name …]` / `stop` / `status`）**共用同一 ACL**。
+- 单人回放比频道混音更敏感，请按组在 `acl.toml` 授予 `voice_replay`。
+- 无 STT/TTS 仅开本开关时也可录制与回放（只听不说）；语音自然语言触发仍需 STT。
+- 语法与 JSON 契约见 [usage.md](usage.md)。
+
 ## 2. 权限配置 (acl.toml)
 
 文件路径: `config/acl.toml`
@@ -99,6 +114,7 @@ sidebar_position: 3
 | `get_client_info` | 获取用户详细信息 |
 | `music_control` | 音乐控制 |
 | `web_search` | 搜索最新网络信息 |
+| `voice_replay` | 语音窗口回放（status/replay/stop 与直呼；单人回放更敏感） |
 
 ### NapCat 与跨平台行为说明
 

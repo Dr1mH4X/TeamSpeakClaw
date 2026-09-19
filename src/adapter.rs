@@ -31,9 +31,10 @@ pub async fn run(
     registry: Arc<SkillRegistry>,
     llm: Arc<LlmEngine>,
     shutdown: CancellationToken,
+    voice_audio: crate::skills::VoiceAudioHandles,
 ) -> Result<()> {
     let mut reconnect = ReconnectState::default();
-    let context = RouterContext::new(config, prompts, gate, llm, registry);
+    let context = RouterContext::new(config, prompts, gate, llm, registry, voice_audio.clone());
 
     loop {
         let connection = tokio::select! {
@@ -108,6 +109,7 @@ pub async fn run(
             event_rx,
             disconnect_rx,
             shutdown.clone(),
+            voice_audio.clone(),
         )
         .await;
 
@@ -165,6 +167,7 @@ async fn run_connected_session(
     event_rx: broadcast::Receiver<TsEvent>,
     mut disconnect_rx: watch::Receiver<bool>,
     shutdown: CancellationToken,
+    voice_audio: crate::skills::VoiceAudioHandles,
 ) -> SessionCompletion {
     let napcat_shutdown = shutdown.child_token();
     let nc_adapter = match wait_for_initialization(
@@ -213,8 +216,11 @@ async fn run_connected_session(
         context.gate.clone(),
         context.llm.clone(),
         context.registry.clone(),
-        adapter.clone(),
-        voice_bridge_state,
+        headless::HeadlessStartHandles {
+            ts_adapter: adapter.clone(),
+            bridge_state: voice_bridge_state,
+            voice_audio,
+        },
     )
     .await
     {

@@ -42,12 +42,68 @@ INFO Bot ready. Listening for TS + NapCat events.
     -   说出唤醒词（默认 `tsclaw`）后说出指令
     -   机器人会通过语音回复（需配置 TTS）
     -   例如: （说）`tsclaw 播放周杰伦的夜曲`
+    -   **未开 STT 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
 
-4.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
+4.  **语音回放 voice_replay**（可选，`[voice_replay] enabled = true`，改配置后**重启**生效）：
+
+    | 直呼 | 含义 |
+    |---|---|
+    | `!replay` | 混音回放整个录音窗 |
+    | `!replay 10` | 回放约 10s（clamp 到 window_secs） |
+    | `!replay @Alice` | 按人回放（精确/最长匹配） |
+    | `!replay @Alice Smith 10` | 空格昵称 + 秒数（N 可在名前或名后） |
+    | `!replay 10 @Alice` | 同上，N 在前 |
+    | `!replay stop` | 级联取消排队/播放中的 clip |
+    | `!replay status` | 查看 recording / speakers / queued_jobs |
+
+    -   与机器人对话触发技能 `voice_replay`（action: status / replay / stop）。
+    -   **两段式**：先 `status` 看 `speakers[{clid,name,active_ms}]` → 再带 `speaker` 回放。
+    -   昵称歧义或未命中：返回 **candidates** 名单，不任选一人。
+    -   **授权**：直呼与技能共用 ACL 中的 `voice_replay`；无权限收到 `voice_replay denied by ACL`。
+    -   **隐私**：单人回放比频道混音更敏感，请用 ACL 按组收紧。
+    -   `buffered_ms` = 实际回放时长（窗不足/新建环时不是假想满窗）。
+
+5.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
 
 ## 可用技能 (Skills)
 
 机器人目前支持以下技能（取决于您的权限配置）：
+
+### 语音回放 (voice_replay)
+
+JSON 契约（技能完整载荷；直呼 ack 为同一结果的摘要文本）：
+
+```json
+// action=status
+{
+  "recording": true,
+  "buffered_ms": 30000,
+  "playback_duration_ms": 30000,
+  "speakers": [{ "clid": 12, "name": "Alice", "active_ms": 1800 }],
+  "playing": { "kind": "PcmClip", "source": "SkillClip" },
+  "queued_jobs": 0,
+  "last_error": null
+}
+
+// action=replay  （seconds 可选，已 clamp；speaker 歧义/未命中时为错误字符串而非本对象）
+{
+  "status": "queued",
+  "buffered_ms": 30000,
+  "playback_duration_ms": 30000,
+  "speakers": [{ "clid": 12, "name": "Alice", "active_ms": 1800 }]
+}
+
+// action=stop
+{ "status": "ok", "stopped_clips": 1 }
+
+// ACL 拒绝（技能 tool 结果 / 直呼 ack 同文）
+// "voice_replay denied by ACL"
+
+// 直呼 ack 摘要格式
+// "voice_replay queued; buffered_ms=30000; speakers=[...]"
+```
+
+约定：`playback_duration_ms == buffered_ms`（samples/48000/2）；`active_ms` 为窗口内派生值，随驱逐只降不增。
 
 ### 🎵 音乐控制 (music_control)
 

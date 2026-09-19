@@ -32,11 +32,23 @@ async fn main() -> Result<()> {
     let config = Arc::new(cfg);
     let gate = Arc::new(PermissionGate::new(acl_config));
     let prompts = Arc::new(prompts_config);
-    let registry = Arc::new(SkillRegistry::with_defaults(config.clone()));
+    let voice_audio = crate::skills::VoiceAudioHandles::default();
+    let registry = Arc::new(SkillRegistry::with_defaults(
+        config.clone(),
+        voice_audio.clone(),
+    ));
     let llm = Arc::new(LlmEngine::new(config.clone())?);
 
     let shutdown = CancellationToken::new();
-    let run = crate::adapter::run(config, prompts, gate, registry, llm, shutdown.clone());
+    let run = crate::adapter::run(
+        config,
+        prompts,
+        gate,
+        registry,
+        llm,
+        shutdown.clone(),
+        voice_audio,
+    );
     tokio::pin!(run);
 
     tokio::select! {

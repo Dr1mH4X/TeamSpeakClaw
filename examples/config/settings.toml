@@ -64,3 +64,12 @@ listen_groups = []                        # 监听的群 ID 列表，空列表�
 trigger_prefixes = ["!claw", "!bot"]      # 群聊触发前缀（私聊无需前缀）
 trusted_groups = []                       # 信任的群 ID 列表，群内所有成员可使用机器人
 trusted_users = []                        # 信任的用户 QQ 号列表，私聊和群聊均可使用
+
+# 语音回放（TeamSpeak）。默认关闭；单人回放更敏感，与 ACL 一并收紧。
+# window_secs ∈ [1,120]；修改 enabled/配置后需重启进程生效。
+# 直呼命令与技能共用 voice_replay ACL，不会绕过授权。
+[voice_replay]
+enabled = false
+window_secs = 30
+direct_commands = ["!replay", "!回放"]
+

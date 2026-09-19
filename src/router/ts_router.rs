@@ -28,6 +28,7 @@ pub struct EventRouter {
     registry: Arc<SkillRegistry>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
     voice_bridge_state: VoiceBridgeState,
+    voice_audio: crate::skills::VoiceAudioHandles,
     subscriptions: Arc<Mutex<Option<MainSubscriptions>>>,
 }
 
@@ -46,6 +47,7 @@ impl EventRouter {
             gate,
             llm,
             registry,
+            voice_audio,
         } = context;
 
         Self {
@@ -57,6 +59,7 @@ impl EventRouter {
             registry,
             nc_adapter,
             voice_bridge_state,
+            voice_audio,
             subscriptions: Arc::new(Mutex::new(Some(MainSubscriptions {
                 events: event_rx,
                 disconnected: disconnect_rx,
@@ -99,6 +102,39 @@ impl EventRouter {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    fn run_voice_replay_direct(
+        &self,
+        command: crate::skills::voice_replay::DirectReplayCommand,
+        groups: &[u32],
+        channel_group_id: u32,
+    ) -> String {
+        if !crate::skills::voice_replay::direct_command_allowed(
+            &self.gate,
+            groups,
+            channel_group_id,
+        ) {
+            return "voice_replay denied by ACL".to_string();
+        }
+        let Some(runtime) = self.voice_audio.get() else {
+            return "voice replay runtime not ready".to_string();
+        };
+        match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
+            Ok(value) => {
+                let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
+                let buffered = value
+                    .get("buffered_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let speakers = value
+                    .get("speakers")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "[]".into());
+                format!("voice_replay {status}; buffered_ms={buffered}; speakers={speakers}")
+            }
+            Err(error) => format!("voice_replay failed: {error}"),
         }
     }
 
@@ -180,6 +216,21 @@ Online: {}"#,
         );
 
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
+
+        // 直呼与技能同一 ACL；bridge 未就绪时由 EventRouter 处理
+        if self.config.voice_replay.enabled {
+            if let Some(command) = crate::skills::voice_replay::parse_direct_command(
+                msg_content,
+                &self.config.voice_replay.direct_commands,
+            ) {
+                let ack = self.run_voice_replay_direct(command, &groups, channel_group_id);
+                let _ = self
+                    .adapter
+                    .send_text_message(reply_mode, reply_target, &ack)
+                    .await;
+                return;
+            }
+        }
 
         // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
         match run_llm_turn(
