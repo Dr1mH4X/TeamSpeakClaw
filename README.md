@@ -39,7 +39,7 @@ TeamSpeakClaw 是一个基于 LLM (大语言模型) 的 TeamSpeak 智能助手�
     - **音乐控制**：支持三种外部音乐机器人后端：[TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin)、[TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)、[NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)。
     - **服务器管理**：支持踢出 (Kick)、戳一戳 (Poke)、移动用户等操作。
     - **信息查询**：获取在线用户列表/信息、服务器状态等。
-    - **语音回放 voice_replay**：回放录音窗内说话人语音（`!replay [N] [@Name]`）；需配置 `[voice_replay]` 与 ACL。
+    - **语音回放**：回放录音窗内说话人语音（`!replay [N] [@Name]`）；需配置录音窗与 ACL。
     - **etc.**
 - **📱 NapCat(QQ) 支持**：跨平台交互、灵活的触发机制、细粒度权限等
 - **🤖 广泛的模型支持**：兼容 OpenAI 接口格式，轻松接入 DeepSeek、Xiaomi Mimo 等多种大模型。
