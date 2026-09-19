@@ -31,13 +31,21 @@ use tsbot::voice::v1 as voicev1;
 use voicev1::voice_service_server::VoiceServiceServer;
 
 mod actor;
+pub mod audio_codec;
+pub mod audio_output;
 mod event;
+pub mod speaker_ring;
 pub mod speech;
 pub(crate) mod text_util;
 mod voice_service;
 
+use crate::skills::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
+use audio_output::{AudioBus, AudioOutput, PcmClipPayload};
+use speaker_ring::ReplayFilter;
+
 pub(crate) use self::event::{parse_server_groups, MainSubscriptions};
 pub use self::event::{TextMessageEvent, TextMessageTarget, TsAdapter, TsEvent};
+pub use self::speaker_ring::SpeakerRings;
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -88,11 +96,123 @@ impl VoiceBridgeState {
 }
 
 pub fn voice_features_enabled(config: &AppConfig) -> bool {
-    config.headless.stt.enabled || config.headless.tts.enabled || config.llm.omni_model
+    config.headless.stt.enabled
+        || config.headless.tts.enabled
+        || config.llm.omni_model
+        || config.voice_replay.enabled
+}
+
+/// bot 麦克风/扬声器开关：与 STT/TTS/omni 配置对齐
+pub struct VoiceMuteFlags {
+    pub input_muted: bool,
+    pub input_hardware_on: bool,
+    pub output_muted: bool,
+    pub output_hardware_on: bool,
+}
+
+pub fn voice_mute_flags(config: &AppConfig) -> VoiceMuteFlags {
+    let speaker_on = voice_features_enabled(config);
+    let mic_on = config.headless.tts.enabled;
+    VoiceMuteFlags {
+        input_muted: !mic_on,
+        input_hardware_on: mic_on,
+        output_muted: !speaker_on,
+        output_hardware_on: speaker_on,
+    }
 }
 
 pub fn should_route_text_through_bridge(voice_configured: bool, bridge_ready: bool) -> bool {
     voice_configured && bridge_ready
+}
+
+/// actor 旁路：录制入环钩子（bot/音乐 bot 在此过滤）；仅 voice_replay.enabled 时装配
+#[derive(Clone)]
+pub struct SpeakerRecordHook {
+    pub rings: Arc<SpeakerRings>,
+    pub bot_clid: u32,
+    pub musicbot_name: String,
+}
+
+/// headless 运行时音频：出站总线 + 录制环（window 来自 voice_replay.window_secs）
+pub struct HeadlessVoiceRuntime {
+    pub audio: AudioBus,
+    pub speaker_rings: Arc<SpeakerRings>,
+}
+
+/// 阶段 A 装配自检：写入路径 warmup + 录制窗快照日志，确保 API 在运行时可达
+async fn warm_audio_surface(output: &AudioOutput, rings: &SpeakerRings) -> Result<()> {
+    let handle = output
+        .enqueue_pcm_clip(PcmClipPayload {
+            samples: Vec::new(),
+            sample_rate: 48_000,
+            channels: 2,
+        })
+        .context("audio output enqueue warmup failed")?;
+    handle.cancel();
+    handle
+        .wait()
+        .await
+        .context("audio output warmup clip wait failed")?;
+
+    // 外部源入队 + wait 路径预热：非法 codec 由消费者跳过
+    output
+        .play_encoded_media(vec![0u8; 2], "warmup-probe")
+        .await
+        .context("audio output encoded warmup failed")?;
+    output
+        .play_encoded_media_wait(vec![0u8; 2], "warmup-probe-wait")
+        .await
+        .context("audio output encoded wait warmup failed")?;
+
+    let status = output.status();
+    if let Some(info) = &status.current {
+        info!(
+            source = ?info.source,
+            kind = ?info.kind,
+            started_at = ?info.started_at,
+            "audio output current job during warmup"
+        );
+    }
+    let _ = status
+        .current
+        .as_ref()
+        .map(|info| info.started_at.elapsed());
+    info!(
+        queued_jobs = status.queued_jobs,
+        last_error = ?status.last_error,
+        "audio output surface warmed"
+    );
+
+    let stats = rings.stats();
+    let snapshot = rings.snapshot(ReplayFilter::All, Some(1));
+    info!(
+        speakers = snapshot.speakers.len(),
+        buffered_ms = snapshot.buffered_ms,
+        sample_rate = snapshot.sample_rate,
+        channels = snapshot.channels,
+        samples = snapshot.samples.len(),
+        "speaker rings surface ready"
+    );
+    if let Some(first) = stats.first() {
+        let single = rings.snapshot(ReplayFilter::Speaker { clid: first.clid }, Some(1));
+        info!(
+            clid = first.clid,
+            name = %first.name,
+            active_ms = first.active_ms,
+            single_samples = single.samples.len(),
+            "speaker ring track"
+        );
+    }
+    match rings.resolve_name("") {
+        speaker_ring::NameResolve::Unique(clid) => {
+            info!(clid, "speaker name resolve unique");
+        }
+        speaker_ring::NameResolve::Ambiguous(names) => {
+            info!(candidates = names.len(), "speaker name resolve ambiguous");
+        }
+        speaker_ring::NameResolve::None => {}
+    }
+    Ok(())
 }
 
 struct ServiceRunningGuard {
@@ -153,8 +273,40 @@ pub async fn run(
     config: Arc<AppConfig>,
     shutdown: CancellationToken,
     bridge_state: VoiceBridgeState,
+    bot_clid: u32,
+    voice_runtime: HeadlessVoiceRuntime,
 ) -> Result<()> {
     let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
+
+    // 统一出站：消费者是 ts3_audio_tx 的唯一写端
+    let HeadlessVoiceRuntime {
+        audio,
+        speaker_rings,
+    } = voice_runtime;
+    let AudioBus {
+        output: audio_output,
+        consumer: audio_consumer,
+    } = audio;
+    let consumer_shutdown = shutdown.clone();
+    let consumer_task = tokio::spawn(async move {
+        audio_consumer.run(ts3_audio_tx).await;
+        let _ = consumer_shutdown;
+    });
+
+    warm_audio_surface(&audio_output, &speaker_rings).await?;
+    let record_hook = if config.voice_replay.enabled {
+        Some(SpeakerRecordHook {
+            rings: speaker_rings,
+            bot_clid,
+            musicbot_name: config
+                .music_backend
+                .as_ref()
+                .map(|mc| mc.musicbot_name.clone())
+                .unwrap_or_default(),
+        })
+    } else {
+        None
+    };
 
     // 控制事件（chat/log）与音频事件分离广播：音频洪峰不能挤掉聊天
     let (control_tx, _) = broadcast::channel::<voicev1::Event>(256);
@@ -170,10 +322,11 @@ pub async fn run(
         },
         shutdown.clone(),
         actor_bridge_state,
+        record_hook,
     ));
 
     let svc = voice_service::VoiceServiceImpl::new(
-        ts3_audio_tx,
+        audio_output.clone(),
         client,
         control_tx,
         audio_tx,
@@ -205,6 +358,7 @@ pub async fn run(
     let shutdown_requested = shutdown.is_cancelled();
     drop(service_guard);
     shutdown.cancel();
+    let _stopped_clips = audio_output.stop_clips();
 
     let other_result = match first_component {
         HeadlessComponent::Actor => {
@@ -218,6 +372,8 @@ pub async fn run(
                 .and_then(|result| result)
         }
     };
+    consumer_task.abort();
+    let _ = consumer_task.await;
     let first_result = component_result(first_result, first_component.name());
 
     if let Err(error) = first_result {
@@ -248,6 +404,13 @@ fn service_exit_signal(result: &Result<()>) -> Option<&'static str> {
     result.as_ref().err().map(|_| "headless service")
 }
 
+/// headless Runtime::start 入参（避免参数列表过长）
+pub struct HeadlessStartHandles {
+    pub ts_adapter: Arc<TsAdapter>,
+    pub bridge_state: VoiceBridgeState,
+    pub voice_audio: VoiceAudioHandles,
+}
+
 impl Runtime {
     pub async fn start(
         config: Arc<AppConfig>,
@@ -255,14 +418,18 @@ impl Runtime {
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
-        ts_adapter: Arc<TsAdapter>,
-        bridge_state: VoiceBridgeState,
+        handles: HeadlessStartHandles,
     ) -> Result<Self> {
+        let HeadlessStartHandles {
+            ts_adapter,
+            bridge_state,
+            voice_audio,
+        } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
             bridge_state.set_service_running(false);
             bridge_state.set_stream_ready(false);
-            info!("headless: voice disabled (stt/tts/omni not enabled), management-only mode");
+            info!("headless: voice disabled (stt/tts/omni/voice_replay not enabled), management-only mode");
             let (failed_tx, _) = watch::channel::<Option<&'static str>>(None);
             return Ok(Self {
                 shutdown: CancellationToken::new(),
@@ -278,10 +445,36 @@ impl Runtime {
         let shutdown = CancellationToken::new();
         let (failed_tx, _failed_rx) = watch::channel::<Option<&'static str>>(None);
 
+        // 出站/录制在 Runtime 装配：window 来自 voice_replay.window_secs；句柄供技能读取
+        let window_secs = config.voice_replay.window_secs;
+        let speaker_rings = Arc::new(SpeakerRings::new(Duration::from_secs(u64::from(
+            window_secs,
+        ))));
+        let audio_bus = AudioBus::new();
+        voice_audio.install(VoiceAudioRuntime {
+            audio_output: audio_bus.output.clone(),
+            speaker_rings: speaker_rings.clone(),
+            window_secs,
+            musicbot_name: config
+                .music_backend
+                .as_ref()
+                .map(|mc| mc.musicbot_name.clone())
+                .unwrap_or_default(),
+        });
+        let service_voice_runtime = HeadlessVoiceRuntime {
+            audio: AudioBus {
+                output: audio_bus.output.clone(),
+                consumer: audio_bus.consumer,
+            },
+            speaker_rings,
+        };
+        let router_audio_output = audio_bus.output.clone();
+
         let shutdown_for_service = shutdown.clone();
         let service_bridge_state = bridge_state.clone();
         let failed_tx_for_service = failed_tx.clone();
         let ts_client = ts_adapter.get_client().clone();
+        let bot_clid = ts_adapter.get_bot_clid();
         let config_for_service = config.clone();
         let service_handle = Some(tokio::spawn(async move {
             let result = run(
@@ -290,6 +483,8 @@ impl Runtime {
                 config_for_service,
                 shutdown_for_service.clone(),
                 service_bridge_state.clone(),
+                bot_clid,
+                service_voice_runtime,
             )
             .await;
             service_bridge_state.set_service_running(false);
@@ -310,6 +505,8 @@ impl Runtime {
         let bridge_ts_adapter = ts_adapter.clone();
         let shutdown_for_bridge = shutdown.clone();
         let bridge_state_for_router = bridge_state.clone();
+        let bridge_audio_output = router_audio_output.clone();
+        let bridge_voice_audio = voice_audio;
         let bridge_task = tokio::spawn(async move {
             let mut attempt = 1u32;
             let _ = bridge_state_for_router.take_connected_since_retry();
@@ -319,13 +516,17 @@ impl Runtime {
                     biased;
                     _ = shutdown_for_bridge.cancelled() => break,
                     result = crate::router::VoiceRouter::new(
-                        bridge_config.clone(),
-                        bridge_prompts.clone(),
-                        bridge_gate.clone(),
-                        bridge_llm.clone(),
-                        bridge_registry.clone(),
-                        bridge_ts_adapter.clone(),
-                        bridge_state_for_router.clone(),
+                        crate::router::VoiceRouterHandles {
+                            config: bridge_config.clone(),
+                            prompts: bridge_prompts.clone(),
+                            gate: bridge_gate.clone(),
+                            llm: bridge_llm.clone(),
+                            registry: bridge_registry.clone(),
+                            ts_adapter: bridge_ts_adapter.clone(),
+                            bridge_state: bridge_state_for_router.clone(),
+                            audio_output: bridge_audio_output.clone(),
+                            voice_audio: bridge_voice_audio.clone(),
+                        },
                     ).run(shutdown_for_bridge.clone()) => result,
                 };
                 bridge_state_for_router.set_stream_ready(false);
@@ -471,6 +672,39 @@ mod tests {
             service_exit_signal(&Err(anyhow::anyhow!("boom"))),
             Some("headless service")
         );
+    }
+
+    #[test]
+    fn voice_mute_flags_follow_stt_tts_omni() {
+        let mut config = AppConfig::default();
+        let flags = voice_mute_flags(&config);
+        assert!(flags.input_muted);
+        assert!(!flags.input_hardware_on);
+        assert!(flags.output_muted);
+        assert!(!flags.output_hardware_on);
+
+        config.headless.stt.enabled = true;
+        let flags = voice_mute_flags(&config);
+        assert!(flags.input_muted);
+        assert!(!flags.output_muted);
+        assert!(flags.output_hardware_on);
+
+        config.headless.tts.enabled = true;
+        let flags = voice_mute_flags(&config);
+        assert!(!flags.input_muted);
+        assert!(flags.input_hardware_on);
+        assert!(!flags.output_muted);
+    }
+
+    #[test]
+    fn voice_features_include_voice_replay_flag() {
+        let mut config = AppConfig::default();
+        assert!(!voice_features_enabled(&config));
+        config.voice_replay.enabled = true;
+        assert!(voice_features_enabled(&config));
+        let flags = voice_mute_flags(&config);
+        assert!(flags.output_hardware_on);
+        assert!(flags.input_muted);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::broadcast;
@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::tsbot::voice::v1 as voicev1;
+use super::SpeakerRecordHook;
 
 /// 客户端目录：clid -> nickname，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, String>>>;
@@ -19,6 +20,20 @@ const OUT_BUF_MAX: usize = 400;
 pub struct ActorEventChannels {
     pub control_tx: broadcast::Sender<voicev1::Event>,
     pub audio_tx: broadcast::Sender<voicev1::Event>,
+}
+
+fn should_record_speaker(hook: &SpeakerRecordHook, clid: u32, name: &str) -> bool {
+    if hook.bot_clid != 0 && clid == hook.bot_clid {
+        return false;
+    }
+    if !hook.musicbot_name.is_empty()
+        && name
+            .to_ascii_lowercase()
+            .contains(&hook.musicbot_name.to_ascii_lowercase())
+    {
+        return false;
+    }
+    true
 }
 
 async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient_rs::Client) {
@@ -40,6 +55,7 @@ pub async fn ts3_actor(
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
     bridge_state: super::VoiceBridgeState,
+    record_hook: Option<SpeakerRecordHook>,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
 
@@ -100,7 +116,7 @@ pub async fn ts3_actor(
         }));
     }
 
-    // voice data → AudioFrameEvent
+    // voice data → AudioFrameEvent + SpeakerRings 旁路录制
     let audio_tx_v = channels.audio_tx.clone();
     let voice_directory = client_directory.clone();
     client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
@@ -118,6 +134,19 @@ pub async fn ts3_actor(
                 .get(&vd.client_id)
                 .cloned()
                 .unwrap_or_default();
+            if let Some(hook) = record_hook.as_ref() {
+                if matches!(vd.codec, 4 | 5)
+                    && should_record_speaker(hook, from_client_id, &from_client_name)
+                {
+                    let _ = hook.rings.push_opus_frame(
+                        from_client_id,
+                        &from_client_name,
+                        vd.codec,
+                        &vd.data,
+                        Instant::now(),
+                    );
+                }
+            }
             let _ = audio_tx_v.send(voicev1::Event {
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
@@ -160,4 +189,34 @@ pub async fn ts3_actor(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::headless::SpeakerRings;
+    use std::time::Duration;
+
+    fn hook(bot_clid: u32, musicbot_name: &str) -> SpeakerRecordHook {
+        SpeakerRecordHook {
+            rings: Arc::new(SpeakerRings::new(Duration::from_secs(30))),
+            bot_clid,
+            musicbot_name: musicbot_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn record_hook_skips_bot_and_musicbot() {
+        let hook = hook(7, "TS3AudioBot");
+        assert!(!should_record_speaker(&hook, 7, "claw"));
+        assert!(!should_record_speaker(&hook, 3, "ts3audiobot-music"));
+        assert!(should_record_speaker(&hook, 3, "alice"));
+        assert!(should_record_speaker(&hook, 0, "alice"));
+    }
+
+    #[test]
+    fn record_hook_allows_when_bot_clid_unknown() {
+        let hook = hook(0, "");
+        assert!(should_record_speaker(&hook, 7, "anyone"));
+    }
 }

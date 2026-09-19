@@ -68,6 +68,8 @@ The `[music_backend]` section controls which backend is used for music functiona
 | `tsmusicbot` | Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. |
 | `tsbot_backend` | Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires setting `base_url`. |
 
+`musicbot_name`: the music bot’s TeamSpeak nickname (substring match). That bot’s voice is **not** used for STT and is **not recorded** for voice replay; targeting it with `!replay` returns an explicit not-recorded message.
+
 ### Reply Mode
 
 `default_reply_mode` only takes effect when the trigger message comes from a channel or server broadcast:
@@ -78,6 +80,24 @@ The `[music_backend]` section controls which backend is used for music functiona
 
 Messages triggered via private message are always replied to via private message.
 Replies triggered from voice STT follow this mode as well.
+
+### Voice Replay (voice_replay)
+
+The `[voice_replay]` section controls TeamSpeak recording-window replay. Defaults to off; **restart the process** after changing config (no hot reload).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable recording replay, skill, and direct commands |
+| `window_secs` | integer | `30` | Recording window in seconds; valid range **1–120**; `seconds` above the window is clamped |
+| `direct_commands` | array | `["!replay", "!回放"]` | Channel direct-command prefixes |
+
+- Skill `voice_replay` and direct commands (`!replay [N] [@Name]`) share the **same ACL**.
+- **Default** `!replay`: mix-replay speakers **already recorded** over `window_secs` (default 30s); the bot itself is excluded. Music bots: see `musicbot_name` above.
+- **Empty window**: if nobody is available to replay, the bot says so and does not play blank audio.
+- Nicknames accept `<@clid|Name>` / `@clid|Name` / `@Name` / bare nick.
+- Per-speaker replay is more sensitive than channel mix; grant `voice_replay` by group in `acl.toml`.
+- Replay works with only this switch on (listen-only); voice NL trigger still needs STT.
+- Syntax and usage: [usage.md](usage.md).
 
 ## 2. Permission Configuration (acl.toml)
 
@@ -99,6 +119,7 @@ Controls which user groups can use which features. **All matching rules' allowed
 | `get_client_info` | Get detailed user info |
 | `music_control` | Music control |
 | `web_search` | Search the web for current information |
+| `voice_replay` | Voice window replay: `replay` and `!replay [N] [@Name]`; per-speaker is more sensitive |
 
 ### NapCat and Cross-platform Behavior Notes
 

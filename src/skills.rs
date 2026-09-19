@@ -2,6 +2,8 @@ pub mod communication;
 pub mod information;
 pub mod moderation;
 pub mod music;
+pub mod voice_audio;
+pub mod voice_replay;
 pub mod web_search;
 
 mod http;
@@ -18,6 +20,8 @@ use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+pub use voice_audio::VoiceAudioHandles;
 
 pub(crate) fn required_u32(args: &Value, name: &str) -> Result<u32> {
     let value = args
@@ -144,6 +148,7 @@ impl UnifiedExecutionContext {
 
 pub struct SkillContext {
     pub config: Arc<AppConfig>,
+    pub voice_audio: VoiceAudioHandles,
 }
 
 impl SkillContext {
@@ -183,8 +188,11 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn with_defaults(config: Arc<AppConfig>) -> Self {
-        let ctx = SkillContext { config };
+    pub fn with_defaults(config: Arc<AppConfig>, voice_audio: VoiceAudioHandles) -> Self {
+        let ctx = SkillContext {
+            config,
+            voice_audio,
+        };
         let reg = Self::default();
         for (name, factory) in DEFAULT_SKILLS.iter() {
             debug!(skill = name, "constructing");
@@ -303,6 +311,12 @@ static DEFAULT_SKILLS: &[(&str, SkillFactory)] = &[
     }),
     ("music_control", |ctx| {
         Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Skill>
+    }),
+    ("voice_replay", |ctx| {
+        Box::new(voice_replay::VoiceReplay::new(
+            ctx.config.clone(),
+            ctx.voice_audio.clone(),
+        )) as Box<dyn Skill>
     }),
 ];
 

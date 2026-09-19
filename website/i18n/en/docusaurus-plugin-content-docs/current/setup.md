@@ -21,8 +21,18 @@ TeamSpeakClaw is a standalone binary application and does not require a complex 
 
 The extracted archive contains a `config/` directory with the following configuration files:
 
-- `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service)
+- `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service, voice_replay)
 - `acl.toml` — Permission control rules
+- `prompts.toml` — System prompt and error messages
+
+Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
+
+**Quick configuration checklist**:
+- `[headless]` — TeamSpeak server address, port, password, etc.
+- `[llm]` — API Key, Base URL, model name
+- `[headless.stt]` / `[headless.tts]` — Enable if you need voice services (optional)
+- `[napcat]` — Enable and set WebSocket URL for QQ bot (optional)
+- `[voice_replay]` — Leave `enabled = false` unless you need replay; if enabled, grant `voice_replay` in `acl.toml` by group (optional; restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
 - `prompts.toml` — System prompts and error messages
 
 Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
@@ -31,6 +41,7 @@ Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak se
 - `[headless]` — Fill in TeamSpeak server address (`server_address`), port (`server_port`), password, etc.
 - `[llm]` — Fill in API Key, Base URL, and model name
 - `[headless.stt]` / `[headless.tts]` — Enable and configure if you need voice service (optional)
+- `[voice_replay]` — Keep `enabled = false` unless you need replay; grant `voice_replay` in ACL if enabled
 - `[napcat]` — Enable and configure WebSocket URL if you need QQ bot (optional)
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).

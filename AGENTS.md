@@ -10,7 +10,7 @@ src/
 ├── cli.rs                   # --log-level
 ├── log.rs                   # 按日轮转文件日志 + tracing 初始化
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
-├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts）+ .instructions.md
+├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）+ .instructions.md
 ├── router.rs                # 事件路由；组合路由器循环入口
 ├── router/                  # 子模块（ts_router, nc_router, voice_router, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
@@ -34,7 +34,7 @@ docs/
 ├── AGENTS.md                # 文档标准：分层归属、写作规则、字数预算
 └── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
 examples/
-├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml）
+├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml；Release 打包含此三文件）
 └── docker-compose.yml       # Docker Compose 示例
 website/                     # Docusaurus 用户文档（排除在 Rust CI 路径外）
 ```
