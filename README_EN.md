@@ -37,6 +37,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
   - **Music Control**: Supports three external music bot backends:[TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin),[TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) or [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot).
   - **Server Administration**: Support for kick, poke, move user, etc.
   - **Information Query**: Get online user list/info, server status, etc.
+  - **Voice Replay (`voice_replay`)**: Replay speakers in the recording window (`!replay [N] [@Name]`); requires `[voice_replay]` config and ACL.
   - **etc.**
 - **📱 NapCat (QQ) Support**: Cross-platform interaction, flexible trigger mechanisms, fine-grained permissions, etc.
 - **🤖 Broad Model Support**: Compatible with OpenAI API format, easily integrates with DeepSeek, Xiaomi Mimo, and various other LLMs.
