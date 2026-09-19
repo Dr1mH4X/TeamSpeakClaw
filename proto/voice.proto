@@ -51,9 +51,6 @@ message ChatEvent {
   string invoker_unique_id = 2;
   string invoker_name = 3;
   string message = 4;
-  bool should_trigger_llm = 7;
-  TargetMode reply_target_mode = 9;
-  uint32 reply_target_client_id = 10;
   uint32 invoker_client_id = 11;
 }
 

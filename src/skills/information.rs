@@ -1,10 +1,10 @@
 use crate::skills::{
-    required_u32, resolve_ts_client, ExecutionContext, Platform, Skill, UnifiedExecutionContext,
+    required_u32, resolve_ts_client, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct GetClientInfo;
 
@@ -25,10 +25,25 @@ impl Skill for GetClientInfo {
             "required": ["clid"]
         })
     }
-    async fn execute(&self, args: Value, ctx: &ExecutionContext) -> Result<Value> {
+
+    async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
         let clid = required_u32(&args, "clid")?;
 
-        let mut info = ctx.adapter.get_client_info(clid).await?;
+        if ctx.platform == Platform::NapCat {
+            let (client, groups) = resolve_ts_client(ctx, clid).await?;
+            let reply = format!(
+                "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
+                client.nickname, client.id, groups, client.channel_id
+            );
+            return Ok(json!({
+                "status": "ok",
+                "message": reply,
+                "platform": "teamspeak"
+            }));
+        }
+
+        let ts_adapter = unified_ts_adapter(ctx)?;
+        let mut info = ts_adapter.get_client_info(clid).await?;
 
         debug!(?info, clid, "GetClientInfo raw response");
 
@@ -90,34 +105,5 @@ impl Skill for GetClientInfo {
         }
 
         Ok(json!({"status": "ok", "client_info": info}))
-    }
-
-    async fn execute_unified(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value> {
-        info!(
-            "GetClientInfo: unified execution, platform={:?}",
-            ctx.platform
-        );
-
-        match ctx.platform {
-            Platform::TeamSpeak => {
-                let ts_ctx = ctx.to_ts_ctx()?;
-                return self.execute(args.clone(), &ts_ctx).await;
-            }
-            Platform::NapCat => {
-                let clid = required_u32(&args, "clid")?;
-
-                let (client, groups) = resolve_ts_client(ctx, clid).await?;
-                let reply = format!(
-                    "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
-                    client.nickname, client.id, groups, client.channel_id
-                );
-
-                Ok(json!({
-                    "status": "ok",
-                    "message": reply,
-                    "platform": "teamspeak"
-                }))
-            }
-        }
     }
 }

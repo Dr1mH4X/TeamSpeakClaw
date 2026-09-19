@@ -5,10 +5,10 @@ mod unified;
 mod voice_router;
 
 pub use nc_router::NcRouter;
-pub use trigger::strip_trigger_prefix;
+pub use trigger::{resolve_ts_inbound, strip_trigger_prefix};
 pub use ts_router::EventRouter;
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
-pub use voice_router::VoiceRouter;
+pub use voice_router::{VoiceRouter, VoiceRouterHandles};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,7 +26,7 @@ use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::tool_loop::{ToolLoopError, ToolLoopResult};
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::permission::PermissionGate;
-use crate::skills::{SkillRegistry, UnifiedExecutionContext};
+use crate::skills::{SkillRegistry, UnifiedExecutionContext, VoiceAudioHandles};
 
 /// LLM 后端不可用时的固定回复文案（ts/nc/voice 四调用点共用）
 pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
@@ -88,6 +88,7 @@ pub(crate) struct RouterContext {
     pub(crate) gate: Arc<PermissionGate>,
     pub(crate) llm: Arc<LlmEngine>,
     pub(crate) registry: Arc<SkillRegistry>,
+    pub(crate) voice_audio: VoiceAudioHandles,
 }
 
 impl RouterContext {
@@ -97,6 +98,7 @@ impl RouterContext {
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
+        voice_audio: VoiceAudioHandles,
     ) -> Self {
         Self {
             config,
@@ -104,6 +106,7 @@ impl RouterContext {
             gate,
             llm,
             registry,
+            voice_audio,
         }
     }
 }
@@ -121,6 +124,7 @@ pub(crate) async fn run_routers(
         gate,
         llm,
         registry,
+        voice_audio: _,
     } = context;
     let napcat_enabled = nc_adapter.is_some();
     if !napcat_enabled {

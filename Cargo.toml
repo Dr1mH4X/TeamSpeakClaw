@@ -31,9 +31,6 @@ dashmap = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry", "time", "local-time"] }
 tracing-appender = "0.2"
-slog = "2"
-slog-scope = "4.4"
-tracing-slog = "0.4"
 
 thiserror = "1"
 anyhow = "1"
@@ -49,6 +46,9 @@ base64 = "0.22"
 prost = "0.12"
 tonic = "0.11"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [build-dependencies]
 tonic-build = "0.11"

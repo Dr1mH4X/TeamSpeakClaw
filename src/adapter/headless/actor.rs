@@ -1,16 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::AppConfig;
-
-use super::text_util::split_message;
 use super::tsbot::voice::v1 as voicev1;
+use super::SpeakerRecordHook;
 
 /// 客户端目录：clid -> nickname，随 listClients 周期刷新
 type ClientDirectory = Arc<Mutex<HashMap<i32, String>>>;
@@ -22,6 +20,20 @@ const OUT_BUF_MAX: usize = 400;
 pub struct ActorEventChannels {
     pub control_tx: broadcast::Sender<voicev1::Event>,
     pub audio_tx: broadcast::Sender<voicev1::Event>,
+}
+
+fn should_record_speaker(hook: &SpeakerRecordHook, clid: u32, name: &str) -> bool {
+    if hook.bot_clid != 0 && clid == hook.bot_clid {
+        return false;
+    }
+    if !hook.musicbot_name.is_empty()
+        && name
+            .to_ascii_lowercase()
+            .contains(&hook.musicbot_name.to_ascii_lowercase())
+    {
+        return false;
+    }
+    true
 }
 
 async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient_rs::Client) {
@@ -39,22 +51,18 @@ async fn refresh_client_directory(directory: &ClientDirectory, client: &tsclient
 
 pub async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
-    mut audio_rx: mpsc::Receiver<(Vec<u8>, i32)>,
-    mut notice_rx: mpsc::Receiver<(i32, u32, String)>,
+    mut audio_rx: tokio::sync::mpsc::Receiver<(Vec<u8>, i32)>,
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
-    config: Arc<AppConfig>,
     bridge_state: super::VoiceBridgeState,
+    record_hook: Option<SpeakerRecordHook>,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(400);
 
     let mut send_tick = tokio::time::interval(Duration::from_millis(20));
 
-    // 先注册 text handler，避免丢消息
+    // 先注册 text handler，避免丢消息；只搬运原始文本，触发策略由 router 层决定
     let control_tx_t = channels.control_tx.clone();
-    let respond_private = config.bot.respond_to_private;
-    let reply_mode = config.bot.default_reply_mode.clone();
-    let bot_trigger_prefixes = config.bot.trigger_prefixes.clone();
     client.on_text_message(Arc::new(move |event: tsclient_rs::Event| {
         if let tsclient_rs::Event::TextMessage(ref msg) = event {
             let target_mode = match msg.target_mode {
@@ -71,31 +79,12 @@ pub async fn ts3_actor(
                 );
                 return;
             };
-            let raw_content = msg.message.trim().to_string();
-            let (msg_content, should_trigger_llm) = if target_mode == 1 && respond_private {
-                (raw_content, true)
-            } else {
-                match crate::router::strip_trigger_prefix(&raw_content, &bot_trigger_prefixes) {
-                    Some(stripped) => (stripped.to_string(), true),
-                    None => (raw_content, false),
-                }
-            };
-            let (reply_target_mode, reply_target_client_id) = if target_mode == 1 {
-                (1, invoker_client_id)
-            } else {
-                let mode = crate::config::reply_target_mode(reply_mode.as_str());
-                let target = if mode == 1 { invoker_client_id } else { 0 };
-                (mode, target)
-            };
             let _ = control_tx_t.send(voicev1::Event {
                 payload: Some(voicev1::event::Payload::Chat(voicev1::ChatEvent {
                     target_mode,
                     invoker_unique_id: msg.invoker_uid.clone(),
                     invoker_name: msg.invoker_name.clone(),
-                    message: msg_content,
-                    should_trigger_llm,
-                    reply_target_mode,
-                    reply_target_client_id,
+                    message: msg.message.clone(),
                     invoker_client_id,
                 })),
             });
@@ -127,7 +116,7 @@ pub async fn ts3_actor(
         }));
     }
 
-    // voice data → AudioFrameEvent
+    // voice data → AudioFrameEvent + SpeakerRings 旁路录制
     let audio_tx_v = channels.audio_tx.clone();
     let voice_directory = client_directory.clone();
     client.on_voice_data(Arc::new(move |event: tsclient_rs::Event| {
@@ -145,6 +134,19 @@ pub async fn ts3_actor(
                 .get(&vd.client_id)
                 .cloned()
                 .unwrap_or_default();
+            if let Some(hook) = record_hook.as_ref() {
+                if matches!(vd.codec, 4 | 5)
+                    && should_record_speaker(hook, from_client_id, &from_client_name)
+                {
+                    let _ = hook.rings.push_opus_frame(
+                        from_client_id,
+                        &from_client_name,
+                        vd.codec,
+                        &vd.data,
+                        Instant::now(),
+                    );
+                }
+            }
             let _ = audio_tx_v.send(voicev1::Event {
                 payload: Some(voicev1::event::Payload::Audio(voicev1::AudioFrameEvent {
                     from_client_id,
@@ -178,25 +180,6 @@ pub async fn ts3_actor(
                 }
             }
 
-            msg = notice_rx.recv() => {
-                if let Some((mode, target, text)) = msg {
-                    let target_mode = if mode == 1 || mode == 2 || mode == 3 { mode } else { 2 };
-                    let target = if target_mode == 1 { target } else { 0 };
-                    for chunk in split_message(&text, super::text_util::MAX_MESSAGE_BYTES) {
-                        if let Err(e) = tsclient_rs::sendTextMessage(
-                            &client,
-                            target_mode,
-                            target as u64,
-                            &chunk,
-                        ).await {
-                            warn!("sendTextMessage failed: {e}");
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-
             _ = send_tick.tick() => {
                 if let Some((data, codec)) = out_buf.pop_front() {
                     client.send_voice(data, codec);
@@ -206,4 +189,34 @@ pub async fn ts3_actor(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::headless::SpeakerRings;
+    use std::time::Duration;
+
+    fn hook(bot_clid: u32, musicbot_name: &str) -> SpeakerRecordHook {
+        SpeakerRecordHook {
+            rings: Arc::new(SpeakerRings::new(Duration::from_secs(30))),
+            bot_clid,
+            musicbot_name: musicbot_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn record_hook_skips_bot_and_musicbot() {
+        let hook = hook(7, "TS3AudioBot");
+        assert!(!should_record_speaker(&hook, 7, "claw"));
+        assert!(!should_record_speaker(&hook, 3, "ts3audiobot-music"));
+        assert!(should_record_speaker(&hook, 3, "alice"));
+        assert!(should_record_speaker(&hook, 0, "alice"));
+    }
+
+    #[test]
+    fn record_hook_allows_when_bot_clid_unknown() {
+        let hook = hook(0, "");
+        assert!(should_record_speaker(&hook, 7, "anyone"));
+    }
 }

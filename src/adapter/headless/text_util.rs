@@ -1,6 +1,21 @@
 /// TeamSpeak ServerQuery 单行消息最大字节数限制。
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 
+/// 按分片上限发送文本消息；所有发送路径共用。
+pub async fn send_text_message(
+    client: &tsclient_rs::Client,
+    target_mode: u8,
+    target: u32,
+    msg: &str,
+) -> anyhow::Result<()> {
+    for chunk in split_message(msg, MAX_MESSAGE_BYTES) {
+        tsclient_rs::sendTextMessage(client, target_mode as i32, target as u64, &chunk)
+            .await
+            .map_err(|e| anyhow::anyhow!("sendTextMessage failed: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 按 UTF-8 字节长度分片，每片不超过 `max_bytes`。
 /// 若单个字符超过 `max_bytes`，该字符独自成片（不截断字符）。
 /// 优先在空白符处分片，回退到字符边界截断。

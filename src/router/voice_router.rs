@@ -2,15 +2,14 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
+use crate::adapter::headless::audio_output::{AudioOutput, TtsSession};
 use crate::adapter::headless::speech::{
     detect_audio_format, is_speakable, pcm16_mono_to_wav_bytes, preprocess_stt_text,
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
@@ -25,8 +24,9 @@ use crate::adapter::reconnect::{
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
-use crate::router::{run_llm_turn, LLM_ERROR_REPLY};
-use crate::skills::{ExecutionContext, SkillRegistry, UnifiedExecutionContext};
+use crate::router::{resolve_ts_inbound, run_llm_turn, LLM_ERROR_REPLY};
+
+use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -43,50 +43,40 @@ struct CallerContext {
     reply_target_client_id: u32,
 }
 
-#[derive(Default)]
-struct SessionLocks {
-    locks: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
-}
-
-impl SessionLocks {
-    fn for_uid(&self, uid: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.locks.lock().expect("session lock map poisoned");
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(uid).and_then(Weak::upgrade) {
-            return lock;
-        }
-
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(uid.to_string(), Arc::downgrade(&lock));
-        lock
-    }
-}
-
+/// finish_reason 产出端：`src/llm/provider.rs` 解析 SSE `choice.finish_reason`
+/// 非空时发出 `LlmStreamEvent::Done { finish_reason, tool_calls }`。
+/// tool 环校验（`src/llm/tool_loop.rs`）：有 tool 调用时 finish_reason 必须为字面量
+/// `"tool_calls"`。
+///
+/// 本函数恒返回 true：任意 finish_reason（含 `"tool_calls"`）都先 finish 当前 TTS 会话，
+/// 再执行 tool / 最终回复。保留函数作为文档锚点与测试入口，防止改回旧语义
+/// （旧：`finish_reason == "tool_calls"` 时不关会话）。
 fn should_close_tts_turn(finish_reason: &str) -> bool {
-    finish_reason != "tool_calls"
+    let is_tool_calls = finish_reason == "tool_calls";
+    let _ = is_tool_calls;
+    true
 }
 
-/// 每轮 TTS 运行时：持有合成与上传任务，正常结束 join，取消时 abort
-/// 句段发送端共享句柄：None 表示该轮已关闭
+/// 每轮 TTS 运行时：句段通道 + AudioOutput 会话；finish 关句段并让 synth 收尾会话
 type TtsSentenceSender = Arc<std::sync::Mutex<Option<mpsc::Sender<(usize, String)>>>>;
+type SharedTtsSession = Arc<tokio::sync::Mutex<Option<TtsSession>>>;
 
 struct TtsTurnRuntime {
     callbacks: StreamCallbacks,
     shared_tx: TtsSentenceSender,
+    shared_session: SharedTtsSession,
     synth_task: tokio::task::JoinHandle<()>,
-    upload_task: tokio::task::JoinHandle<()>,
     trace_id: String,
 }
 
 impl TtsTurnRuntime {
-    /// TTS 收尾超时：上游停滞（如 TS 发送背压）时防止 finish 无限挂起
     const TTS_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn callbacks(&self) -> Option<&StreamCallbacks> {
         Some(&self.callbacks)
     }
 
-    /// 正常结束：关闭句段通道使合成任务发 EOS 后退出，再 join 上传任务
+    /// 关闭句段通道；synth 冲刷后 finish 会话（接收语义，不等待播完）
     async fn finish(self) {
         *self.shared_tx.lock().expect("tts tx poisoned") = None;
         match tokio::time::timeout(Self::TTS_TEARDOWN_TIMEOUT, self.synth_task).await {
@@ -103,33 +93,20 @@ impl TtsTurnRuntime {
                     trace_id = %self.trace_id,
                     "tts synth task teardown timed out"
                 );
-                return;
-            }
-        }
-        match tokio::time::timeout(Self::TTS_TEARDOWN_TIMEOUT, self.upload_task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                error!(
-                    trace_id = %self.trace_id,
-                    error = %error,
-                    "tts upload task failed"
-                );
-            }
-            Err(_) => {
-                error!(
-                    trace_id = %self.trace_id,
-                    "tts upload task teardown timed out"
-                );
+                if let Some(session) = self.shared_session.lock().await.take() {
+                    drop(session);
+                }
             }
         }
     }
 
-    /// 取消：abort 两个任务并收割，不产生悬挂句柄
+    /// 取消：abort 合成任务并 drop 未 finish 的会话（消费者 abort 该 job）
     async fn abort(self) {
         self.synth_task.abort();
-        self.upload_task.abort();
         let _ = self.synth_task.await;
-        let _ = self.upload_task.await;
+        if let Some(session) = self.shared_session.lock().await.take() {
+            drop(session);
+        }
     }
 }
 
@@ -158,10 +135,25 @@ pub struct VoiceRouter {
     registry: Arc<SkillRegistry>,
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
-    session_locks: SessionLocks,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
     bridge_state: VoiceBridgeState,
-    tts_lock: Mutex<()>,
+    /// 统一出站：TTS/clip/外部流 FIFO；并发由 TurnCoordinator + 本层队列承担
+    audio_output: AudioOutput,
+    /// 直呼/技能共享的录制与出站句柄
+    voice_audio: crate::skills::VoiceAudioHandles,
+}
+
+/// VoiceRouter 装配句柄（避免构造参数列表过长）
+pub struct VoiceRouterHandles {
+    pub config: Arc<AppConfig>,
+    pub prompts: Arc<PromptsConfig>,
+    pub gate: Arc<PermissionGate>,
+    pub llm: Arc<LlmEngine>,
+    pub registry: Arc<SkillRegistry>,
+    pub ts_adapter: Arc<TsAdapter>,
+    pub bridge_state: VoiceBridgeState,
+    pub audio_output: AudioOutput,
+    pub voice_audio: crate::skills::VoiceAudioHandles,
 }
 
 impl VoiceRouter {
@@ -169,15 +161,18 @@ impl VoiceRouter {
     const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
     const STREAM_TTS_MAX_CHARS: usize = 28;
 
-    pub fn new(
-        config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
-        gate: Arc<PermissionGate>,
-        llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
-        ts_adapter: Arc<TsAdapter>,
-        bridge_state: VoiceBridgeState,
-    ) -> Self {
+    pub fn new(handles: VoiceRouterHandles) -> Self {
+        let VoiceRouterHandles {
+            config,
+            prompts,
+            gate,
+            llm,
+            registry,
+            ts_adapter,
+            bridge_state,
+            audio_output,
+            voice_audio,
+        } = handles;
         let speech_provider =
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
                 .ok()
@@ -185,7 +180,6 @@ impl VoiceRouter {
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         Self {
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
-            session_locks: SessionLocks::default(),
             config,
             prompts,
             gate,
@@ -194,7 +188,8 @@ impl VoiceRouter {
             ts_adapter,
             speech_provider,
             bridge_state,
-            tts_lock: Mutex::new(()),
+            audio_output,
+            voice_audio,
         }
     }
 
@@ -376,7 +371,12 @@ impl VoiceRouter {
         result
     }
 
-    async fn resolve_caller_from_chat(&self, chat: &voicev1::ChatEvent) -> Result<CallerContext> {
+    async fn resolve_caller_from_chat(
+        &self,
+        chat: &voicev1::ChatEvent,
+        reply_target_mode: i32,
+        reply_target_client_id: u32,
+    ) -> Result<CallerContext> {
         let caller_uid = if chat.invoker_unique_id.is_empty() {
             format!("clid:{}", chat.invoker_client_id)
         } else {
@@ -418,8 +418,8 @@ impl VoiceRouter {
             groups,
             channel_group_id,
             channel_id: caller.channel_id,
-            reply_target_mode: chat.reply_target_mode,
-            reply_target_client_id: chat.reply_target_client_id,
+            reply_target_mode,
+            reply_target_client_id,
         })
     }
 
@@ -509,19 +509,100 @@ impl VoiceRouter {
         client: &mut VoiceServiceClient<Channel>,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
-        if !chat.should_trigger_llm {
+        let Some(decision) = resolve_ts_inbound(
+            &chat.message,
+            chat.target_mode as u8,
+            chat.invoker_client_id,
+            &self.config.bot,
+        ) else {
+            return Ok(());
+        };
+        if !decision.should_trigger_llm {
             return Ok(());
         }
-        let ctx = self.resolve_caller_from_chat(&chat).await?;
+        let ctx = self
+            .resolve_caller_from_chat(
+                &chat,
+                i32::from(decision.reply_target_mode),
+                decision.reply_target,
+            )
+            .await?;
         if self.should_ignore_chat(&chat, ctx.caller_id) {
             return Ok(());
         }
-        let Some(clean_text) = preprocess_text_message(&chat.message) else {
+        let Some(clean_text) = preprocess_text_message(&decision.text) else {
             return Ok(());
         };
-        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
-        let _session_guard = session_lock.lock().await;
+        if self
+            .try_handle_direct_replay(client, &ctx, &clean_text)
+            .await?
+        {
+            return Ok(());
+        }
         self.handle_user_input(client, ctx, clean_text).await
+    }
+
+    /// 直呼：与技能同一 ACL（voice_replay）；成功处理返回 true
+    async fn try_handle_direct_replay(
+        &self,
+        client: &mut VoiceServiceClient<Channel>,
+        ctx: &CallerContext,
+        text: &str,
+    ) -> Result<bool> {
+        if !self.config.voice_replay.enabled {
+            return Ok(false);
+        }
+        let Some(command) = crate::skills::voice_replay::parse_direct_command(
+            text,
+            &self.config.voice_replay.direct_commands,
+        ) else {
+            return Ok(false);
+        };
+        if !crate::skills::voice_replay::direct_command_allowed(
+            &self.gate,
+            &ctx.groups,
+            ctx.channel_group_id,
+        ) {
+            self.send_reply(client, ctx, "voice_replay denied by ACL")
+                .await?;
+            return Ok(true);
+        }
+        let Some(runtime) = self.voice_audio.get() else {
+            self.send_reply(client, ctx, "voice replay runtime not ready")
+                .await?;
+            return Ok(true);
+        };
+        match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
+            Ok(value) => {
+                let msg = match value.get("status").and_then(|s| s.as_str()) {
+                    Some("empty") => value
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("no speakers in the recording window")
+                        .to_string(),
+                    Some(status) => {
+                        let speakers = value
+                            .get("speakers")
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "[]".into());
+                        let buffered = value
+                            .get("buffered_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        format!(
+                            "voice_replay {status}; buffered_ms={buffered}; speakers={speakers}"
+                        )
+                    }
+                    None => "voice_replay ok".to_string(),
+                };
+                self.send_reply(client, ctx, &msg).await?;
+            }
+            Err(error) => {
+                self.send_reply(client, ctx, &format!("voice_replay failed: {error}"))
+                    .await?;
+            }
+        }
+        Ok(true)
     }
 
     async fn process_audio_frame(
@@ -555,8 +636,6 @@ impl VoiceRouter {
         if self.config.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
         }
-        let session_lock = self.session_locks.for_uid(&ctx.caller_uid);
-        let _session_guard = session_lock.lock().await;
 
         if self.config.llm.omni_model {
             return self.handle_omni_audio_chunk(client, ctx, chunk).await;
@@ -590,15 +669,17 @@ impl VoiceRouter {
         let audio_base64 = BASE64.encode(&wav_bytes);
         let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
 
-        // TTS 是单输出通道：一次只允许一个带语音输出的 LLM 轮次，避免多个 TTS 流交错混音
-        let _tts_guard = if self.is_tts_effectively_enabled() {
-            Some(self.tts_lock.lock().await)
-        } else {
-            None
-        };
-
+        // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
+        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+            warn!(
+                caller_uid = %ctx.caller_uid,
+                "Voice LLM turn queue full; dropping audio chunk"
+            );
+            return Ok(());
+        };
+        let _session = self.llm.acquire_turn_session(&session_source).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
         } else {
@@ -616,17 +697,18 @@ impl VoiceRouter {
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             || {
-                let exec_ctx = ExecutionContext {
-                    adapter: self.ts_adapter.clone(),
-                    caller_id: ctx.caller_id,
-                    caller_name: ctx.caller_name.clone(),
-                    caller_groups: ctx.groups.clone(),
-                    caller_channel_group_id: ctx.channel_group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_ts(&exec_ctx)
-                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+                UnifiedExecutionContext::for_ts(
+                    TsCaller {
+                        adapter: self.ts_adapter.clone(),
+                        caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
+                        caller_groups: ctx.groups.clone(),
+                        caller_channel_group_id: ctx.channel_group_id,
+                        nc_adapter: None,
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await
@@ -670,18 +752,21 @@ impl VoiceRouter {
             message_chars = user_msg.chars().count(),
             "Voice user message received"
         );
-        // TTS 是单输出通道：一次只允许一个带语音输出的 LLM 轮次，避免多个 TTS 流交错混音
-        let _tts_guard = if self.is_tts_effectively_enabled() {
-            Some(self.tts_lock.lock().await)
-        } else {
-            None
-        };
+        // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
         if let Err(error) = self.llm.check_user_text_bounds(&user_msg) {
             warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
             return Ok(());
         }
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
+        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+            warn!(
+                caller_uid = %ctx.caller_uid,
+                "Voice LLM turn queue full; dropping message"
+            );
+            return Ok(());
+        };
+        let _session = self.llm.acquire_turn_session(&session_source).await;
 
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks().await?)
@@ -696,17 +781,18 @@ impl VoiceRouter {
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             || {
-                let exec_ctx = ExecutionContext {
-                    adapter: self.ts_adapter.clone(),
-                    caller_id: ctx.caller_id,
-                    caller_name: ctx.caller_name.clone(),
-                    caller_groups: ctx.groups.clone(),
-                    caller_channel_group_id: ctx.channel_group_id,
-                    gate: self.gate.clone(),
-                    config: self.config.clone(),
-                };
-                UnifiedExecutionContext::from_ts(&exec_ctx)
-                    .with_cross_adapters(Some(self.ts_adapter.clone()), None)
+                UnifiedExecutionContext::for_ts(
+                    TsCaller {
+                        adapter: self.ts_adapter.clone(),
+                        caller_id: ctx.caller_id,
+                        caller_name: ctx.caller_name.clone(),
+                        caller_groups: ctx.groups.clone(),
+                        caller_channel_group_id: ctx.channel_group_id,
+                        nc_adapter: None,
+                    },
+                    self.gate.clone(),
+                    self.config.clone(),
+                )
             },
         )
         .await
@@ -738,19 +824,18 @@ impl VoiceRouter {
         Ok(())
     }
 
-    /// 每轮 TTS 运行时：持有合成与上传任务，正常结束 join，取消时 abort
+    /// 每轮 TTS：open_tts_session 占 FIFO 槽；句段合成后 push_encoded；收尾 finish（接收语义）
     async fn build_tts_callbacks(&self) -> Result<TtsTurnRuntime> {
         let speech_provider = self
             .speech_provider
             .clone()
             .ok_or_else(|| anyhow::anyhow!("TTS provider missing"))?;
-        let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
-        let channel = Channel::from_shared(endpoint)?.connect().await?;
+        let session = self.audio_output.open_tts_session().await?;
+        let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
         let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(128);
-        let (audio_tx, audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
         let trace_id = format!("tts-{}", now_unix_ms());
 
-        let synth_audio_tx = audio_tx.clone();
+        let synth_session = shared_session.clone();
         let synth_trace = trace_id.clone();
         let synth_task = tokio::spawn(async move {
             let mut rx = sentence_rx;
@@ -768,20 +853,18 @@ impl VoiceRouter {
                 match speech_provider.synthesize(&sentence).await {
                     Ok(audio) => {
                         let codec = detect_audio_format(&audio);
-                        if let Err(error) = synth_audio_tx
-                            .send(voicev1::TtsAudioChunk {
-                                payload: audio,
-                                codec: codec.to_string(),
-                                end_of_stream: false,
-                                trace_id: synth_trace.clone(),
-                            })
-                            .await
-                        {
+                        let mut guard = synth_session.lock().await;
+                        let pushed = match guard.as_mut() {
+                            Some(session) => session.push_encoded(audio, codec).await,
+                            None => Err(anyhow::anyhow!("tts session already finished")),
+                        };
+                        drop(guard);
+                        if let Err(error) = pushed {
                             warn!(
                                 trace_id = %synth_trace,
                                 segment = segment_index,
                                 error = %error,
-                                "tts audio channel closed; aborting synthesis"
+                                "tts push_encoded failed"
                             );
                             break;
                         }
@@ -794,24 +877,15 @@ impl VoiceRouter {
                     ),
                 }
             }
-            // 合成结束发 EOS：工具多轮时只在最终轮触发
-            let _ = synth_audio_tx
-                .send(voicev1::TtsAudioChunk {
-                    payload: vec![],
-                    codec: "mp3".to_string(),
-                    end_of_stream: true,
-                    trace_id: synth_trace,
-                })
-                .await;
-        });
-
-        let upload_trace = trace_id.clone();
-        let upload_task = tokio::spawn(async move {
-            if let Err(e) = VoiceServiceClient::new(channel)
-                .stream_tts_audio(tonic::Request::new(ReceiverStream::new(audio_rx)))
-                .await
-            {
-                warn!(trace_id = %upload_trace, error = %e, "stream_tts_audio failed");
+            let session = synth_session.lock().await.take();
+            if let Some(session) = session {
+                if let Err(error) = session.finish().await {
+                    warn!(
+                        trace_id = %synth_trace,
+                        error = %error,
+                        "tts session finish failed"
+                    );
+                }
             }
         });
 
@@ -837,7 +911,6 @@ impl VoiceRouter {
                         .map(|segment| (0, segment))
                         .collect()
                 };
-                // 取出发送端副本，避免 std MutexGuard 跨 await 存活导致 future 非 Send
                 let tx = shared.lock().expect("tts tx poisoned").as_ref().cloned();
                 if let Some(tx) = tx {
                     for (index, segment) in segments {
@@ -875,6 +948,7 @@ impl VoiceRouter {
                         }
                     }
                 }
+                // 含 tool_calls：先关句段（synth finish 会话）再执行 tool
                 *shared.lock().expect("tts tx poisoned") = None;
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         };
@@ -885,8 +959,8 @@ impl VoiceRouter {
                 on_turn_end: Some(Box::new(on_turn_end)),
             },
             shared_tx,
+            shared_session,
             synth_task,
-            upload_task,
             trace_id,
         })
     }
@@ -912,7 +986,7 @@ Online: {}"#,
         ctx: &CallerContext,
     ) -> (String, String, Vec<String>, SessionSource) {
         let (system_prompt, user_ctx, allowed_skills) = self.build_llm_base_context(ctx).await;
-        let source = SessionSource::Headless {
+        let source = SessionSource::TeamSpeak {
             uid: ctx.caller_uid.clone(),
         };
         (system_prompt, user_ctx, allowed_skills, source)
@@ -1011,17 +1085,26 @@ mod tests {
 
     #[tokio::test]
     async fn session_locks_serialize_only_the_same_uid() {
-        let locks = SessionLocks::default();
-        let first = locks.for_uid("uid-1");
-        let first_guard = first.lock().await;
-        let same = locks.for_uid("uid-1");
-        let other = locks.for_uid("uid-2");
+        let engine =
+            crate::llm::LlmEngine::new(std::sync::Arc::new(crate::config::AppConfig::default()))
+                .unwrap();
+        let source = SessionSource::TeamSpeak {
+            uid: "uid-1".to_string(),
+        };
+        let _capacity = engine.try_reserve_turn_capacity().unwrap();
+        let first = engine.acquire_turn_session(&source).await;
 
-        assert!(same.try_lock().is_err());
-        assert!(other.try_lock().is_ok());
+        let engine = std::sync::Arc::new(engine);
+        let waiting_source = source.clone();
+        let waiting = {
+            let engine = engine.clone();
+            async move { engine.acquire_turn_session(&waiting_source).await }
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting)
+            .await
+            .is_err());
 
-        drop(first_guard);
-        assert!(same.try_lock().is_ok());
+        drop(first);
     }
 
     #[tokio::test]
@@ -1069,8 +1152,9 @@ mod tests {
     }
 
     #[test]
-    fn tts_closes_for_every_non_tool_call_finish_reason() {
-        assert!(!should_close_tts_turn("tool_calls"));
+    fn tts_closes_on_tool_calls_and_all_other_finish_reasons() {
+        // tool 轮 finish_reason 为 "tool_calls"，也必须先 finish 再执行 tool
+        assert!(should_close_tts_turn("tool_calls"));
         for finish_reason in ["stop", "length", "content_filter", "function_call", ""] {
             assert!(should_close_tts_turn(finish_reason));
         }
@@ -1079,12 +1163,12 @@ mod tests {
     #[tokio::test]
     async fn tts_sentence_channel_backpressures_sender_when_full() {
         let (tx, mut rx) = mpsc::channel::<(usize, String)>(1);
-        tx.send((1, "first".to_string())).await.unwrap();
+        tx.send((0, "first".to_string())).await.unwrap();
 
         // 满通道：send 挂起而非丢帧
         let sender = tx.clone();
         let pending =
-            tokio::spawn(async move { sender.send((2, "second".to_string())).await.is_ok() });
+            tokio::spawn(async move { sender.send((0, "second".to_string())).await.is_ok() });
         tokio::task::yield_now().await;
         assert!(!pending.is_finished());
 
@@ -1096,29 +1180,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_turn_runtime_finish_drains_tasks() {
+    async fn tts_turn_runtime_finish_drains_synth_task() {
         let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(8);
-        let (audio_tx, _audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
+        let audio_bus = crate::adapter::headless::audio_output::AudioBus::new();
+        let audio_output = audio_bus.output;
+        let consumer = audio_bus.consumer;
+        let (ts3_tx, mut ts3_rx) = mpsc::channel::<(Vec<u8>, i32)>(16);
+        tokio::spawn(consumer.run(ts3_tx));
+        tokio::spawn(async move { while ts3_rx.recv().await.is_some() {} });
+        let session = audio_output.open_tts_session().await.unwrap();
+        let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
 
         let synth_task = tokio::spawn(async move {
             let mut rx = sentence_rx;
             while let Some((_, _)) = rx.recv().await {}
-            let _ = audio_tx
-                .send(voicev1::TtsAudioChunk {
-                    payload: vec![],
-                    codec: "mp3".to_string(),
-                    end_of_stream: true,
-                    trace_id: "test".to_string(),
-                })
-                .await;
+            let session = shared_session.lock().await.take();
+            if let Some(session) = session {
+                let _ = session.finish().await;
+            }
         });
-        let upload_task = tokio::spawn(async {});
 
         let runtime = TtsTurnRuntime {
             callbacks: StreamCallbacks::default(),
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
+            shared_session: Arc::new(tokio::sync::Mutex::new(None)),
             synth_task,
-            upload_task,
             trace_id: "test-trace".to_string(),
         };
 
@@ -1126,27 +1212,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_turn_runtime_abort_cancels_tasks() {
+    async fn tts_turn_runtime_abort_cancels_synth_and_session() {
         let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(8);
         let _rx_keepalive = sentence_rx;
-        let (audio_tx, _audio_rx) = mpsc::channel::<voicev1::TtsAudioChunk>(8);
-        drop(audio_tx);
+        let audio_bus = crate::adapter::headless::audio_output::AudioBus::new();
+        let audio_output = audio_bus.output;
+        let consumer = audio_bus.consumer;
+        let (ts3_tx, _ts3_rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        tokio::spawn(async move {
+            let _ = consumer.run(ts3_tx).await;
+        });
+        let session = audio_output.open_tts_session().await.unwrap();
+        let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
 
         let synth_task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-        });
-        let upload_task = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
 
         let runtime = TtsTurnRuntime {
             callbacks: StreamCallbacks::default(),
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
+            shared_session: shared_session.clone(),
             synth_task,
-            upload_task,
             trace_id: "test-trace".to_string(),
         };
 
         runtime.abort().await;
+        assert!(shared_session.lock().await.is_none());
     }
 }

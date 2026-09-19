@@ -42,12 +42,52 @@ You can interact with the bot in the following ways:
     -   Say the wake word (default `tsclaw`) followed by your command
     -   The bot will reply via voice (requires TTS configuration)
     -   Example: (Say) `tsclaw play Nocturne by Jay Chou`
+    -   **Without STT**: spoken natural-language triggers are unavailable; chat into the bridge and direct commands still work
 
-4.  **NapCat / QQ** (Optional): Enable NapCat to interact via QQ private messages or group chats.
+4.  **Voice Replay voice_replay** (Optional, `[voice_replay] enabled = true`, **restart** after config change):
+
+    **Prerequisites**
+    - Grant skill `voice_replay` to the needed groups in `acl.toml` (same ACL as direct commands).
+    - Replay **after humans have spoken** in the channel; an empty recording window has nothing useful to play.
+
+    | Direct command | Meaning |
+    |---|---|
+    | `!replay` | Mix-replay recorded speakers over `window_secs` (default 30s) |
+    | `!replay 30` | Explicit 30s (still clamped to `window_secs`) |
+    | `!replay 10` | Replay about 10s |
+    | `!replay @Alice` | Replay one speaker (exact first, then longest match) |
+    | `!replay @Alice Smith 10` | Nickname with spaces + seconds (N before or after the name) |
+    | `!replay 10 @Alice` | **Valid**: seconds first + `@Name` |
+
+    - Only **`!replay [N] [@Name]`** is valid; seconds **0–120** or you get an error.
+    - Anything else (e.g. `stop` / `status`) errors: `illegal command '…'; use !replay [N] [@Name]`.
+
+    - Nicknames accept TS insert formats: `<@clid|Name>`, `@clid|Name`, `@Name`, or bare nick.
+    - Just `!replay` or `!replay @Name`; the `replay` result includes a `speakers` list for the window.
+    - Ambiguous or unknown nickname: returns **candidates**; never picks arbitrarily.
+    - Empty window: the bot replies `no speakers in the last Ns recording window` (no blank audio is played).
+    - Whether music bots are recorded is described under `musicbot_name` in the configuration guide.
+    - **ACL**: direct commands and the skill share `voice_replay`; denial text is `voice_replay denied by ACL`.
+    - **Privacy**: per-speaker replay is more sensitive than channel mix; tighten via ACL.
+    - `buffered_ms` = actual playback duration (not a padded full window when the ring is young).
+
+5.  **NapCat / QQ** (Optional): Enable NapCat to interact via QQ private messages or group chats.
 
 ## Available Skills
 
 The bot currently supports the following skills (depending on your permission configuration):
+
+### Voice Replay (voice_replay)
+
+Natural-language examples: “What did they just say?”, “Replay that”, “Replay Alice for the last 10 seconds”.
+
+Skill arguments (`action` is required):
+
+| Field | Type | Description |
+|---|---|---|
+| `action` | string | Must be `replay` |
+| `seconds` | integer | Optional; legal **0–120** (error if out of range), then clamped to `window_secs` |
+| `speaker` | string | Optional; nickname in the window (exact / longest match) |
 
 ### 🎵 Music Control (music_control)
 

@@ -117,17 +117,13 @@ impl TsAdapter {
                 Ok(Ok(())) => {
                     // 根据 STT/TTS/omni 配置设置 mute/硬件状态
                     {
-                        let omni = config.llm.omni_model;
-                        let stt = hc.stt.enabled;
-                        let tts = hc.tts.enabled;
-                        let speaker_on = tts || stt || omni;
-                        let mic_on = tts;
+                        let flags = super::voice_mute_flags(&config);
                         let cmd = format!(
                             "clientupdate client_input_muted={} client_input_hardware={} client_output_muted={} client_output_hardware={}",
-                            if mic_on { 0 } else { 1 },
-                            if mic_on { 1 } else { 0 },
-                            if speaker_on { 0 } else { 1 },
-                            if speaker_on { 1 } else { 0 },
+                            if flags.input_muted { 1 } else { 0 },
+                            if flags.input_hardware_on { 1 } else { 0 },
+                            if flags.output_muted { 1 } else { 0 },
+                            if flags.output_hardware_on { 1 } else { 0 },
                         );
                         if let Err(e) = client.send_command_no_wait(&cmd).await {
                             warn!("set mute/hardware state failed: {e}");
@@ -305,12 +301,7 @@ impl TsAdapter {
     }
 
     pub async fn send_text_message(&self, target_mode: u8, target: u32, msg: &str) -> Result<()> {
-        for chunk in super::text_util::split_message(msg, super::text_util::MAX_MESSAGE_BYTES) {
-            tsclient_rs::sendTextMessage(&self.client, target_mode as i32, target as u64, &chunk)
-                .await
-                .map_err(|e| anyhow!("sendTextMessage failed: {e}"))?;
-        }
-        Ok(())
+        super::text_util::send_text_message(&self.client, target_mode, target, msg).await
     }
 
     pub async fn poke(&self, clid: u32, msg: &str) -> Result<()> {

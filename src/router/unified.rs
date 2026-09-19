@@ -1,126 +1,35 @@
 use crate::adapter::headless::{TextMessageEvent, TextMessageTarget};
-use crate::adapter::napcat::event::{GroupMessageEvent, PrivateMessageEvent};
-use crate::adapter::napcat::types::segments_to_text;
 use crate::config::AppConfig;
-use crate::router::strip_trigger_prefix;
-
-#[derive(Debug, Clone)]
-pub enum InboundSource {
-    TeamSpeakText,
-    NapCatPrivate,
-    NapCatGroup,
-}
+use crate::router::resolve_ts_inbound;
 
 #[derive(Debug, Clone)]
 pub enum ReplyPolicy {
-    TeamSpeak {
-        target_mode: u8,
-        target: u32,
-    },
-    NapCatPrivate {
-        user_id: i64,
-    },
-    NapCatGroup {
-        group_id: i64,
-        at_user_id: Option<i64>,
-    },
+    TeamSpeak { target_mode: u8, target: u32 },
 }
 
 #[derive(Debug, Clone)]
 pub struct UnifiedInboundEvent {
-    pub source: InboundSource,
-    pub sender_id: String,
-    pub sender_name: String,
     pub text: String,
     pub should_trigger_llm: bool,
     pub reply_policy: ReplyPolicy,
-    pub trace_id: String,
 }
 
 impl UnifiedInboundEvent {
     pub fn from_ts(event: &TextMessageEvent, config: &AppConfig) -> Option<Self> {
-        let msg_content = event.message.trim();
-        if msg_content.is_empty() {
-            return None;
-        }
-
-        let is_private = event.target_mode == TextMessageTarget::Private;
-
-        let (text, should_trigger_llm) = if is_private && config.bot.respond_to_private {
-            (msg_content.to_string(), true)
-        } else {
-            match strip_trigger_prefix(msg_content, &config.bot.trigger_prefixes) {
-                Some(stripped) => (stripped.to_string(), true),
-                None => (msg_content.to_string(), false),
-            }
+        let target_mode = match event.target_mode {
+            TextMessageTarget::Private => 1u8,
+            TextMessageTarget::Channel => 2,
+            TextMessageTarget::Server => 3,
         };
-
-        let reply_policy = if is_private {
-            ReplyPolicy::TeamSpeak {
-                target_mode: 1,
-                target: event.invoker_id,
-            }
-        } else {
-            let target_mode =
-                crate::config::reply_target_mode(config.bot.default_reply_mode.as_str());
-            let target = if target_mode == 1 {
-                event.invoker_id
-            } else {
-                0
-            };
-            ReplyPolicy::TeamSpeak {
-                target_mode: target_mode as u8,
-                target,
-            }
-        };
-
+        let decision =
+            resolve_ts_inbound(&event.message, target_mode, event.invoker_id, &config.bot)?;
         Some(Self {
-            source: InboundSource::TeamSpeakText,
-            sender_id: event.invoker_id.to_string(),
-            sender_name: event.invoker_name.clone(),
-            text,
-            should_trigger_llm,
-            reply_policy,
-            trace_id: format!("ts-{}-{}", event.invoker_id, event.invoker_uid),
-        })
-    }
-
-    pub fn from_nc_private(msg: &PrivateMessageEvent) -> Option<Self> {
-        let text = segments_to_text(&msg.message);
-        let text = text.trim();
-        if text.is_empty() {
-            return None;
-        }
-        Some(Self {
-            source: InboundSource::NapCatPrivate,
-            sender_id: msg.user_id.to_string(),
-            sender_name: msg.sender.nickname.clone(),
-            text: text.to_string(),
-            should_trigger_llm: true,
-            reply_policy: ReplyPolicy::NapCatPrivate {
-                user_id: msg.user_id,
+            text: decision.text,
+            should_trigger_llm: decision.should_trigger_llm,
+            reply_policy: ReplyPolicy::TeamSpeak {
+                target_mode: decision.reply_target_mode,
+                target: decision.reply_target,
             },
-            trace_id: format!("nc-private-{}-{}", msg.user_id, msg.timestamp),
-        })
-    }
-
-    pub fn from_nc_group(msg: &GroupMessageEvent, is_triggered: bool) -> Option<Self> {
-        let text = segments_to_text(&msg.message);
-        let text = text.trim();
-        if text.is_empty() {
-            return None;
-        }
-        Some(Self {
-            source: InboundSource::NapCatGroup,
-            sender_id: msg.user_id.to_string(),
-            sender_name: msg.sender.nickname.clone(),
-            text: text.to_string(),
-            should_trigger_llm: is_triggered,
-            reply_policy: ReplyPolicy::NapCatGroup {
-                group_id: msg.group_id,
-                at_user_id: Some(msg.user_id),
-            },
-            trace_id: format!("nc-group-{}-{}", msg.group_id, msg.timestamp),
         })
     }
 }

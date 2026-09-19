@@ -8,9 +8,9 @@ TeamSpeakClaw 是 Rust 编写的单二进制聊天机器人：集成 TeamSpeak �
 src/
 ├── main.rs                  # 入口：装配 config、适配器、路由器、关闭流程
 ├── cli.rs                   # --log-level
-├── log.rs                   # 按日轮转文件日志 + tracing/slog 桥接初始化
+├── log.rs                   # 按日轮转文件日志 + tracing 初始化
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
-├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts）+ .instructions.md
+├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）+ .instructions.md
 ├── router.rs                # 事件路由；组合路由器循环入口
 ├── router/                  # 子模块（ts_router, nc_router, voice_router, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
@@ -24,7 +24,7 @@ src/
 ├── llm/                     # (context, engine, provider, tool_loop)
 ├── permission.rs            # 基于 ACL 的权限门
 ├── permission/              # (gate)
-├── skills.rs                # Skill trait + 注册表；Skill、ExecutionContext、UnifiedExecutionContext
+├── skills.rs                # Skill trait + 注册表；Skill、UnifiedExecutionContext
 ├── skills/                  # (communication, information, moderation, music, web_search)
 │   ├── music.rs             # 音乐技能根
 │   └── music/               # (ts3audiobot, tsbot_http, tsmusicbot)
@@ -34,7 +34,7 @@ docs/
 ├── AGENTS.md                # 文档标准：分层归属、写作规则、字数预算
 └── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
 examples/
-├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml）
+├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml；Release 打包含此三文件）
 └── docker-compose.yml       # Docker Compose 示例
 website/                     # Docusaurus 用户文档（排除在 Rust CI 路径外）
 ```
@@ -82,12 +82,12 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 - **Conventional Commits**：git 提交用 conventional 格式。[docs/development.md](docs/development.md)
 - **子代理拆分**：复杂问题拆子代理，主上下文保持干净；禁止子代理再拆子代理。[docs/development.md](docs/development.md)
 - **输出规范**：结论先行、中文大白话；代码逻辑仅 ASCII；临时文件及时删除。[docs/development.md](docs/development.md)
-- **技能开发**：新技能实现 `execute`（TS）、`execute_nc`（QQ）、`execute_unified`（双平台用此）；触发前缀来自配置，`trigger.rs:strip_trigger_prefix()` 剥离。[docs/development.md](docs/development.md)
+- **技能开发**：新技能实现 `execute`（统一入口，按 `ctx.platform` 分支）；触发前缀来自配置，`trigger.rs:strip_trigger_prefix()` 剥离。[docs/development.md](docs/development.md)
 - **Agent Note**：非平凡变更（架构、生命周期、并发、音频/语音桥、重连等）MUST 附带决策记录。[docs/agent-notes.md](docs/agent-notes.md)
 
 ## LLM / Provider
 
-OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；`tokio::Semaphore` 限并发，超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时文本走语音桥。详见 [docs/architecture.md](docs/architecture.md)。
+OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时文本走语音桥。详见 [docs/architecture.md](docs/architecture.md)。
 
 ## Testing
 

@@ -240,22 +240,21 @@ impl NapCatAdapter {
                         break;
                     }
                     Err(_) if shutdown.is_cancelled() => break 'runtime,
-                    Err(error) => match retry.record_failure() {
-                        RetryDecision::Retry { attempt, delay } => {
-                            warn!(
-                                "NapCat reconnect attempt {attempt} failed: {error}; retrying after {:.0?}",
-                                delay
-                            );
-                            if !wait_for_retry(delay, &shutdown).await {
-                                break 'runtime;
-                            }
-                        }
-                        RetryDecision::Exhausted => {
-                            error!("NapCat runtime reconnect state exhausted unexpectedly");
+                    Err(error) => {
+                        // session_started 已为 true，record_failure 只会返回 Retry
+                        let RetryDecision::Retry { attempt, delay } = retry.record_failure() else {
+                            error!("NapCat runtime reconnect exhausted unexpectedly");
                             failed = true;
                             break 'runtime;
+                        };
+                        warn!(
+                            "NapCat reconnect attempt {attempt} failed: {error}; retrying after {:.0?}",
+                            delay
+                        );
+                        if !wait_for_retry(delay, &shutdown).await {
+                            break 'runtime;
                         }
-                    },
+                    }
                 }
             }
         }
