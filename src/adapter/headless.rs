@@ -455,6 +455,11 @@ impl Runtime {
             audio_output: audio_bus.output.clone(),
             speaker_rings: speaker_rings.clone(),
             window_secs,
+            musicbot_name: config
+                .music_backend
+                .as_ref()
+                .map(|mc| mc.musicbot_name.clone())
+                .unwrap_or_default(),
         });
         let service_voice_runtime = HeadlessVoiceRuntime {
             audio: AudioBus {

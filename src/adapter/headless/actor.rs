@@ -141,6 +141,7 @@ pub async fn ts3_actor(
                     let _ = hook.rings.push_opus_frame(
                         from_client_id,
                         &from_client_name,
+                        vd.codec,
                         &vd.data,
                         Instant::now(),
                     );

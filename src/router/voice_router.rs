@@ -574,17 +574,27 @@ impl VoiceRouter {
         };
         match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
             Ok(value) => {
-                let ack = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
-                let speakers = value
-                    .get("speakers")
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "[]".into());
-                let buffered = value
-                    .get("buffered_ms")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let msg =
-                    format!("voice_replay {ack}; buffered_ms={buffered}; speakers={speakers}");
+                let msg = match value.get("status").and_then(|s| s.as_str()) {
+                    Some("empty") => value
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("no speakers in the recording window")
+                        .to_string(),
+                    Some(status) => {
+                        let speakers = value
+                            .get("speakers")
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "[]".into());
+                        let buffered = value
+                            .get("buffered_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        format!(
+                            "voice_replay {status}; buffered_ms={buffered}; speakers={speakers}"
+                        )
+                    }
+                    None => "voice_replay ok".to_string(),
+                };
                 self.send_reply(client, ctx, &msg).await?;
             }
             Err(error) => {

@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout, Instant};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::audio_codec::{
     new_opus_stereo_encoder, pcm_frame_to_float, PCM_FRAME_MS, PCM_FRAME_SAMPLES_STEREO,
@@ -623,6 +623,12 @@ async fn process_encoded_segment(
         "wav"
     } else if segment.codec.eq_ignore_ascii_case("mp3") || segment.codec.is_empty() {
         detect_audio_format(&segment.payload)
+    } else if segment.codec.starts_with("warmup-probe") {
+        debug!(
+            codec = %segment.codec,
+            "audio output warmup probe skipped (expected)"
+        );
+        return Ok(());
     } else {
         warn!("unsupported encoded codec: {}, skipping", segment.codec);
         return Ok(());
@@ -953,6 +959,19 @@ mod tests {
         let consumer = bus.consumer;
         drop(consumer);
         assert!(output.enqueue_pcm_clip(silence_clip(20)).is_err());
+    }
+
+    #[tokio::test]
+    async fn warmup_probe_codec_does_not_warn_path() {
+        // 构造路径：unsupported warmup-probe 走 debug，不进 last_error
+        let bus = AudioBus::new();
+        let output = bus.output.clone();
+        let (audio_tx, _rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        tokio::spawn(bus.consumer.run(audio_tx));
+        assert!(output
+            .play_encoded_media(vec![0u8; 2], "warmup-probe")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

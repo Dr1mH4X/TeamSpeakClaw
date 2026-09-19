@@ -120,10 +120,11 @@ impl SpeakerRings {
         &self,
         clid: u32,
         name: &str,
+        codec: i32,
         frame: &[u8],
         received_at: Instant,
     ) -> Result<()> {
-        let pcm = self.decode_opus_frame(clid, name, frame, received_at)?;
+        let pcm = self.decode_opus_frame(clid, name, codec, frame, received_at)?;
         if let Some(samples) = pcm {
             self.append_pcm(clid, name, samples, received_at);
         }
@@ -134,9 +135,15 @@ impl SpeakerRings {
         &self,
         clid: u32,
         name: &str,
+        codec: i32,
         frame: &[u8],
         received_at: Instant,
     ) -> Result<Option<Vec<i16>>> {
+        // TS 语音流 1 字节包是控制/边界标记（如 0x02/0x07），不是 Opus 载荷，直接忽略
+        if frame.len() <= 1 {
+            return Ok(None);
+        }
+
         let mut inner = self.inner.lock().expect("speaker rings poisoned");
         Self::ensure_track(&mut inner, clid, name, received_at);
         let track = inner
@@ -144,11 +151,11 @@ impl SpeakerRings {
             .get_mut(&clid)
             .ok_or_else(|| anyhow!("speaker track missing after ensure"))?;
 
-        let mut decoded = vec![0i16; 960 * CHANNELS as usize];
+        let mut decoded = vec![0i16; 5760 * CHANNELS as usize];
         let packet = match frame.try_into() {
             Ok(packet) => packet,
             Err(error) => {
-                warn!(clid, error = %error, "speaker ring drop invalid opus packet");
+                warn!(clid, codec, len = frame.len(), error = %error, "speaker ring drop invalid opus packet");
                 return Ok(None);
             }
         };
@@ -158,7 +165,7 @@ impl SpeakerRings {
         let samples_per_channel = match track.decoder.decode(Some(packet), decoded_mut, false) {
             Ok(n) => n,
             Err(error) => {
-                warn!(clid, error = %error, "speaker ring drop undecodable opus frame");
+                warn!(clid, codec, len = frame.len(), error = %error, "speaker ring drop undecodable opus frame");
                 return Ok(None);
             }
         };
@@ -383,6 +390,19 @@ mod tests {
 
     fn pcm_ms(ms: u64) -> Vec<i16> {
         vec![100i16; stereo_48k_sample_count(Duration::from_millis(ms))]
+    }
+
+    #[test]
+    fn one_byte_voice_marker_is_skipped_without_decode() {
+        let rings = SpeakerRings::new(Duration::from_secs(30));
+        // 不应 panic，也不入段
+        rings
+            .push_opus_frame(1, "alice", 5, &[0x02], Instant::now())
+            .unwrap();
+        rings
+            .push_opus_frame(1, "alice", 5, &[0x07], Instant::now())
+            .unwrap();
+        assert_eq!(rings.segment_count(1), 0);
     }
 
     #[test]

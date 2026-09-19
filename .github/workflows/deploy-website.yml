@@ -29,16 +29,19 @@ jobs:
         working-directory: ./website
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ./website/package-lock.json # 显式指定缓存 key 的位置
+          cache: pnpm
+          cache-dependency-path: ./website/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       - name: Build website
-        run: npm run build
+        run: pnpm run build
 
       - name: Upload artifact
         if: github.event_name == 'push'

@@ -68,6 +68,8 @@ sidebar_position: 3
 | `tsmusicbot` | 通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) |
 | `tsbot_backend` | 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)，需设置 `base_url` |
 
+`musicbot_name`：音乐机器人在 TeamSpeak 里的昵称（按子串匹配）。该机器人的**语音不会**用于 STT，语音回放也**不会录制**它的音频；若在 `!replay` 中点到该昵称，机器人会提示未录制。
+
 ### 回复模式
 
 `default_reply_mode` 仅当触发消息来自频道或服务器广播时生效：
@@ -81,7 +83,7 @@ sidebar_position: 3
 
 ### 语音回放 (voice_replay)
 
-`[voice_replay]` 区段控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效。
+`[voice_replay]` 区段控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效（无热重载）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
@@ -89,10 +91,13 @@ sidebar_position: 3
 | `window_secs` | integer | `30` | 录音窗秒数，合法范围 **1–120**；`seconds` 超窗时 clamp |
 | `direct_commands` | 数组 | `["!replay", "!回放"]` | 频道直呼前缀 |
 
-- 技能 `voice_replay` 与直呼命令（`!replay [N] [@Name …]` / `stop` / `status`）**共用同一 ACL**。
+- 技能 `voice_replay` 与直呼（`!replay [N] [@Name]`）**共用同一 ACL**。
+- **缺省** `!replay`：按 `window_secs`（默认 30s）混音回放窗内**已录制到的**说话人（不含机器人自己；音乐机器人见上方 `musicbot_name` 说明）。
+- **空窗**：窗内没有可回放的说话人时提示 empty，不会播放空白音频。
+- 昵称支持 `<@clid|Name>` / `@clid|Name` / `@Name` / 裸昵称。
 - 单人回放比频道混音更敏感，请按组在 `acl.toml` 授予 `voice_replay`。
 - 无 STT/TTS 仅开本开关时也可录制与回放（只听不说）；语音自然语言触发仍需 STT。
-- 语法与 JSON 契约见 [usage.md](usage.md)。
+- 语法与用法见 [usage.md](usage.md)。
 
 ## 2. 权限配置 (acl.toml)
 
@@ -114,7 +119,7 @@ sidebar_position: 3
 | `get_client_info` | 获取用户详细信息 |
 | `music_control` | 音乐控制 |
 | `web_search` | 搜索最新网络信息 |
-| `voice_replay` | 语音窗口回放（status/replay/stop 与直呼；单人回放更敏感） |
+| `voice_replay` | 语音窗口回放：`replay` 与 `!replay [N] [@Name]`；单人回放更敏感 |
 
 ### NapCat 与跨平台行为说明
 

@@ -1,4 +1,4 @@
-//! voice_replay：分说话人环形窗回放 / status / stop。
+//! voice_replay：分说话人环形窗回放。直呼：`!replay [N] [@Name]`。
 
 use crate::adapter::headless::audio_output::PcmClipPayload;
 use crate::adapter::headless::speaker_ring::{NameResolve, ReplayFilter};
@@ -12,6 +12,25 @@ use std::sync::Arc;
 
 const SAMPLE_RATE_HZ: u64 = 48_000;
 const CHANNELS: u64 = 2;
+/// 回放秒数合法上界（与 voice_replay.window_secs 上限一致）
+pub const MAX_REPLAY_SECONDS: u32 = 120;
+const REPLAY_USAGE: &str = "use !replay [N] [@Name]";
+
+fn validate_seconds(seconds: Option<u32>) -> Result<()> {
+    match seconds {
+        None => Ok(()),
+        Some(n) if n <= MAX_REPLAY_SECONDS => Ok(()),
+        Some(n) => Err(anyhow!(
+            "seconds must be in 0..={MAX_REPLAY_SECONDS}, got {n}; {REPLAY_USAGE}"
+        )),
+    }
+}
+
+fn illegal_command(reason: &str) -> DirectReplayCommand {
+    DirectReplayCommand::Invalid {
+        reason: format!("{reason}; {REPLAY_USAGE}"),
+    }
+}
 
 pub struct VoiceReplay {
     config: Arc<AppConfig>,
@@ -30,31 +49,57 @@ impl VoiceReplay {
     }
 }
 
-fn speakers_json(runtime: &VoiceAudioRuntime) -> Value {
-    let stats = runtime.speaker_rings.stats();
-    Value::Array(
-        stats
-            .iter()
-            .map(|s| {
-                json!({
-                    "clid": s.clid,
-                    "name": s.name,
-                    "active_ms": s.active_ms,
-                })
-            })
-            .collect(),
-    )
-}
-
 fn playback_duration_ms(sample_count: usize) -> u64 {
     sample_count as u64 * 1000 / (SAMPLE_RATE_HZ * CHANNELS)
 }
 
-fn resolve_speaker_filter(runtime: &VoiceAudioRuntime, name: &str) -> Result<Option<ReplayFilter>> {
+/// 剥离 TS 昵称插入格式：`<@clid|Name>` / `@clid|Name` / `@Name`
+pub fn parse_speaker_token(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(inner) = s.strip_prefix('<').and_then(|x| x.strip_suffix('>')) {
+        let inner = inner.trim();
+        if let Some(rest) = inner.strip_prefix('@') {
+            if let Some((_, name)) = rest.split_once('|') {
+                return name.trim().to_string();
+            }
+            return rest.trim().to_string();
+        }
+        return inner.to_string();
+    }
+    if let Some(rest) = s.strip_prefix('@') {
+        if let Some((_, name)) = rest.split_once('|') {
+            return name.trim().to_string();
+        }
+        return rest.trim().to_string();
+    }
+    s.to_string()
+}
+
+fn is_musicbot_name(name: &str, musicbot_name: &str) -> bool {
+    !musicbot_name.is_empty()
+        && name
+            .to_ascii_lowercase()
+            .contains(&musicbot_name.to_ascii_lowercase())
+}
+
+fn musicbot_not_recorded_error(name: &str, musicbot_name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "speaker '{name}' matches music_backend.musicbot_name '{musicbot_name}' and is not recorded"
+    )
+}
+
+fn resolve_speaker_filter(
+    runtime: &VoiceAudioRuntime,
+    raw_name: &str,
+) -> Result<Option<ReplayFilter>> {
+    let name = parse_speaker_token(raw_name);
     if name.is_empty() {
         return Ok(None);
     }
-    match runtime.speaker_rings.resolve_name(name) {
+    if is_musicbot_name(&name, &runtime.musicbot_name) {
+        return Err(musicbot_not_recorded_error(&name, &runtime.musicbot_name));
+    }
+    match runtime.speaker_rings.resolve_name(&name) {
         NameResolve::Unique(clid) => Ok(Some(ReplayFilter::Speaker { clid })),
         NameResolve::Ambiguous(candidates) => {
             let names: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
@@ -81,9 +126,23 @@ fn execute_replay_with_filter(
     seconds: Option<u32>,
     filter: ReplayFilter,
 ) -> Result<Value> {
+    validate_seconds(seconds)?;
     let seconds = seconds.map(|s| s.min(runtime.window_secs));
     let snapshot = runtime.speaker_rings.snapshot(filter, seconds);
     let duration_ms = playback_duration_ms(snapshot.samples.len());
+    // 窗内无人（含仅 MusicBot/未录音）时不入队静音
+    if snapshot.speakers.is_empty() {
+        return Ok(json!({
+            "status": "empty",
+            "message": format!(
+                "no speakers in the last {}s recording window",
+                snapshot.buffered_ms / 1000
+            ),
+            "buffered_ms": snapshot.buffered_ms,
+            "playback_duration_ms": duration_ms,
+            "speakers": [],
+        }));
+    }
     runtime
         .audio_output
         .enqueue_pcm_clip(PcmClipPayload {
@@ -120,32 +179,6 @@ fn execute_replay(runtime: &VoiceAudioRuntime, args: &Value) -> Result<Value> {
     execute_replay_with_filter(runtime, requested, filter)
 }
 
-fn execute_status(runtime: &VoiceAudioRuntime) -> Result<Value> {
-    let status = runtime.audio_output.status();
-    let snapshot = runtime.speaker_rings.snapshot(ReplayFilter::All, None);
-    let playing = status.current.as_ref().map(|info| {
-        let kind = match info.kind {
-            crate::adapter::headless::audio_output::JobKind::PcmClip => "PcmClip",
-            crate::adapter::headless::audio_output::JobKind::EncodedStream => "EncodedStream",
-        };
-        let source = match info.source {
-            crate::adapter::headless::audio_output::JobSource::SkillClip => "SkillClip",
-            crate::adapter::headless::audio_output::JobSource::Tts => "Tts",
-            crate::adapter::headless::audio_output::JobSource::External => "External",
-        };
-        json!({ "kind": kind, "source": source })
-    });
-    Ok(json!({
-        "recording": true,
-        "buffered_ms": snapshot.buffered_ms,
-        "playback_duration_ms": playback_duration_ms(snapshot.samples.len()),
-        "speakers": speakers_json(runtime),
-        "playing": playing,
-        "queued_jobs": status.queued_jobs,
-        "last_error": status.last_error,
-    }))
-}
-
 #[async_trait]
 impl Skill for VoiceReplay {
     fn name(&self) -> &'static str {
@@ -154,8 +187,7 @@ impl Skill for VoiceReplay {
 
     fn description(&self) -> &'static str {
         "Replay recent TeamSpeak voice audio from the recording window. \
-         actions: status (list speakers/active_ms), replay (optional seconds/speaker), stop (cancel clips). \
-         Prefer status first, then replay with speaker when needed."
+         action=replay; optional seconds (0..=120) and speaker."
     }
 
     fn parameters(&self) -> Value {
@@ -164,12 +196,12 @@ impl Skill for VoiceReplay {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "replay", "stop"],
-                    "description": "status | replay | stop"
+                    "enum": ["replay"],
+                    "description": "replay"
                 },
                 "seconds": {
                     "type": "integer",
-                    "description": "Replay length in seconds; clamped to the recording window."
+                    "description": "Replay length in seconds; legal range 0..=120, then clamped to window_secs."
                 },
                 "speaker": {
                     "type": "string",
@@ -195,12 +227,9 @@ impl Skill for VoiceReplay {
             .ok_or_else(|| anyhow!("missing required parameter: action"))?;
         match action {
             "replay" => execute_replay(&runtime, &args),
-            "status" => execute_status(&runtime),
-            "stop" => {
-                let stopped = runtime.audio_output.stop_clips();
-                Ok(json!({ "status": "ok", "stopped_clips": stopped }))
-            }
-            other => Err(anyhow!("unknown voice_replay action '{other}'")),
+            other => Err(anyhow!(
+                "unknown voice_replay action '{other}'; {REPLAY_USAGE}"
+            )),
         }
     }
 }
@@ -211,8 +240,9 @@ pub enum DirectReplayCommand {
         seconds: Option<u32>,
         speaker: Option<String>,
     },
-    Stop,
-    Status,
+    Invalid {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +252,7 @@ pub enum SpeakerMatch {
     None { candidates: Vec<String> },
 }
 
-/// 直呼解析：`!replay [N] [@name with spaces]` / `!replay stop` / `!replay status`
+/// 直呼解析：`!replay [N] [@name with spaces]` / `!replay stop`
 pub fn parse_direct_command(text: &str, commands: &[String]) -> Option<DirectReplayCommand> {
     let text = text.trim();
     for cmd in commands {
@@ -251,15 +281,13 @@ fn parse_direct_args(rest: &str) -> Option<DirectReplayCommand> {
             speaker: None,
         });
     }
-    if rest.eq_ignore_ascii_case("stop") {
-        return Some(DirectReplayCommand::Stop);
-    }
-    if rest.eq_ignore_ascii_case("status") {
-        return Some(DirectReplayCommand::Status);
+    // 非法子命令：不编造功能，直接报错并给出用法
+    const ILLEGAL: &[&str] = &["stop", "status", "cancel", "help", "usage"];
+    if ILLEGAL.iter().any(|w| rest.eq_ignore_ascii_case(w)) {
+        return Some(illegal_command(&format!("illegal command '{rest}'")));
     }
     let mut seconds = None;
     let mut parts: Vec<&str> = rest.split_whitespace().collect();
-    // N 可在 @Name 前或后；昵称含空格时取最长名，末位纯数字视为 seconds
     if let Some(first) = parts.first().copied() {
         if let Ok(n) = first.parse::<u32>() {
             seconds = Some(n);
@@ -272,6 +300,11 @@ fn parse_direct_args(rest: &str) -> Option<DirectReplayCommand> {
                 }
             }
         }
+    }
+    if let Err(error) = validate_seconds(seconds) {
+        return Some(DirectReplayCommand::Invalid {
+            reason: error.to_string(),
+        });
     }
     let speaker = if parts.is_empty() {
         None
@@ -353,15 +386,15 @@ pub fn execute_direct_command(
     runtime: &VoiceAudioRuntime,
 ) -> Result<Value> {
     match command {
-        DirectReplayCommand::Stop => {
-            let stopped = runtime.audio_output.stop_clips();
-            Ok(json!({ "status": "ok", "stopped_clips": stopped }))
-        }
-        DirectReplayCommand::Status => execute_status(runtime),
+        DirectReplayCommand::Invalid { reason } => Err(anyhow!(reason)),
         DirectReplayCommand::Replay { seconds, speaker } => {
             let filter = match speaker {
                 None => ReplayFilter::All,
-                Some(name) => {
+                Some(raw) => {
+                    let name = parse_speaker_token(&raw);
+                    if is_musicbot_name(&name, &runtime.musicbot_name) {
+                        return Err(musicbot_not_recorded_error(&name, &runtime.musicbot_name));
+                    }
                     let stats = runtime.speaker_rings.stats();
                     let candidates: Vec<(u32, String)> =
                         stats.iter().map(|s| (s.clid, s.name.clone())).collect();
@@ -420,6 +453,7 @@ mod tests {
                 window_secs,
             )))),
             window_secs,
+            musicbot_name: "MusicBot".to_string(),
         });
         handles
     }
@@ -463,22 +497,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_json_contract_fields() {
+    async fn status_action_is_removed() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
         let skill = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let value = skill
+        let err = skill
             .execute(json!({"action": "status"}), &ctx)
             .await
-            .unwrap();
-        assert_eq!(value["recording"], json!(true));
-        assert_eq!(
-            value["buffered_ms"].as_u64(),
-            value["playback_duration_ms"].as_u64()
-        );
-        assert!(value["speakers"].is_array());
-        assert!(value["queued_jobs"].as_u64().is_some());
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown voice_replay action"));
     }
 
     #[tokio::test]
@@ -491,11 +519,48 @@ mod tests {
             .execute(json!({"action": "replay", "seconds": 120}), &ctx)
             .await
             .unwrap();
-        assert_eq!(value["status"], json!("queued"));
-        // 新建环 age≈0：axis=min(window, age, seconds) 由 age 决定，且 seconds 已 clamp 到 window
-        let buffered = value["buffered_ms"].as_u64().expect("buffered_ms");
-        assert!(buffered <= 30_000);
-        assert_eq!(Some(buffered), value["playback_duration_ms"].as_u64());
+        // 空窗：不入队静音，返回 empty + 默认窗说明
+        assert_eq!(value["status"], json!("empty"));
+        assert!(value["message"].as_str().unwrap().contains("no speakers"));
+        assert_eq!(
+            value["buffered_ms"].as_u64(),
+            value["playback_duration_ms"].as_u64()
+        );
+        assert!(value["buffered_ms"].as_u64().unwrap() <= 30_000);
+    }
+
+    #[test]
+    fn parse_speaker_token_strips_ts_client_link() {
+        assert_eq!(parse_speaker_token("<@5|MusicBot>"), "MusicBot");
+        assert_eq!(parse_speaker_token("@5|MusicBot"), "MusicBot");
+        assert_eq!(parse_speaker_token("@MusicBot"), "MusicBot");
+        assert_eq!(parse_speaker_token("Alice Smith"), "Alice Smith");
+    }
+
+    #[tokio::test]
+    async fn replay_musicbot_target_reports_not_recorded() {
+        let config = enabled_config(30);
+        let handles = handles_with_rings(30);
+        let skill = VoiceReplay::new(config.clone(), handles.clone());
+        let ctx = ts_ctx(config);
+        for speaker in ["MusicBot", "<@5|MusicBot>", "@MusicBot"] {
+            let err = skill
+                .execute(json!({"action": "replay", "speaker": speaker}), &ctx)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("not recorded"), "{speaker}: {err}");
+        }
+        let runtime = handles.get().unwrap();
+        let err = execute_direct_command(
+            DirectReplayCommand::Replay {
+                seconds: Some(30),
+                speaker: Some("<@5|MusicBot>".into()),
+            },
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not recorded"));
+        assert!(err.to_string().contains("MusicBot"));
     }
 
     #[tokio::test]
@@ -513,17 +578,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_returns_stopped_clips() {
+    async fn stop_action_is_rejected() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
         let skill = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let value = skill
+        let err = skill
             .execute(json!({"action": "stop"}), &ctx)
             .await
-            .unwrap();
-        assert_eq!(value["status"], json!("ok"));
-        assert!(value["stopped_clips"].as_u64().is_some());
+            .unwrap_err();
+        assert!(err.to_string().contains(REPLAY_USAGE));
     }
 
     #[tokio::test]
@@ -534,9 +598,41 @@ mod tests {
         let mut ctx = ts_ctx(config);
         ctx.platform = Platform::NapCat;
         assert!(skill
-            .execute(json!({"action": "status"}), &ctx)
+            .execute(json!({"action": "replay"}), &ctx)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn seconds_out_of_range_is_rejected() {
+        let config = enabled_config(30);
+        let handles = handles_with_rings(30);
+        let skill = VoiceReplay::new(config.clone(), handles.clone());
+        let ctx = ts_ctx(config);
+        let err = skill
+            .execute(json!({"action": "replay", "seconds": 121}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("0..=120"));
+        let runtime = handles.get().unwrap();
+        let err = execute_direct_command(
+            DirectReplayCommand::Replay {
+                seconds: Some(999),
+                speaker: None,
+            },
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("0..=120"));
+        let err = execute_direct_command(
+            DirectReplayCommand::Invalid {
+                reason: format!("illegal command 'status'; {REPLAY_USAGE}"),
+            },
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(REPLAY_USAGE));
+        assert!(err.to_string().contains("illegal command"));
     }
 
     #[test]
@@ -588,13 +684,24 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_direct_command("!replay stop", &cmds()),
-            Some(DirectReplayCommand::Stop)
+            parse_direct_command("!replay 10 @Alice", &cmds()),
+            Some(DirectReplayCommand::Replay {
+                seconds: Some(10),
+                speaker: Some("Alice".into())
+            })
         );
-        assert_eq!(
-            parse_direct_command("!回放 status", &cmds()),
-            Some(DirectReplayCommand::Status)
-        );
+        // 非法：stop/status 等不是我们定义的子命令
+        for bad in ["stop", "status", "STOP"] {
+            let cmd = parse_direct_command(&format!("!replay {bad}"), &cmds());
+            assert!(
+                matches!(cmd, Some(DirectReplayCommand::Invalid { .. })),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            parse_direct_command("!replay 999", &cmds()),
+            Some(DirectReplayCommand::Invalid { .. })
+        ));
         assert_eq!(parse_direct_command("hello", &cmds()), None);
         assert_eq!(parse_direct_command("!replay", &[]), None);
     }

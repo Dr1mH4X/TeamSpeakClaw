@@ -122,18 +122,25 @@ impl EventRouter {
             return "voice replay runtime not ready".to_string();
         };
         match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
-            Ok(value) => {
-                let status = value.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
-                let buffered = value
-                    .get("buffered_ms")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let speakers = value
-                    .get("speakers")
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "[]".into());
-                format!("voice_replay {status}; buffered_ms={buffered}; speakers={speakers}")
-            }
+            Ok(value) => match value.get("status").and_then(|s| s.as_str()) {
+                Some("empty") => value
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("no speakers in the recording window")
+                    .to_string(),
+                Some(status) => {
+                    let buffered = value
+                        .get("buffered_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let speakers = value
+                        .get("speakers")
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "[]".into());
+                    format!("voice_replay {status}; buffered_ms={buffered}; speakers={speakers}")
+                }
+                None => "voice_replay ok".to_string(),
+            },
             Err(error) => format!("voice_replay failed: {error}"),
         }
     }

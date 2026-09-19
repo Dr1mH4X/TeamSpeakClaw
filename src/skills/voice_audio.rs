@@ -10,6 +10,8 @@ pub struct VoiceAudioRuntime {
     pub audio_output: AudioOutput,
     pub speaker_rings: Arc<SpeakerRings>,
     pub window_secs: u32,
+    /// music_backend.musicbot_name；该昵称不入录制环
+    pub musicbot_name: String,
 }
 
 #[derive(Clone, Default)]

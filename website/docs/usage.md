@@ -46,22 +46,30 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 4.  **语音回放 voice_replay**（可选，`[voice_replay] enabled = true`，改配置后**重启**生效）：
 
+    **前置**
+    - 在 `acl.toml` 为需要的组授予技能 `voice_replay`（与直呼同一 ACL）。
+    - **有人类在频道说话**之后再回放；窗内无人类语音时不会回放出有效内容。
+
     | 直呼 | 含义 |
     |---|---|
-    | `!replay` | 混音回放整个录音窗 |
-    | `!replay 10` | 回放约 10s（clamp 到 window_secs） |
-    | `!replay @Alice` | 按人回放（精确/最长匹配） |
+    | `!replay` | 按 `window_secs`（默认 30s）混音回放窗内**已录制到的**说话人 |
+    | `!replay 30` | 显式 30s（仍 clamp 到 `window_secs`） |
+    | `!replay 10` | 回放约 10s |
+    | `!replay @Alice` | 按人回放（精确优先，其次最长匹配） |
     | `!replay @Alice Smith 10` | 空格昵称 + 秒数（N 可在名前或名后） |
-    | `!replay 10 @Alice` | 同上，N 在前 |
-    | `!replay stop` | 级联取消排队/播放中的 clip |
-    | `!replay status` | 查看 recording / speakers / queued_jobs |
+    | `!replay 10 @Alice` | **合法**：秒数在前 + @昵称 |
 
-    -   与机器人对话触发技能 `voice_replay`（action: status / replay / stop）。
-    -   **两段式**：先 `status` 看 `speakers[{clid,name,active_ms}]` → 再带 `speaker` 回放。
-    -   昵称歧义或未命中：返回 **candidates** 名单，不任选一人。
-    -   **授权**：直呼与技能共用 ACL 中的 `voice_replay`；无权限收到 `voice_replay denied by ACL`。
-    -   **隐私**：单人回放比频道混音更敏感，请用 ACL 按组收紧。
-    -   `buffered_ms` = 实际回放时长（窗不足/新建环时不是假想满窗）。
+    - 合法形式只有 **`!replay [N] [@Name]`**；秒数 **0–120**，超出报错。
+    - 其它写法（如 `stop` / `status`）一律报错：`illegal command '…'; use !replay [N] [@Name]`。
+
+    - 昵称支持 TS 插入格式：`<@clid|Name>`、`@clid|Name`、`@Name`、裸昵称。
+    - 直接 `!replay` 或 `!replay @某人`；`replay` 结果里会带窗内 `speakers` 列表。
+    - 昵称歧义或未命中：返回 **candidates** 名单，不任选一人。
+    - 窗内没有可回放的说话人时提示：`no speakers in the last Ns recording window`（不会播放空白音频）。
+    - 音乐机器人是否录制见配置里的 `musicbot_name` 说明。
+    - **授权**：直呼与技能共用 ACL 中的 `voice_replay`；无权限收到 `voice_replay denied by ACL`。
+    - **隐私**：单人回放比频道混音更敏感，请用 ACL 按组收紧。
+    - `buffered_ms` = 实际回放时长（窗不足/新建环时不是假想满窗）。
 
 5.  **NapCat / QQ**（可选）：启用 NapCat 后可通过 QQ 私聊或群聊交互。
 
@@ -71,39 +79,15 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 ### 语音回放 (voice_replay)
 
-JSON 契约（技能完整载荷；直呼 ack 为同一结果的摘要文本）：
+自然语言示例：「刚才谁说了啥」「回放一下」「回放 Alice 最近 10 秒」。
 
-```json
-// action=status
-{
-  "recording": true,
-  "buffered_ms": 30000,
-  "playback_duration_ms": 30000,
-  "speakers": [{ "clid": 12, "name": "Alice", "active_ms": 1800 }],
-  "playing": { "kind": "PcmClip", "source": "SkillClip" },
-  "queued_jobs": 0,
-  "last_error": null
-}
+技能参数（`action` 必填）：
 
-// action=replay  （seconds 可选，已 clamp；speaker 歧义/未命中时为错误字符串而非本对象）
-{
-  "status": "queued",
-  "buffered_ms": 30000,
-  "playback_duration_ms": 30000,
-  "speakers": [{ "clid": 12, "name": "Alice", "active_ms": 1800 }]
-}
-
-// action=stop
-{ "status": "ok", "stopped_clips": 1 }
-
-// ACL 拒绝（技能 tool 结果 / 直呼 ack 同文）
-// "voice_replay denied by ACL"
-
-// 直呼 ack 摘要格式
-// "voice_replay queued; buffered_ms=30000; speakers=[...]"
-```
-
-约定：`playback_duration_ms == buffered_ms`（samples/48000/2）；`active_ms` 为窗口内派生值，随驱逐只降不增。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `action` | string | 固定 `replay` |
+| `seconds` | integer | 可选；合法 **0–120**，超出报错；再 clamp 到 `window_secs` |
+| `speaker` | string | 可选；窗内说话人昵称（精确/最长匹配） |
 
 ### 🎵 音乐控制 (music_control)
 
