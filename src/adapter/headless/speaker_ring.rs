@@ -73,14 +73,20 @@ fn stereo_48k_duration(sample_count: usize) -> Duration {
     pcm_stereo_48k_duration(sample_count)
 }
 
-/// active_ms 只统计 start 仍在窗口内的段；不缓存累计字段
+/// active_ms：段区间与 [now-window, now] 求交后累加；不缓存累计字段
 fn derive_active_ms(track: &SpeakerTrack, now: Instant, window: Duration) -> u64 {
     let window_start = now - window;
     track
         .segments
         .iter()
-        .filter(|seg| seg.start >= window_start)
-        .map(|seg| stereo_48k_duration(seg.samples.len()).as_millis() as u64)
+        .map(|seg| {
+            let segment_end = seg.start + stereo_48k_duration(seg.samples.len());
+            let clipped_start = seg.start.max(window_start);
+            let clipped_end = segment_end.min(now);
+            clipped_end
+                .saturating_duration_since(clipped_start)
+                .as_millis() as u64
+        })
         .sum()
 }
 
@@ -346,10 +352,19 @@ impl SpeakerRings {
 
 fn mix_track_into(out: &mut [i16], track: &SpeakerTrack, axis_start: Instant) {
     for seg in &track.segments {
-        let offset = seg.start.saturating_duration_since(axis_start);
-        let start_idx = stereo_48k_sample_count(offset);
-        for (i, sample) in seg.samples.iter().enumerate() {
-            let idx = start_idx + i;
+        // 段起点早于轴时裁剪前缀，避免把窗外采样平移到快照开头
+        let (dest_idx, samples) = if seg.start >= axis_start {
+            let offset = seg.start.saturating_duration_since(axis_start);
+            (stereo_48k_sample_count(offset), seg.samples.as_slice())
+        } else {
+            let skip = stereo_48k_sample_count(axis_start - seg.start);
+            if skip >= seg.samples.len() {
+                continue;
+            }
+            (0usize, &seg.samples[skip..])
+        };
+        for (i, sample) in samples.iter().enumerate() {
+            let idx = dest_idx + i;
             if idx >= out.len() {
                 break;
             }
@@ -483,14 +498,49 @@ mod tests {
         rings.append_pcm(1, "alice", pcm_ms(1000), t0);
         rings.append_pcm(1, "alice", pcm_ms(1000), t0 + Duration::from_secs(20));
 
-        let mid = rings.stats_at(t0 + Duration::from_millis(25));
+        // 段只播了一部分时，active_ms 取交集而非整段（须在驱逐前观察）
+        let partial = rings.stats_at(t0 + Duration::from_millis(400));
+        assert_eq!(partial[0].active_ms, 400);
+
+        // 两段均已完整落在过去且 start 在窗内 → 交集时长 2000ms
+        let mid = rings.stats_at(t0 + Duration::from_secs(25));
         assert_eq!(mid.len(), 1);
         assert_eq!(mid[0].active_ms, 2000);
 
+        // 仅第二段与 [now-30s, now] 相交
         let late = rings.stats_at(t0 + Duration::from_secs(35));
         assert_eq!(late.len(), 1);
         assert_eq!(late[0].active_ms, 1000);
         assert!(late[0].active_ms < mid[0].active_ms);
+    }
+
+    #[test]
+    fn snapshot_clips_segment_prefix_before_axis_start() {
+        let created = Instant::now() - Duration::from_secs(60);
+        let rings = SpeakerRings::new_with_created_at(DEFAULT_REPLAY_WINDOW, created);
+        let now = Instant::now();
+        // 200ms 音频起点在 axis 之前 50ms：快照内只应出现后 150ms，且不对齐到 0
+        rings.append_pcm(1, "alice", pcm_ms(200), now - Duration::from_millis(150));
+        let snap = rings.snapshot_at(ReplayFilter::Speaker { clid: 1 }, Some(1), now);
+        // seconds=1 且 ring_age>>1 → axis=1s；音频落在 [850ms, 1000ms)
+        let nonzero: Vec<usize> = snap
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s == 100)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!nonzero.is_empty());
+        let first_ms = nonzero[0] as u64 * 1000 / 96_000;
+        let last_ms = *nonzero.last().unwrap() as u64 * 1000 / 96_000;
+        assert!(first_ms >= 800, "prefix must be clipped, first={first_ms}");
+        assert!(last_ms < 1000);
+        assert_eq!(
+            nonzero.len(),
+            crate::adapter::headless::audio_codec::stereo_48k_sample_count(Duration::from_millis(
+                150
+            ))
+        );
     }
 
     #[test]

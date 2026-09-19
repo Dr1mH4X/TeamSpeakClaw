@@ -2,7 +2,8 @@
 //! 所有 job 的 deadline 自消费者 dequeue 时起算，不从 enqueue 起算。
 //! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完。
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{io::ErrorKind, process::Stdio};
 
@@ -76,6 +77,7 @@ enum AudioJob {
         payload: PcmClipPayload,
         cancel: Arc<AtomicBool>,
         done: JobDoneTx,
+        cancel_id: u64,
     },
     EncodedStream {
         source: JobSource,
@@ -90,7 +92,8 @@ struct AudioOutputStatusInner {
     queued_jobs: AtomicUsize,
     /// 消费者在 job 失败时写入；技能 status / 直呼只读，不在此 panic
     last_error: Mutex<Option<String>>,
-    clip_cancels: Mutex<Vec<Arc<AtomicBool>>>,
+    clip_cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    next_cancel_id: AtomicU64,
 }
 
 impl AudioOutputStatusInner {
@@ -99,7 +102,8 @@ impl AudioOutputStatusInner {
             current: Mutex::new(None),
             queued_jobs: AtomicUsize::new(0),
             last_error: Mutex::new(None),
-            clip_cancels: Mutex::new(Vec::new()),
+            clip_cancels: Mutex::new(HashMap::new()),
+            next_cancel_id: AtomicU64::new(1),
         }
     }
 
@@ -113,6 +117,40 @@ impl AudioOutputStatusInner {
                 .expect("audio status poisoned")
                 .clone(),
         }
+    }
+
+    /// 先递增计数再 try_send：消费者 dequeue 时的 fetch_sub 不会与生产者竞争导致下溢
+    fn enqueue_job(
+        &self,
+        job_tx: &mpsc::Sender<AudioJob>,
+        build: impl FnOnce(u64) -> AudioJob,
+    ) -> Result<()> {
+        let cancel_id = self.next_cancel_id.fetch_add(1, Ordering::SeqCst);
+        self.queued_jobs.fetch_add(1, Ordering::SeqCst);
+        let job = build(cancel_id);
+        if job_tx.try_send(job).is_err() {
+            self.queued_jobs.fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow!("audio output queue full"));
+        }
+        Ok(())
+    }
+
+    fn dequeue_job(&self) {
+        self.queued_jobs.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn register_clip_cancel(&self, cancel_id: u64, cancel: Arc<AtomicBool>) {
+        self.clip_cancels
+            .lock()
+            .expect("audio status poisoned")
+            .insert(cancel_id, cancel);
+    }
+
+    fn unregister_clip_cancel(&self, cancel_id: u64) {
+        self.clip_cancels
+            .lock()
+            .expect("audio status poisoned")
+            .remove(&cancel_id);
     }
 }
 
@@ -245,24 +283,19 @@ impl AudioOutput {
     pub fn enqueue_pcm_clip(&self, pcm: PcmClipPayload) -> Result<ClipHandle> {
         pcm_payload_duration(&pcm)?;
         let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_job = cancel.clone();
         let (done_tx, done_rx) = oneshot::channel();
-        let job = AudioJob::PcmClip {
-            source: JobSource::SkillClip,
-            payload: pcm,
-            cancel: cancel.clone(),
-            done: done_tx,
-        };
-        self.inner
-            .job_tx
-            .try_send(job)
-            .map_err(|_| anyhow!("audio output queue full"))?;
-        self.inner.status.queued_jobs.fetch_add(1, Ordering::SeqCst);
-        self.inner
-            .status
-            .clip_cancels
-            .lock()
-            .expect("audio status poisoned")
-            .push(cancel.clone());
+        let status = &self.inner.status;
+        status.enqueue_job(&self.inner.job_tx, |cancel_id| {
+            status.register_clip_cancel(cancel_id, cancel_for_job.clone());
+            AudioJob::PcmClip {
+                source: JobSource::SkillClip,
+                payload: pcm,
+                cancel: cancel_for_job,
+                done: done_tx,
+                cancel_id,
+            }
+        })?;
         Ok(ClipHandle {
             cancel,
             done: done_rx,
@@ -278,17 +311,15 @@ impl AudioOutput {
         let (segment_tx, segment_rx) = mpsc::channel(TTS_SEGMENT_CAPACITY);
         let (done_tx, done_rx) = oneshot::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let job = AudioJob::EncodedStream {
-            source,
-            segment_rx,
-            cancel: cancel.clone(),
-            done: done_tx,
-        };
+        let cancel_for_job = cancel.clone();
         self.inner
-            .job_tx
-            .try_send(job)
-            .map_err(|_| anyhow!("audio output queue full"))?;
-        self.inner.status.queued_jobs.fetch_add(1, Ordering::SeqCst);
+            .status
+            .enqueue_job(&self.inner.job_tx, |_| AudioJob::EncodedStream {
+                source,
+                segment_rx,
+                cancel: cancel_for_job,
+                done: done_tx,
+            })?;
         Ok(TtsSession {
             segment_tx: Some(segment_tx),
             done_rx: Some(done_rx),
@@ -324,17 +355,14 @@ impl AudioOutput {
             .await
             .map_err(|_| anyhow!("encoded media segment channel closed"))?;
         drop(segment_tx);
-        let job = AudioJob::EncodedStream {
-            source: JobSource::External,
-            segment_rx,
-            cancel,
-            done: done_tx,
-        };
         self.inner
-            .job_tx
-            .try_send(job)
-            .map_err(|_| anyhow!("audio output queue full"))?;
-        self.inner.status.queued_jobs.fetch_add(1, Ordering::SeqCst);
+            .status
+            .enqueue_job(&self.inner.job_tx, |_| AudioJob::EncodedStream {
+                source: JobSource::External,
+                segment_rx,
+                cancel,
+                done: done_tx,
+            })?;
         match done_rx.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(anyhow!(error)),
@@ -342,20 +370,26 @@ impl AudioOutput {
         }
     }
 
-    /// 级联取消全部 SkillClip；返回本次置位的 clip 数
+    /// 级联取消全部仍在队列/播放中的 SkillClip
     pub fn stop_clips(&self) -> usize {
-        let cancels = std::mem::take(
-            &mut *self
-                .inner
-                .status
-                .clip_cancels
-                .lock()
-                .expect("audio status poisoned"),
-        );
-        cancels
-            .iter()
-            .filter(|cancel| !cancel.swap(true, Ordering::SeqCst))
-            .count()
+        let mut map = self
+            .inner
+            .status
+            .clip_cancels
+            .lock()
+            .expect("audio status poisoned");
+        let mut stopped = 0usize;
+        map.retain(|_, cancel| {
+            if cancel.load(Ordering::SeqCst) {
+                // 已取消/已完成标志：丢弃，避免陈旧条目
+                return false;
+            }
+            cancel.store(true, Ordering::SeqCst);
+            stopped += 1;
+            // 消费者在 job 收尾时 unregister；此处保留条目直至收尾
+            true
+        });
+        stopped
     }
 }
 
@@ -364,14 +398,16 @@ impl AudioOutputConsumer {
         let AudioOutputConsumer { mut job_rx, status } = self;
         while let Some(job) = job_rx.recv().await {
             let dequeue_at = Instant::now();
-            status.queued_jobs.fetch_sub(1, Ordering::SeqCst);
+            status.dequeue_job();
             match job {
                 AudioJob::PcmClip {
                     source,
                     payload,
                     cancel,
                     done,
+                    cancel_id,
                 } => {
+                    status.unregister_clip_cancel(cancel_id);
                     if cancel.load(Ordering::SeqCst) {
                         let _ = done.send(Ok(()));
                         continue;
@@ -515,7 +551,27 @@ async fn play_encoded_stream(
             }
         }
         if !segment.payload.is_empty() {
-            process_encoded_segment(&segment, ts3_audio_tx).await?;
+            match total_deadline {
+                Some(total) => {
+                    let remaining = total.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(anyhow!(
+                            "encoded stream job deadline exceeded after dequeue"
+                        ));
+                    }
+                    // 段处理期间也强制总截止时间，避免超大 payload 拖穿 MAX_JOB_SECS
+                    match timeout(remaining, process_encoded_segment(&segment, ts3_audio_tx)).await
+                    {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            return Err(anyhow!(
+                                "encoded stream job deadline exceeded after dequeue"
+                            ))
+                        }
+                    }
+                }
+                None => process_encoded_segment(&segment, ts3_audio_tx).await?,
+            }
         }
         let recv_timeout = match total_deadline {
             Some(total) => {
@@ -779,6 +835,44 @@ mod tests {
         drop(audio_tx);
         drop(h1);
         drop(h2);
+    }
+
+    #[tokio::test]
+    async fn clip_cancel_registry_does_not_accumulate_finished_jobs() {
+        let bus = AudioBus::new();
+        let output = bus.output.clone();
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(256);
+        tokio::spawn(bus.consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        for _ in 0..5 {
+            let handle = output.enqueue_pcm_clip(silence_clip(20)).unwrap();
+            handle.wait().await.unwrap();
+        }
+        assert_eq!(output.stop_clips(), 0);
+        let map_len = output
+            .inner
+            .status
+            .clip_cancels
+            .lock()
+            .expect("status poisoned")
+            .len();
+        assert_eq!(map_len, 0);
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_counter_does_not_underflow_under_race() {
+        let bus = AudioBus::new();
+        let output = bus.output.clone();
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(1024);
+        tokio::spawn(bus.consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        for _ in 0..32 {
+            let h = output.enqueue_pcm_clip(silence_clip(20)).unwrap();
+            let _ = h.wait().await;
+        }
+        assert_eq!(output.status().queued_jobs, 0);
     }
 
     #[tokio::test(start_paused = true)]
