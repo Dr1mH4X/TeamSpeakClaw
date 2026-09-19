@@ -32,7 +32,7 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 - `[llm]` — 填写 API Key、Base URL 和模型名称
 - `[headless.stt]` / `[headless.tts]` — 如需语音服务，启用并配置（可选）
 - `[napcat]` — 如需 QQ 机器人，启用并配置 WebSocket 地址（可选）
-- `[voice_replay]` — 如需语音回放，默认保持 `enabled = false`；开启后在 `acl.toml` 按组授予 `voice_replay`（可选，改配置需重启）。直呼与技能共用 ACL。用法见 [usage.md](usage.md)
+- `[voice_replay]` — 如需语音回放，默认保持 `enabled = false`；开启后在 `acl.toml` 按组授权（可选，改配置需重启）。直呼与技能共用 ACL。用法见 [usage.md](usage.md)
 
 详细配置说明请参考 [配置指南](/docs/configuration)。
 

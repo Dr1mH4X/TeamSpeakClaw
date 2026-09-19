@@ -81,9 +81,9 @@ The `[music_backend]` section controls which backend is used for music functiona
 Messages triggered via private message are always replied to via private message.
 Replies triggered from voice STT follow this mode as well.
 
-### Voice Replay (voice_replay)
+### Voice Replay
 
-The `[voice_replay]` section controls TeamSpeak recording-window replay. Defaults to off; **restart the process** after changing config (no hot reload).
+The `[voice_replay]` config section controls TeamSpeak recording-window replay. Defaults to off; **restart the process** after changing config (no hot reload).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -91,7 +91,7 @@ The `[voice_replay]` section controls TeamSpeak recording-window replay. Default
 | `window_secs` | integer | `30` | Recording window in seconds; valid range **1–120**; `seconds` above the window is clamped |
 | `direct_commands` | array | `["!replay", "!回放"]` | Channel direct-command prefixes |
 
-- Skill `voice_replay` and direct commands (`!replay [N] [@Name]`) share the **same ACL**.
+- The voice replay skill and direct commands (`!replay [N] [@Name]`) share the **same ACL**.
 - **Default** `!replay`: mix-replay speakers **already recorded** over `window_secs` (default 30s); the bot itself is excluded. Music bots: see `musicbot_name` above.
 - **Empty window**: if nobody is available to replay, the bot says so and does not play blank audio.
 - Nicknames accept `<@clid|Name>` / `@clid|Name` / `@Name` / bare nick.
@@ -119,7 +119,7 @@ Controls which user groups can use which features. **All matching rules' allowed
 | `get_client_info` | Get detailed user info |
 | `music_control` | Music control |
 | `web_search` | Search the web for current information |
-| `voice_replay` | Voice window replay: `replay` and `!replay [N] [@Name]`; per-speaker is more sensitive |
+| `voice_replay` | Voice window replay via `!replay [N] [@Name]`; per-speaker is more sensitive |
 
 ### NapCat and Cross-platform Behavior Notes
 

@@ -81,17 +81,17 @@ sidebar_position: 3
 私聊触发的消息始终以私聊方式回复。
 语音 STT 触发后的回复也遵循该模式。
 
-### 语音回放 (voice_replay)
+### 语音回放
 
-`[voice_replay]` 区段控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效（无热重载）。
+配置区段 `[voice_replay]` 控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效（无热重载）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `enabled` | bool | `false` | 是否启用录制回放与 `voice_replay` 技能/直呼 |
+| `enabled` | bool | `false` | 是否启用录制回放与语音回放技能/直呼 |
 | `window_secs` | integer | `30` | 录音窗秒数，合法范围 **1–120**；`seconds` 超窗时 clamp |
 | `direct_commands` | 数组 | `["!replay", "!回放"]` | 频道直呼前缀 |
 
-- 技能 `voice_replay` 与直呼（`!replay [N] [@Name]`）**共用同一 ACL**。
+- 语音回放技能与直呼（`!replay [N] [@Name]`）**共用同一 ACL**。
 - **缺省** `!replay`：按 `window_secs`（默认 30s）混音回放窗内**已录制到的**说话人（不含机器人自己；音乐机器人见上方 `musicbot_name` 说明）。
 - **空窗**：窗内没有可回放的说话人时提示 empty，不会播放空白音频。
 - 昵称支持 `<@clid|Name>` / `@clid|Name` / `@Name` / 裸昵称。
@@ -119,7 +119,7 @@ sidebar_position: 3
 | `get_client_info` | 获取用户详细信息 |
 | `music_control` | 音乐控制 |
 | `web_search` | 搜索最新网络信息 |
-| `voice_replay` | 语音窗口回放：`replay` 与 `!replay [N] [@Name]`；单人回放更敏感 |
+| `voice_replay` | 语音窗口回放：可对窗内说话人执行 `!replay [N] [@Name]`；单人回放更敏感 |
 
 ### NapCat 与跨平台行为说明
 

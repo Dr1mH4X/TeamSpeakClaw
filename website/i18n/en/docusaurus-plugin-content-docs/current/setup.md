@@ -32,7 +32,7 @@ Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak se
 - `[llm]` — API Key, Base URL, model name
 - `[headless.stt]` / `[headless.tts]` — Enable if you need voice services (optional)
 - `[napcat]` — Enable and set WebSocket URL for QQ bot (optional)
-- `[voice_replay]` — Leave `enabled = false` unless you need replay; if enabled, grant `voice_replay` in `acl.toml` by group (optional; restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
+- `[voice_replay]` — Leave `enabled = false` unless you need replay; if enabled, grant access in `acl.toml` by group (optional; restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
 - `prompts.toml` — System prompts and error messages
 
 Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.

@@ -44,10 +44,10 @@ INFO Bot ready. Listening for TS + NapCat events.
     -   例如: （说）`tsclaw 播放周杰伦的夜曲`
     -   **未开 STT 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
 
-4.  **语音回放 voice_replay**（可选，`[voice_replay] enabled = true`，改配置后**重启**生效）：
+4.  **语音回放**（可选：在配置里启用录音窗回放，改配置后**重启**生效）：
 
     **前置**
-    - 在 `acl.toml` 为需要的组授予技能 `voice_replay`（与直呼同一 ACL）。
+    - 在 `acl.toml` 为需要的组授予语音回放权限（与直呼同一 ACL）。
     - **有人类在频道说话**之后再回放；窗内无人类语音时不会回放出有效内容。
 
     | 直呼 | 含义 |
@@ -77,7 +77,7 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 机器人目前支持以下技能（取决于您的权限配置）：
 
-### 语音回放 (voice_replay)
+### 语音回放
 
 自然语言示例：「刚才谁说了啥」「回放一下」「回放 Alice 最近 10 秒」。
 

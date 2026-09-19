@@ -44,10 +44,10 @@ You can interact with the bot in the following ways:
     -   Example: (Say) `tsclaw play Nocturne by Jay Chou`
     -   **Without STT**: spoken natural-language triggers are unavailable; chat into the bridge and direct commands still work
 
-4.  **Voice Replay voice_replay** (Optional, `[voice_replay] enabled = true`, **restart** after config change):
+4.  **Voice Replay** (Optional: enable the recording window in config, **restart** after changes):
 
     **Prerequisites**
-    - Grant skill `voice_replay` to the needed groups in `acl.toml` (same ACL as direct commands).
+    - Grant voice replay in `acl.toml` (same ACL as direct commands).
     - Replay **after humans have spoken** in the channel; an empty recording window has nothing useful to play.
 
     | Direct command | Meaning |
@@ -77,7 +77,7 @@ You can interact with the bot in the following ways:
 
 The bot currently supports the following skills (depending on your permission configuration):
 
-### Voice Replay (voice_replay)
+### Voice Replay
 
 Natural-language examples: “What did they just say?”, “Replay that”, “Replay Alice for the last 10 seconds”.
 
