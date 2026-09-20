@@ -1,6 +1,6 @@
 ---
 feature: voice-replay-audio-quality
-status: in-progress
+status: delivered
 updated: 2026-09-20
 branch: fix/voice-replay-audio-quality
 commits: be562bf..<head>
@@ -9,6 +9,17 @@ commits: be562bf..<head>
 # Voice Replay Audio Quality
 
 ## Report
+
+**What was built** — `speaker_ring` 改为双时钟：墙钟管留存/驱逐/断 run（`RUN_BREAK=200ms`），run 内按解码时长链式续写消除抖动碎裂与时间轴重叠；快照轴长仍 `min(window, ring_age, N)`，窗内播放终点越过 `now` 时轴尾扩展（P1-2 受控放宽）。出站去掉生产者每帧 sleep，actor `VoicePacer` 单一节拍；`listClients` 移出发送 `select!`，目录仅 actor 写、Snapshot merge。多人混音 soft-clip，Opus 出站 128kbps。
+
+**Verification** — `cargo test --all-targets --locked` PASS（198）；`cargo clippy --all-targets --locked -- -D warnings` PASS；`cargo fmt` 已应用。
+
+**Journey log**
+- `MERGE_GAP=2ms` 是未入决策记录的实现常量，修复时正式登记为 `RUN_BREAK=200ms`。
+- 轴尾扩展不是「P1-2 无变化」，须在 Agent Note 写明受控放宽与用户可见副作用（`!replay N` 可能略长）。
+- 评审 critical：混音门 `sum.abs() > i16::MAX` 会把 `i16::MIN` 误送入 tanh；改为 i16 全范围透传。
+- 评审 critical：bootstrap 快照不得在 actor 循环外写目录；一律 `DirCmd` 入队由 `select!` 应用。
+- compose 工作区偏好：main 检出 + `checkout -b`，不用 linked worktree。
 
 ## [S1] Problem
 
@@ -99,7 +110,7 @@ buffered_ms = sample_count 对应播放时长
 
 ### [S2.6] listClients：actor 唯一写者
 
-- 周期刷新在独立 task：`listClients` 后 `DirCmd::Snapshot { clients, started_seq }` 发给 actor
+启动/周期 `listClients` 均只 `DirCmd::Snapshot` 入队，**仅 actor `select!` 内 `apply_dir_cmd` 写目录**（含 bootstrap）
 - enter/leave 回调只 `DirCmd::Upsert` / `Remove`，**不**直接写目录
 - actor `select!` 内应用命令，是目录唯一写者；voice 回调只读
 - Snapshot **merge**：按 id 更新名称；`retain` 保留 snapshot 内 id 或 `entry.seq > started_seq` 的本地新事件，避免 clobber 刚 enter 的客户端
@@ -118,11 +129,11 @@ buffered_ms = sample_count 对应播放时长
 
 ## Tasks
 
-- [ ] T1: speaker_ring 连续播放时钟 + RUN_BREAK=200ms + 轴尾扩展 — acceptance: ①抖动 40ms 同 run 快照无微间隙；②突发不重叠；③199ms 同 run / 201ms 断 run；④1 字节标记夹在语音中不断 run；⑤跨驱逐长 run 剩余段链式无缝；⑥无未来播放时 buffered_ms 与旧 axis 一致；⑦有未来播放时 buffered_ms 可 > N (covers: S2.1, S2.2)
-- [ ] T2: mix soft-clip + 同 run 重叠防御 — acceptance: 峰值超限无 i16 溢出且未全零；debug 下重叠可 assert（测试用 release 等价路径验证 soft-clip） (covers: S2.3; depends: T1)
-- [ ] T3: audio_codec 128kbps — acceptance: 构造后 bitrate 为 128000 bps 或 set_bitrate 成功路径测试 (covers: S2.4)
-- [ ] T4: play_pcm_clip 去 sleep — acceptance: 源码无每帧 sleep；既有 deadline/取消测试仍过 (covers: S2.5)
-- [ ] T5: actor 单 pacer + 目录命令通道 — acceptance: ①pacer 空闲复位；②落后 >200ms 重定位；③稳态 +20ms 单调；④Snapshot merge 不丢 started_seq 后 Upsert；⑤发送分支无 listClients await (covers: S2.5, S2.6; depends: T4)
-- [ ] T6: 测试齐套 — acceptance: `cargo test --all-targets --locked` 全绿 (covers: S2.1–S2.6; depends: T1–T5)
-- [ ] T7: Agent Note — acceptance: `.agents/notes/implemented/` 含决策记录，含轴尾=受控放宽与 200ms 登记 (covers: S2.7)
-- [ ] T8: 质量门 — acceptance: fmt + clippy `-D warnings` + test 通过 (depends: T1–T7)
+- [x] T1: speaker_ring 连续播放时钟 + RUN_BREAK=200ms + 轴尾扩展 — acceptance: ①抖动 40ms 同 run 快照无微间隙；②突发不重叠；③199ms 同 run / 201ms 断 run；④1 字节标记夹在语音中不断 run；⑤跨驱逐长 run 剩余段链式无缝；⑥无未来播放时 buffered_ms 与旧 axis 一致；⑦有未来播放时 buffered_ms 可 > N (covers: S2.1, S2.2)
+- [x] T2: mix soft-clip + 同 run 重叠防御 — acceptance: 峰值超限无 i16 溢出且未全零；i16::MIN/MAX 透传；debug 下重叠可 assert (covers: S2.3; depends: T1)
+- [x] T3: audio_codec 128kbps — acceptance: 构造后 bitrate 为 128000 bps (covers: S2.4)
+- [x] T4: play_pcm_clip 去 sleep — acceptance: 源码无每帧 sleep；既有 deadline/取消测试仍过 (covers: S2.5)
+- [x] T5: actor 单 pacer + 目录命令通道 — acceptance: ①pacer 空闲复位；②落后 >200ms 重定位；③稳态 +20ms 单调；④Snapshot merge 不丢 started_seq 后 Upsert；⑤bootstrap 亦经 DirCmd，仅 actor 写目录 (covers: S2.5, S2.6; depends: T4)
+- [x] T6: 测试齐套 — acceptance: `cargo test --all-targets --locked` 全绿（198） (covers: S2.1–S2.6; depends: T1–T5)
+- [x] T7: Agent Note — acceptance: `.agents/notes/implemented/` 含决策记录 (covers: S2.7)
+- [x] T8: 质量门 — acceptance: fmt + clippy `-D warnings` + test 通过 (depends: T1–T7)

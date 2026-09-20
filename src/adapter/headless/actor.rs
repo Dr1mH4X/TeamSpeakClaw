@@ -257,21 +257,14 @@ pub async fn ts3_actor(
     let dir_seq = Arc::new(AtomicU64::new(0));
     let (dir_tx, mut dir_rx) = mpsc::channel::<DirCmd>(DIR_CMD_CAPACITY);
 
-    // 启动时先拉一次目录，再交给周期 task（先 await 再加锁，避免 Guard 跨 await）
-    match fetch_clients(&client).await {
-        Ok(clients) => {
-            let mut state = client_directory.lock().expect("client directory poisoned");
-            apply_dir_cmd(
-                &mut state,
-                DirCmd::Snapshot {
-                    clients,
-                    started_seq: 0,
-                },
-                &dir_seq,
-            );
+    // 启动快照经命令通道交给 actor 应用，保持目录唯一写者
+    let bootstrap_clients = match fetch_clients(&client).await {
+        Ok(clients) => Some(clients),
+        Err(e) => {
+            warn!("初始化 TeamSpeak 客户端目录失败: {e}");
+            None
         }
-        Err(e) => warn!("初始化 TeamSpeak 客户端目录失败: {e}"),
-    }
+    };
     spawn_directory_refresher(
         client.clone(),
         dir_tx.clone(),
@@ -296,6 +289,19 @@ pub async fn ts3_actor(
                 let _ = leave_tx.try_send(DirCmd::Remove { clid: info.id });
             }
         }));
+    }
+
+    if let Some(clients) = bootstrap_clients {
+        if dir_tx
+            .send(DirCmd::Snapshot {
+                clients,
+                started_seq: 0,
+            })
+            .await
+            .is_err()
+        {
+            warn!("bootstrap directory snapshot enqueue failed");
+        }
     }
 
     let audio_tx_v = channels.audio_tx.clone();

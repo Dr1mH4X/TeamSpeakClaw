@@ -105,13 +105,13 @@ fn axis_ms(inner: &Inner, now: Instant, seconds: Option<u32>) -> u64 {
     axis
 }
 
-/// soft-clip：范围内透传；超限 tanh 渐近饱和
+/// soft-clip：i16 全范围透传；超限 tanh 渐近饱和
 pub fn soft_clip_i32_to_i16(sum: i32) -> i16 {
-    const MAX: f32 = i16::MAX as f32;
-    let x = sum as f32;
-    if x.abs() <= MAX {
+    if (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&sum) {
         return sum as i16;
     }
+    const MAX: f32 = i16::MAX as f32;
+    let x = sum as f32;
     let y = MAX * (x / MAX).tanh();
     y.clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
@@ -431,11 +431,8 @@ fn mix_track_into(out: &mut [i16], track: &SpeakerTrack, axis_start: Instant) {
                 break;
             }
             let sum = i32::from(out[idx]) + i32::from(*sample);
-            out[idx] = if sum.abs() > i32::from(i16::MAX) {
-                soft_clip_i32_to_i16(sum)
-            } else {
-                sum as i16
-            };
+            // i16 全范围（含 MIN）透传；仅真正越界走 soft-clip
+            out[idx] = soft_clip_i32_to_i16(sum);
             write_end = idx + 1;
         }
     }
@@ -843,9 +840,40 @@ mod tests {
         assert_eq!(soft_clip_i32_to_i16(100), 100);
         assert_eq!(soft_clip_i32_to_i16(-100), -100);
         assert_eq!(soft_clip_i32_to_i16(i32::from(i16::MAX)), i16::MAX);
+        assert_eq!(soft_clip_i32_to_i16(i32::from(i16::MIN)), i16::MIN);
         let over = soft_clip_i32_to_i16(50_000);
         assert!((20_000..=i16::MAX).contains(&over));
         let over_neg = soft_clip_i32_to_i16(-50_000);
         assert!((i16::MIN..=-20_000).contains(&over_neg));
+    }
+
+    #[test]
+    fn eviction_does_not_clear_run_append_state() {
+        let rings = SpeakerRings::new(Duration::from_millis(300));
+        let t0 = Instant::now();
+        let frame = pcm_ms(20);
+        let mut at = t0;
+        for _ in 0..40 {
+            rings.append_pcm(1, "alice", frame.clone(), at);
+            at += Duration::from_millis(20);
+        }
+        {
+            let inner = rings.inner.lock().unwrap();
+            let track = inner.tracks.get(&1).expect("track");
+            assert!(track.last_frame_at.is_some());
+        }
+        let before_ms = {
+            let inner = rings.inner.lock().unwrap();
+            let last = inner.tracks.get(&1).unwrap().segments.back().unwrap();
+            stereo_48k_duration(last.samples.len()).as_millis() as u64
+        };
+        rings.append_pcm(1, "alice", frame.clone(), at);
+        let inner = rings.inner.lock().unwrap();
+        let track = inner.tracks.get(&1).expect("track");
+        assert!(track.last_frame_at.is_some());
+        let last = track.segments.back().expect("segment");
+        let after_ms = stereo_48k_duration(last.samples.len()).as_millis() as u64;
+        // 驱逐不清 last_frame_at：同 run 续帧并入末段
+        assert!(after_ms > before_ms);
     }
 }
