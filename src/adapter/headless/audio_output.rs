@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{timeout, Instant};
 use tracing::{debug, warn};
 
 use super::audio_codec::{
@@ -490,7 +490,7 @@ async fn play_pcm_clip(
             return Err(anyhow!("ts3 audio channel closed"));
         }
         offset += PCM_FRAME_SAMPLES_STEREO;
-        sleep(std::time::Duration::from_millis(PCM_FRAME_MS)).await;
+        // 单 pacer：生产者不 sleep，节奏由 actor 消费端按累计 20ms 发送；通道满则背压
     }
     Ok(())
 }
@@ -728,6 +728,7 @@ async fn process_encoded_segment(
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::time::sleep;
 
     fn silence_clip(ms: u64) -> PcmClipPayload {
         let samples = vec![0i16; (ms as usize) * 96];
