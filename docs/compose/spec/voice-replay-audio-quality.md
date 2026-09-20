@@ -3,7 +3,7 @@ feature: voice-replay-audio-quality
 status: delivered
 updated: 2026-09-20
 branch: fix/voice-replay-audio-quality
-commits: be562bf..<head>
+commits: be562bf..c0b2459
 ---
 
 # Voice Replay Audio Quality
