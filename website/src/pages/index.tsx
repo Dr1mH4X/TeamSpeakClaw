@@ -24,7 +24,7 @@ function HomepageHeader() {
         <div className={styles.buttons}>
           <Link
             className={clsx("button button--lg", styles.getStartedButton)}
-            to="/docs/intro"
+            to="/docs/setup"
           >
             <Translate id="homepage.getStarted">快速开始</Translate>
           </Link>
@@ -73,13 +73,13 @@ export default function Home(): React.JSX.Element {
             />
             <FeatureItem
               title={
-                <Translate id="homepage.features.cloudMusic.title">
-                  外部音乐机器人
+                <Translate id="homepage.features.skillSystem.title">
+                  丰富的技能系统
                 </Translate>
               }
               description={
-                <Translate id="homepage.features.cloudMusic.description">
-                  无缝集成 TSMusicBot 等外部音乐机器人。
+                <Translate id="homepage.features.skillSystem.description">
+                  内置音乐控制、即时重放、联网搜索等技能。
                 </Translate>
               }
             />

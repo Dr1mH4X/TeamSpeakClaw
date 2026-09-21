@@ -98,7 +98,7 @@ const config: Config = {
           items: [
             {
               label: "快速开始",
-              to: "/docs/intro",
+              to: "/docs/setup",
             },
           ],
         },

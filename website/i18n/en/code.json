@@ -23,11 +23,11 @@
   "homepage.features.rbacSecurity.description": {
     "message": "Role-based access control system. Secure, granular, and robust."
   },
-  "homepage.features.cloudMusic.title": {
-    "message": "EXTERNAL MUSIC BOT"
+  "homepage.features.skillSystem.title": {
+    "message": "RICH SKILL SYSTEM"
   },
-  "homepage.features.cloudMusic.description": {
-    "message": "Seamless integration with TSMusicBot and other external music bots."
+  "homepage.features.skillSystem.description": {
+    "message": "Built-in skills such as music control, instant voice replay, and web search."
   },
   "homepage.features.lightweight.title": {
     "message": "ULTRA LIGHTWEIGHT"
