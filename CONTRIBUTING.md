@@ -32,7 +32,11 @@
 
 ## Issue 与安全
 
-Bug 报告使用 [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md)。安全漏洞按 [SECURITY.md](SECURITY.md) 提交，不在公开 Issue 贴出 API key、token 或配置文件中的密文。
+Bug 报告使用 [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md)：先勾选模块定位，再填复现步骤与排查记录，便于接手排查。安全漏洞按 [SECURITY.md](SECURITY.md) 提交，不在公开 Issue 贴出 API key、token 或配置文件中的密文。
+
+## Pull Request
+
+创建 PR 时使用 [.github/pull_request_template.md](.github/pull_request_template.md)：勾选变更类型与影响范围，填写验证与质量门结果；非平凡变更补决策记录要点，见 [docs/agent-notes.md](docs/agent-notes.md)。
 
 ## 写文档
 
