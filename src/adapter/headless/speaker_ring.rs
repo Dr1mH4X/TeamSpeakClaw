@@ -105,15 +105,16 @@ fn axis_ms(inner: &Inner, now: Instant, seconds: Option<u32>) -> u64 {
     axis
 }
 
-/// soft-clip：i16 全范围透传；超限 tanh 渐近饱和
+/// soft-clip：i16 全范围透传；超限用与恒等衔接的连续曲线 MAX²/|x|
 pub fn soft_clip_i32_to_i16(sum: i32) -> i16 {
+    const MAX: f32 = i16::MAX as f32;
     if (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&sum) {
         return sum as i16;
     }
-    const MAX: f32 = i16::MAX as f32;
     let x = sum as f32;
-    let y = MAX * (x / MAX).tanh();
-    y.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    // |x|>MAX 时输出从 MAX 平滑滚降，避免 32767→tanh 跳变
+    let y = MAX * MAX / x.abs();
+    y.copysign(x).clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 impl SpeakerRings {
@@ -841,10 +842,19 @@ mod tests {
         assert_eq!(soft_clip_i32_to_i16(-100), -100);
         assert_eq!(soft_clip_i32_to_i16(i32::from(i16::MAX)), i16::MAX);
         assert_eq!(soft_clip_i32_to_i16(i32::from(i16::MIN)), i16::MIN);
+        // 过载一点须贴近满幅，禁止 32767→~24950 跳变
+        let just_over = soft_clip_i32_to_i16(32_768);
+        assert!(
+            just_over >= 32_000,
+            "soft-clip must stay continuous at i16::MAX, got {just_over}"
+        );
         let over = soft_clip_i32_to_i16(50_000);
         assert!((20_000..=i16::MAX).contains(&over));
+        assert!(over < just_over);
         let over_neg = soft_clip_i32_to_i16(-50_000);
         assert!((i16::MIN..=-20_000).contains(&over_neg));
+        let just_over_neg = soft_clip_i32_to_i16(-32_768);
+        assert!(just_over_neg <= -32_000);
     }
 
     #[test]

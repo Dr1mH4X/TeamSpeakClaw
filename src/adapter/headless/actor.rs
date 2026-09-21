@@ -31,6 +31,8 @@ struct DirEntry {
 #[derive(Default)]
 struct DirectoryState {
     clients: HashMap<i32, DirEntry>,
+    /// 离开墓碑：clid → Remove 时的 seq，阻止陈旧 Snapshot 回填
+    removed: HashMap<i32, u64>,
 }
 
 type ClientDirectory = Arc<Mutex<DirectoryState>>;
@@ -172,10 +174,13 @@ fn apply_dir_cmd(state: &mut DirectoryState, cmd: DirCmd, seq: &AtomicU64) {
     match cmd {
         DirCmd::Upsert { clid, name } => {
             let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
+            state.removed.remove(&clid);
             state.clients.insert(clid, DirEntry { name, seq: s });
         }
         DirCmd::Remove { clid } => {
+            let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
             state.clients.remove(&clid);
+            state.removed.insert(clid, s);
         }
         DirCmd::Snapshot {
             clients,
@@ -183,6 +188,14 @@ fn apply_dir_cmd(state: &mut DirectoryState, cmd: DirCmd, seq: &AtomicU64) {
         } => {
             let snap_ids: HashSet<i32> = clients.iter().map(|(id, _)| *id).collect();
             for (id, name) in clients {
+                // started_seq 之后本地 Remove 过的 id：不得被陈旧快照回填
+                if state
+                    .removed
+                    .get(&id)
+                    .is_some_and(|remove_seq| *remove_seq > started_seq)
+                {
+                    continue;
+                }
                 match state.clients.entry(id) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         if e.get().seq <= started_seq {
@@ -197,6 +210,10 @@ fn apply_dir_cmd(state: &mut DirectoryState, cmd: DirCmd, seq: &AtomicU64) {
             state
                 .clients
                 .retain(|id, e| snap_ids.contains(id) || e.seq > started_seq);
+            // 墓碑：已不在快照且不比 started_seq 新的可丢弃
+            state
+                .removed
+                .retain(|id, remove_seq| *remove_seq > started_seq && snap_ids.contains(id));
         }
     }
 }
@@ -291,14 +308,21 @@ pub async fn ts3_actor(
     let dir_seq = Arc::new(AtomicU64::new(0));
     let (dir_tx, mut dir_rx) = mpsc::channel::<DirCmd>(DIR_CMD_CAPACITY);
 
-    // 启动快照经命令通道交给 actor 应用，保持目录唯一写者
-    let bootstrap_clients = match fetch_clients(&client).await {
-        Ok(clients) => Some(clients),
-        Err(e) => {
-            warn!("初始化 TeamSpeak 客户端目录失败: {e}");
-            None
+    // bootstrap 在注册任何回调之前应用：此刻无并发写者，voice 不会读到空目录
+    match fetch_clients(&client).await {
+        Ok(clients) => {
+            let mut state = client_directory.lock().expect("client directory poisoned");
+            apply_dir_cmd(
+                &mut state,
+                DirCmd::Snapshot {
+                    clients,
+                    started_seq: 0,
+                },
+                &dir_seq,
+            );
         }
-    };
+        Err(e) => warn!("初始化 TeamSpeak 客户端目录失败: {e}"),
+    }
     spawn_directory_refresher(
         client.clone(),
         dir_tx.clone(),
@@ -333,16 +357,6 @@ pub async fn ts3_actor(
                 );
             }
         }));
-    }
-
-    if let Some(clients) = bootstrap_clients {
-        let outcome = classify_dir_enqueue(dir_tx.try_send(DirCmd::Snapshot {
-            clients,
-            started_seq: 0,
-        }));
-        if outcome == DirEnqueueOutcome::Full {
-            warn!("bootstrap directory snapshot enqueue full");
-        }
     }
 
     let audio_tx_v = channels.audio_tx.clone();
@@ -585,5 +599,44 @@ mod tests {
             classify_dir_enqueue(tx.try_send(DirCmd::Remove { clid: 3 })),
             DirEnqueueOutcome::Closed
         );
+    }
+
+    #[test]
+    fn snapshot_does_not_resurrect_client_removed_after_started_seq() {
+        let seq = AtomicU64::new(0);
+        let mut state = DirectoryState::default();
+        // 快照捕获时列表含 B
+        apply_dir_cmd(
+            &mut state,
+            DirCmd::Snapshot {
+                clients: vec![(1, "alice".into()), (2, "bob".into())],
+                started_seq: 0,
+            },
+            &seq,
+        );
+        let started = seq.load(Ordering::SeqCst);
+        // listClients 进行中 B 离开
+        apply_dir_cmd(&mut state, DirCmd::Remove { clid: 2 }, &seq);
+        // 陈旧快照仍含 B → 不得回填
+        apply_dir_cmd(
+            &mut state,
+            DirCmd::Snapshot {
+                clients: vec![(1, "alice".into()), (2, "bob".into())],
+                started_seq: started,
+            },
+            &seq,
+        );
+        assert_eq!(read_dir_name_from_state(&state, 2), "");
+        assert_eq!(read_dir_name_from_state(&state, 1), "alice");
+        // 后续 upsert（重新进房）应恢复
+        apply_dir_cmd(
+            &mut state,
+            DirCmd::Upsert {
+                clid: 2,
+                name: "bob".into(),
+            },
+            &seq,
+        );
+        assert_eq!(read_dir_name_from_state(&state, 2), "bob");
     }
 }
