@@ -133,6 +133,40 @@ fn read_dir_name_from_state(state: &DirectoryState, clid: i32) -> String {
         .unwrap_or_default()
 }
 
+/// 目录命令投递结果：Closed（actor 已退出/shutdown）与 Full（队列满）须区分
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirEnqueueOutcome {
+    Queued,
+    Full,
+    Closed,
+}
+
+fn classify_dir_enqueue(
+    result: Result<(), mpsc::error::TrySendError<DirCmd>>,
+) -> DirEnqueueOutcome {
+    match result {
+        Ok(()) => DirEnqueueOutcome::Queued,
+        Err(mpsc::error::TrySendError::Full(_)) => DirEnqueueOutcome::Full,
+        Err(mpsc::error::TrySendError::Closed(_)) => DirEnqueueOutcome::Closed,
+    }
+}
+
+/// 回调侧投递：Full 告警；Closed 为 shutdown 预期路径，静默
+fn enqueue_dir_cmd(
+    tx: &mpsc::Sender<DirCmd>,
+    cmd: DirCmd,
+    op: &'static str,
+    clid: i32,
+) -> DirEnqueueOutcome {
+    let outcome = classify_dir_enqueue(tx.try_send(cmd));
+    match outcome {
+        DirEnqueueOutcome::Queued => {}
+        DirEnqueueOutcome::Full => warn!(clid, op, "directory cmd enqueue full"),
+        DirEnqueueOutcome::Closed => {}
+    }
+    outcome
+}
+
 /// actor 唯一写者：应用目录命令；快照 merge，不覆盖 started_seq 之后的本地事件
 fn apply_dir_cmd(state: &mut DirectoryState, cmd: DirCmd, seq: &AtomicU64) {
     match cmd {
@@ -277,30 +311,37 @@ pub async fn ts3_actor(
         let enter_tx = dir_tx.clone();
         client.on_client_enter(Arc::new(move |event: tsclient_rs::Event| {
             if let tsclient_rs::Event::ClientEnter(ref info) = event {
-                let _ = enter_tx.try_send(DirCmd::Upsert {
-                    clid: info.id,
-                    name: info.nickname.clone(),
-                });
+                enqueue_dir_cmd(
+                    &enter_tx,
+                    DirCmd::Upsert {
+                        clid: info.id,
+                        name: info.nickname.clone(),
+                    },
+                    "Upsert",
+                    info.id,
+                );
             }
         }));
         let leave_tx = dir_tx.clone();
         client.on_client_leave(Arc::new(move |event: tsclient_rs::Event| {
             if let tsclient_rs::Event::ClientLeave(ref info) = event {
-                let _ = leave_tx.try_send(DirCmd::Remove { clid: info.id });
+                enqueue_dir_cmd(
+                    &leave_tx,
+                    DirCmd::Remove { clid: info.id },
+                    "Remove",
+                    info.id,
+                );
             }
         }));
     }
 
     if let Some(clients) = bootstrap_clients {
-        if dir_tx
-            .send(DirCmd::Snapshot {
-                clients,
-                started_seq: 0,
-            })
-            .await
-            .is_err()
-        {
-            warn!("bootstrap directory snapshot enqueue failed");
+        let outcome = classify_dir_enqueue(dir_tx.try_send(DirCmd::Snapshot {
+            clients,
+            started_seq: 0,
+        }));
+        if outcome == DirEnqueueOutcome::Full {
+            warn!("bootstrap directory snapshot enqueue full");
         }
     }
 
@@ -493,5 +534,56 @@ mod tests {
         );
         assert_eq!(read_dir_name_from_state(&state, 9), "");
         assert_eq!(read_dir_name_from_state(&state, 1), "alice");
+    }
+
+    #[tokio::test]
+    async fn dir_enqueue_closed_is_expected_on_shutdown() {
+        let (tx, rx) = mpsc::channel::<DirCmd>(4);
+        drop(rx);
+        let outcome = enqueue_dir_cmd(&tx, DirCmd::Remove { clid: 837 }, "Remove", 837);
+        assert_eq!(outcome, DirEnqueueOutcome::Closed);
+    }
+
+    #[tokio::test]
+    async fn dir_enqueue_full_is_classified() {
+        let (tx, _rx) = mpsc::channel::<DirCmd>(1);
+        let first = enqueue_dir_cmd(
+            &tx,
+            DirCmd::Upsert {
+                clid: 1,
+                name: "a".into(),
+            },
+            "Upsert",
+            1,
+        );
+        assert_eq!(first, DirEnqueueOutcome::Queued);
+        let second = enqueue_dir_cmd(
+            &tx,
+            DirCmd::Upsert {
+                clid: 2,
+                name: "b".into(),
+            },
+            "Upsert",
+            2,
+        );
+        assert_eq!(second, DirEnqueueOutcome::Full);
+    }
+
+    #[test]
+    fn classify_dir_enqueue_maps_try_send_error() {
+        let (tx, rx) = mpsc::channel::<DirCmd>(1);
+        assert_eq!(
+            classify_dir_enqueue(tx.try_send(DirCmd::Remove { clid: 1 })),
+            DirEnqueueOutcome::Queued
+        );
+        assert_eq!(
+            classify_dir_enqueue(tx.try_send(DirCmd::Remove { clid: 2 })),
+            DirEnqueueOutcome::Full
+        );
+        drop(rx);
+        assert_eq!(
+            classify_dir_enqueue(tx.try_send(DirCmd::Remove { clid: 3 })),
+            DirEnqueueOutcome::Closed
+        );
     }
 }
