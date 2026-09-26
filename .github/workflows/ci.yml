@@ -13,7 +13,6 @@ on:
       - ".cargo/**"
       - ".dockerignore"
       - "Dockerfile"
-      - "examples/config/**"
       - "proto/**"
       - "src/**"
       - "tests/**"
