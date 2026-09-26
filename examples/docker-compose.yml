@@ -7,31 +7,10 @@ services:
     user: "1000:10" #PUID:GUID
     restart: unless-stopped
     volumes:
-      - ./config:/app/config  # 配置文件目录（必须）
-      - ./logs:/app/logs  # 日志目录
+      - ./config:/app/config
+      - ./logs:/app/logs
     environment:
       - TZ=Asia/Shanghai
-    networks:
-      - openteamspeak
-    depends_on: # 若无需本地STT需求可以注释掉depends_on和下方stt-api块
-      - stt-api
-
-  stt-api:
-    image: ghcr.io/ggml-org/whisper.cpp:main-vulkan
-    container_name: whisper-stt-api
-    restart: unless-stopped
-    volumes:
-      - ./models:/models:ro # whisper 模型目录（只读）
-    environment:
-      - TZ=Asia/Shanghai
-    devices:
-      - /dev/dri  # Intel/AMD GPU 加速（可选，无 GPU 可删除此行）
-    entrypoint: ""
-    command: >
-      whisper-server
-      --host 0.0.0.0
-      --port 9000
-      -m /models/ggml-large-v3-turbo.bin
     networks:
       - openteamspeak
 

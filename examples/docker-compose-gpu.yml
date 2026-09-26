@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  teamspeakclaw:
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest
+    container_name: teamspeakclaw
+    user: "1000:10" #PUID:GUID
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - openteamspeak
+    depends_on:
+      - stt-api
+
+  # Intel / AMD GPU 加速（Vulkan 后端）。
+  stt-api:
+    image: ghcr.io/ggml-org/whisper.cpp:main-vulkan
+    container_name: whisper-stt-api
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro # whisper 模型目录（只读）
+    environment:
+      - TZ=Asia/Shanghai
+    devices:
+      - /dev/dri  # Intel/AMD GPU 加速
+    entrypoint: ""
+    command: >
+      whisper-server
+      --host 0.0.0.0
+      --port 9000
+      -m /models/ggml-large-v3-turbo.bin
+    networks:
+      - openteamspeak
+
+networks:
+  openteamspeak:
+    driver: bridge

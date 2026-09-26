@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  teamspeakclaw:
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest
+    container_name: teamspeakclaw
+    user: "1000:10" #PUID:GUID
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - openteamspeak
+    depends_on:
+      - stt-api
+
+  # NVIDIA GPU 加速（CUDA 后端）。
+  # 前置：宿主机已安装 NVIDIA 驱动 + nvidia-container-toolkit。
+  stt-api:
+    image: ghcr.io/ggml-org/whisper.cpp:main-cuda
+    container_name: whisper-stt-api
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro # whisper 模型目录（只读）
+    environment:
+      - TZ=Asia/Shanghai
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint: ""
+    command: >
+      whisper-server
+      --host 0.0.0.0
+      --port 9000
+      -m /models/ggml-large-v3-turbo.bin
+    networks:
+      - openteamspeak
+
+networks:
+  openteamspeak:
+    driver: bridge

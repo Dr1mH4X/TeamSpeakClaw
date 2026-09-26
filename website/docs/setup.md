@@ -42,41 +42,40 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 
 ### 使用 Docker Compose（推荐）
 
-1. 创建项目目录并下载配置文件：
+1. 创建项目目录并下载 `docker-compose.yml`（推荐，配合在线/多模态 STT 服务）：
 
 ```bash
 mkdir teamspeakclaw && cd teamspeakclaw
-curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose.yml
 ```
 
-2. 准备配置文件和模型（可选）：
-
-- 从 `examples/config/` 目录复制配置文件到 `config/` 目录并修改
-- 如需本地 STT 服务，下载 [whisper.cpp GGML 模型](https://huggingface.co/ggerganov/whisper.cpp/tree/main)到 `models/` 目录：
-
-```bash
-mkdir -p models
-cd models
-
-# 下载 whisper 模型（推荐 ggml-large-v3-turbo）
-```
+2. 从 `examples/config/` 目录复制配置文件到 `config/` 目录并修改。
 
 3. 选择 STT 方案：
 
-**方案一：本地 STT（默认，推荐）**
+**方案一：在线 STT / 多模态模型（推荐）**
 
-使用 docker-compose.yml 中已配置的 `stt-api` 服务（whisper.cpp），提供本地语音识别：
-- 无需外部 API Key
-- 离线运行，延迟更低
-- 支持 GPU 加速（需配置 `/dev/dri` 设备映射）
-- 需下载 GGML 模型文件到 `./models` 目录
+直接使用 `docker-compose.yml`：
+- 在线 STT：在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
+- 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，自动禁用 TTS/STT、直接用语音输入输出，无需配置 STT
 
-**方案二：在线 STT 服务**
+**方案二：本地 STT（whisper.cpp，离线）**
 
-如果不使用本地 STT，可以：
-- 删除或注释 docker-compose.yml 中的 `stt-api` 服务
-- 移除 `teamspeakclaw` 服务中的 `depends_on: stt-api`
-- 在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
+换用带 `stt-api` 服务的 compose 变体，按显卡类型选择：
+
+| 变体 | 硬件 | 配置文件 |
+|---|---|---|
+| CPU | 无独显 | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cpu.yml) |
+| GPU（Vulkan） | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-gpu.yml) |
+| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cuda.yml) |
+
+```bash
+# 以 CUDA 为例：
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-cuda.yml
+```
+
+- 下载 [whisper.cpp GGML 模型](https://huggingface.co/ggerganov/whisper.cpp/tree/main)到 `models/` 目录：CPU 默认 `ggml-small.bin`，GPU/CUDA 默认 `ggml-large-v3-turbo.bin`
+- NVIDIA（CUDA）需在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)；Intel/AMD 需要 `/dev/dri` 设备映射（compose 中已配置）
 
 4. 启动服务：
 

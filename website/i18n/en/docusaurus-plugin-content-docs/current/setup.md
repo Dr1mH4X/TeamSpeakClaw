@@ -52,41 +52,40 @@ Deploying with Docker is the easiest way, without manually installing dependenci
 
 ### Using Docker Compose (Recommended)
 
-1. Create a project directory and download the configuration file:
+1. Create a project directory and download the base compose file (recommended, for online/multimodal STT services):
 
 ```bash
 mkdir teamspeakclaw && cd teamspeakclaw
-curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose.yml
 ```
 
-2. Prepare configuration files and models (optional):
+2. Copy the configuration files from the `examples/config/` directory to `config/` and edit them.
 
-- Copy configuration files from `examples/config/` directory to `config/` and modify them
-- If you need local STT service, download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) to the `models/` directory:
+3. Choose an STT solution:
+
+**Option 1: Online STT / Multimodal Model (Recommended)**
+
+Use the base `docker-compose.yml`:
+- Online STT: configure an OpenAI-compatible online STT API under `[headless.stt]` in `config/settings.toml`
+- Multimodal model: set `omni_model = true` under `[llm]` — TTS/STT are disabled automatically and voice goes in/out directly, no STT config needed
+
+**Option 2: Local STT (whisper.cpp, offline)**
+
+Switch to one of the compose variants that include the `stt-api` service, based on your GPU:
+
+| Variant | Hardware | File |
+|---|---|---|
+| CPU | No dedicated GPU | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cpu.yml) |
+| GPU (Vulkan) | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-gpu.yml) |
+| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cuda.yml) |
 
 ```bash
-mkdir -p models
-cd models
-
-# Download whisper model (recommended: ggml-large-v3-turbo)
+# Example (CUDA): download the variant directly as docker-compose.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-cuda.yml
 ```
 
-3. Choose STT Solution:
-
-**Option 1: Local STT (Default, Recommended)**
-
-Use the `stt-api` service (whisper.cpp) already configured in docker-compose.yml to provide local speech recognition:
-- No external API Key required
-- Runs offline with lower latency
-- Supports GPU acceleration (requires `/dev/dri` device mapping)
-- Requires downloading GGML model files to the `./models` directory
-
-**Option 2: Online STT Service**
-
-If you don't want to use local STT, you can:
-- Remove or comment out the `stt-api` service in docker-compose.yml
-- Remove `depends_on: stt-api` from the `teamspeakclaw` service
-- Configure OpenAI-compatible online STT API in `config/settings.toml` under `[headless.stt]`
+- Download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) into the `models/` directory: the CPU variant defaults to `ggml-small.bin`, GPU/CUDA variants default to `ggml-large-v3-turbo.bin`
+- NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host; Intel/AMD needs `/dev/dri` device mapping (already configured in the compose file)
 
 4. Start the service:
 

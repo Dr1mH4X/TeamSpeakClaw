@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  teamspeakclaw:
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest
+    container_name: teamspeakclaw
+    user: "1000:10" #PUID:GUID
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - openteamspeak
+    depends_on:
+      - stt-api
+
+  # CPU 版 whisper.cpp：无独显时使用。large-v3-turbo 在 CPU 上转写很慢，
+  # 默认给 small 模型提速；需要更高精度可换 ggml-medium.bin / ggml-large-v3-turbo.bin。
+  stt-api:
+    image: ghcr.io/ggml-org/whisper.cpp:main
+    container_name: whisper-stt-api
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro # whisper 模型目录（只读）
+    environment:
+      - TZ=Asia/Shanghai
+    entrypoint: ""
+    command: >
+      whisper-server
+      --host 0.0.0.0
+      --port 9000
+      --threads 4
+      -m /models/ggml-small.bin
+    networks:
+      - openteamspeak
+
+networks:
+  openteamspeak:
+    driver: bridge

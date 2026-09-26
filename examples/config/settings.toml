@@ -72,4 +72,3 @@ trusted_users = []                        # 信任的用户 QQ 号列表，私�
 enabled = false
 window_secs = 30
 direct_commands = ["!replay", "!回放"]
-
