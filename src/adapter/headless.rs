@@ -730,7 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn grpc_bind_fails_when_port_already_occupied() {
-        let _listener = bind_grpc_listener().await.expect("首次 bind 必须成功");
+        let _listener = bind_grpc_listener().await.expect("first bind must succeed");
 
         let second = bind_grpc_listener().await;
 

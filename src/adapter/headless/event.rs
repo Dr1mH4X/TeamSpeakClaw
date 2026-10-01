@@ -197,14 +197,17 @@ impl TsAdapter {
                         2 => TextMessageTarget::Channel,
                         3 => TextMessageTarget::Server,
                         mode => {
-                            warn!(target_mode = mode, "忽略未知类型的 TeamSpeak 文本消息");
+                            warn!(
+                                target_mode = mode,
+                                "ignoring text message with unknown target mode"
+                            );
                             return;
                         }
                     };
                     let Ok(invoker_id) = u32::try_from(msg.invoker_id) else {
                         warn!(
                             invoker_id = msg.invoker_id,
-                            "忽略调用者 ID 无效的 TeamSpeak 文本消息"
+                            "ignoring text message with invalid invoker id"
                         );
                         return;
                     };
