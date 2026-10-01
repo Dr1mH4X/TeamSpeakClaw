@@ -51,6 +51,11 @@ pub fn config_dir() -> PathBuf {
     exe_dir().join("config")
 }
 
+/// 模型目录：exe 同级 `models/`（Docker 挂载 `./models:/app/models`，与 whisper 的模型目录同一宿主目录）
+pub fn models_dir() -> PathBuf {
+    exe_dir().join("models")
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 #[derive(Default)]
@@ -107,6 +112,21 @@ impl AppConfig {
 
         if self.voice_replay.window_secs == 0 || self.voice_replay.window_secs > 120 {
             anyhow::bail!("voice_replay.window_secs must be in 1..=120");
+        }
+
+        let wakeword = &self.headless.wakeword;
+        if wakeword.window_secs == 0 || wakeword.window_secs > 300 {
+            anyhow::bail!("headless.wakeword.window_secs must be in 1..=300");
+        }
+        if wakeword.enabled {
+            if wakeword.model.trim().is_empty() {
+                anyhow::bail!("headless.wakeword.model must not be empty when wakeword is enabled");
+            }
+            if !(self.headless.stt.enabled || self.llm.omni_model) {
+                anyhow::bail!(
+                    "headless.wakeword.enabled requires headless.stt.enabled or llm.omni_model"
+                );
+            }
         }
         Ok(())
     }
@@ -230,5 +250,49 @@ max_context_turns = 3
 
         let error = config.validate().unwrap_err();
         assert!(error.to_string().contains("Unsupported music backend"));
+    }
+
+    #[test]
+    fn rejects_invalid_wakeword_window() {
+        let mut config = AppConfig::default();
+        config.headless.wakeword.window_secs = 0;
+        assert!(config.validate().is_err());
+        config.headless.wakeword.window_secs = 301;
+        assert!(config.validate().is_err());
+        config.headless.wakeword.window_secs = 15;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_wakeword_threshold_key_is_ignored() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[headless.wakeword]
+enabled = false
+model = "wakeword.onnx"
+threshold = 0.3
+window_secs = 15
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.headless.wakeword.model, "wakeword.onnx");
+        assert_eq!(config.headless.wakeword.window_secs, 15);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_enabled_wakeword_without_model_or_voice_input() {
+        let mut config = AppConfig::default();
+        config.headless.wakeword.enabled = true;
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("wakeword.model"));
+
+        config.headless.wakeword.model = "wakeword.onnx".to_string();
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("stt.enabled"));
+
+        config.headless.stt.enabled = true;
+        config.validate().unwrap();
     }
 }

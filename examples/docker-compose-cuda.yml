@@ -9,6 +9,7 @@ services:
     volumes:
       - ./config:/app/config
       - ./logs:/app/logs
+      - ./models:/app/models:ro # 模型目录
     environment:
       - TZ=Asia/Shanghai
     networks:

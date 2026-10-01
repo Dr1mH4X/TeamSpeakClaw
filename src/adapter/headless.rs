@@ -38,6 +38,7 @@ pub mod speaker_ring;
 pub mod speech;
 pub(crate) mod text_util;
 mod voice_service;
+pub mod wakeword;
 
 use crate::skills::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
 use audio_output::{AudioBus, AudioOutput, PcmClipPayload};
@@ -409,6 +410,8 @@ pub struct HeadlessStartHandles {
     pub ts_adapter: Arc<TsAdapter>,
     pub bridge_state: VoiceBridgeState,
     pub voice_audio: VoiceAudioHandles,
+    /// 连接前已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
+    pub wakeword_models: Option<Arc<wakeword::WakewordModels>>,
 }
 
 impl Runtime {
@@ -424,6 +427,7 @@ impl Runtime {
             ts_adapter,
             bridge_state,
             voice_audio,
+            wakeword_models,
         } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
@@ -507,6 +511,7 @@ impl Runtime {
         let bridge_state_for_router = bridge_state.clone();
         let bridge_audio_output = router_audio_output.clone();
         let bridge_voice_audio = voice_audio;
+        let bridge_wakeword = wakeword_models;
         let bridge_task = tokio::spawn(async move {
             let mut attempt = 1u32;
             let _ = bridge_state_for_router.take_connected_since_retry();
@@ -526,6 +531,7 @@ impl Runtime {
                             bridge_state: bridge_state_for_router.clone(),
                             audio_output: bridge_audio_output.clone(),
                             voice_audio: bridge_voice_audio.clone(),
+                            wakeword: bridge_wakeword.clone(),
                         },
                     ).run(shutdown_for_bridge.clone()) => result,
                 };

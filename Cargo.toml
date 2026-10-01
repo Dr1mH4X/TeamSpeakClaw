@@ -21,7 +21,7 @@ panic = "abort"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-async-trait = "0.1"
+async-trait = "0.1.92"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream", "rustls-tls"], default-features = false }
 url = "2"
 serde = { version = "1", features = ["derive"] }
@@ -46,6 +46,10 @@ base64 = "0.22"
 prost = "0.12"
 tonic = "0.11"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
+
+# 唤醒词推理（vendor 自 oww_rs 的 ONNX 推理核心，MIT）
+tract-core = "0.23"
+tract-onnx = "0.23"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
