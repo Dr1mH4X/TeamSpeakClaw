@@ -32,7 +32,9 @@ struct SpeakerState {
 }
 
 const VAD_ENERGY_THRESHOLD: f32 = 0.015;
-const VAD_SILENCE_MS: u64 = 600;
+/// 断句端点：连续静音（帧内 VAD）或连续无帧（对端停止发送）达到该时长即冲刷当前 utterance；
+/// 两条路径共用同一常量，避免调其一时另一条仍在旧值上切句
+const VAD_SILENCE_MS: u64 = 1200;
 const MIN_CHUNK_MS: u64 = 400;
 const MAX_CHUNK_MS: u64 = 12000;
 
@@ -177,7 +179,6 @@ impl OpusSttPipeline {
     /// 过短的突发噪音直接丢弃并复位；超空闲时间的 speaker 移除。
     /// 由外部每 100ms 调用一次，配合 VAD 尾音（PTT 松键后无尾帧）触发。
     pub fn drain_inactive(&mut self, now: Instant) -> Vec<SpeechChunk> {
-        const IDLE_FLUSH_AFTER_MS: u64 = 600;
         const SPEAKER_IDLE_EVICT_AFTER_SECS: u64 = 300;
 
         let mut chunks = Vec::new();
@@ -187,7 +188,7 @@ impl OpusSttPipeline {
                 continue;
             }
             let idle_ms = now.duration_since(state.last_seen).as_millis() as u64;
-            if idle_ms < IDLE_FLUSH_AFTER_MS {
+            if idle_ms < VAD_SILENCE_MS {
                 continue;
             }
 
@@ -638,7 +639,9 @@ pub fn is_speakable(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{preprocess_stt_text, resolve_speech_api_key, OpusSttPipeline, SpeakerState};
+    use super::{
+        preprocess_stt_text, resolve_speech_api_key, OpusSttPipeline, SpeakerState, VAD_SILENCE_MS,
+    };
     use audiopus::coder::Decoder;
     use audiopus::{Channels, SampleRate};
     use std::collections::HashMap;
@@ -685,8 +688,8 @@ mod tests {
     fn drain_inactive_flushes_long_tail_utterance() {
         let mut pipeline = OpusSttPipeline::new();
         pipeline.speakers = HashMap::from([(1, speaker_state(800, true, true))]);
-        // 空闲超过 600ms 且语音长度达到 400ms 最短阈值 → 冲刷为完整 utterance
-        let now = Instant::now() + Duration::from_millis(700);
+        // 空闲超过断句端点且语音长度达到 400ms 最短阈值 → 冲刷为完整 utterance
+        let now = Instant::now() + Duration::from_millis(VAD_SILENCE_MS + 100);
 
         let chunks = pipeline.drain_inactive(now);
 
@@ -700,7 +703,7 @@ mod tests {
         let mut pipeline = OpusSttPipeline::new();
         // 200ms 突发低于 400ms 最短语音长度 → 丢弃并复位
         pipeline.speakers = HashMap::from([(1, speaker_state(200, true, true))]);
-        let now = Instant::now() + Duration::from_millis(700);
+        let now = Instant::now() + Duration::from_millis(VAD_SILENCE_MS + 100);
 
         let chunks = pipeline.drain_inactive(now);
 
