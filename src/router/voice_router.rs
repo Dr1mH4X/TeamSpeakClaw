@@ -58,7 +58,7 @@ fn should_close_tts_turn(finish_reason: &str) -> bool {
     true
 }
 
-/// 每轮 TTS 运行时：句段通道 + AudioOutput 会话；finish 关句段并让 synth 收尾会话
+/// 每轮 TTS 运行时：句段通道 + AudioOutput 会话；会话归 synth 任务所有，句段通道关闭后由任务 finish
 type TtsSentenceSender = Arc<std::sync::Mutex<Option<mpsc::Sender<(usize, String)>>>>;
 type SharedTtsSession = Arc<tokio::sync::Mutex<Option<TtsSession>>>;
 
@@ -67,38 +67,20 @@ struct TtsTurnRuntime {
     shared_tx: TtsSentenceSender,
     shared_session: SharedTtsSession,
     synth_task: tokio::task::JoinHandle<()>,
-    trace_id: String,
 }
 
 impl TtsTurnRuntime {
-    const TTS_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
     fn callbacks(&self) -> Option<&StreamCallbacks> {
         Some(&self.callbacks)
     }
 
-    /// 关闭句段通道；synth 冲刷后 finish 会话（接收语义，不等待播完）
-    async fn finish(self) {
+    /// 关闭句段通道并分离 synth 任务；会话由任务自行 finish（不等待、不取消）
+    ///
+    /// synth 的 `push_encoded` 受播放实时性背压，等待任务结束等于等待剩余音频播完；
+    /// 任务在句段通道关闭后 finish 会话（不置 cancel），消费者播完已入队音频后自然收尾。
+    fn finish(self) {
         *self.shared_tx.lock().expect("tts tx poisoned") = None;
-        match tokio::time::timeout(Self::TTS_TEARDOWN_TIMEOUT, self.synth_task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                error!(
-                    trace_id = %self.trace_id,
-                    error = %error,
-                    "tts synth task failed"
-                );
-            }
-            Err(_) => {
-                error!(
-                    trace_id = %self.trace_id,
-                    "tts synth task teardown timed out"
-                );
-                if let Some(session) = self.shared_session.lock().await.take() {
-                    drop(session);
-                }
-            }
-        }
+        drop(self.synth_task);
     }
 
     /// 取消：abort 合成任务并 drop 未 finish 的会话（消费者 abort 该 job）
@@ -779,7 +761,7 @@ impl VoiceRouter {
             }
         };
         if let Some(runtime) = tts_runtime {
-            runtime.finish().await;
+            runtime.finish();
         }
         Ok(())
     }
@@ -863,12 +845,12 @@ impl VoiceRouter {
                 .save_turn(&session_source, user_msg, result.content);
         }
         if let Some(runtime) = tts_runtime {
-            runtime.finish().await;
+            runtime.finish();
         }
         Ok(())
     }
 
-    /// 每轮 TTS：open_tts_session 占 FIFO 槽；句段合成后 push_encoded；收尾 finish（接收语义）
+    /// 每轮 TTS：open_tts_session 占 FIFO 槽；句段合成后 push_encoded；收尾只关句段通道，不等播放
     async fn build_tts_callbacks(&self) -> Result<TtsTurnRuntime> {
         let speech_provider = self
             .speech_provider
@@ -1005,7 +987,6 @@ impl VoiceRouter {
             shared_tx,
             shared_session,
             synth_task,
-            trace_id,
         })
     }
 
@@ -1224,35 +1205,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_turn_runtime_finish_drains_synth_task() {
-        let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(8);
+    async fn tts_turn_runtime_finish_closes_sentence_channel_and_keeps_session() {
+        let (sentence_tx, mut sentence_rx) = mpsc::channel::<(usize, String)>(8);
         let audio_bus = crate::adapter::headless::audio_output::AudioBus::new();
         let audio_output = audio_bus.output;
-        let consumer = audio_bus.consumer;
-        let (ts3_tx, mut ts3_rx) = mpsc::channel::<(Vec<u8>, i32)>(16);
-        tokio::spawn(consumer.run(ts3_tx));
-        tokio::spawn(async move { while ts3_rx.recv().await.is_some() {} });
+        // 消费者不启动：会话停在队列，synth 的 push_encoded 处于背压中
+        let _consumer = audio_bus.consumer;
         let session = audio_output.open_tts_session().await.unwrap();
         let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
 
-        let synth_task = tokio::spawn(async move {
-            let mut rx = sentence_rx;
-            while let Some((_, _)) = rx.recv().await {}
-            let session = shared_session.lock().await.take();
-            if let Some(session) = session {
-                let _ = session.finish().await;
-            }
-        });
+        // 挂起任务模拟未收尾的 synth：旧实现会在 5s 超时后 drop 会话，消费者随即取消播放
+        let synth_task = tokio::spawn(std::future::pending::<()>());
 
         let runtime = TtsTurnRuntime {
             callbacks: StreamCallbacks::default(),
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
-            shared_session: Arc::new(tokio::sync::Mutex::new(None)),
+            shared_session: shared_session.clone(),
             synth_task,
-            trace_id: "test-trace".to_string(),
         };
 
-        runtime.finish().await;
+        runtime.finish();
+
+        assert!(
+            sentence_rx.recv().await.is_none(),
+            "finish must close the sentence channel"
+        );
+        assert!(
+            shared_session.lock().await.is_some(),
+            "finish must not drop an unfinished session (drop sets cancel and cuts queued audio)"
+        );
     }
 
     #[tokio::test]
@@ -1278,7 +1259,6 @@ mod tests {
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
             shared_session: shared_session.clone(),
             synth_task,
-            trace_id: "test-trace".to_string(),
         };
 
         runtime.abort().await;

@@ -1,6 +1,6 @@
 //! 统一音频出站：FIFO 队列 + 消费者任务，唯一持有 `ts3_audio_tx` 写端。
 //! 所有 job 的 deadline 自消费者 dequeue 时起算，不从 enqueue 起算。
-//! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完。
+//! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完；`finish_drained` 额外等待本会话 job 收尾。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -220,6 +220,20 @@ impl TtsSession {
         self.done_rx = None;
         Ok(())
     }
+
+    /// 关闭段通道并等待消费者播完已入队内容：本会话 job 结束时返回，取消/失败同样收尾
+    pub async fn finish_drained(mut self) -> Result<()> {
+        self.finished = true;
+        self.segment_tx = None;
+        match self.done_rx.take() {
+            Some(done_rx) => match done_rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(anyhow!(error)),
+                Err(_) => Err(anyhow!("tts session job dropped")),
+            },
+            None => Ok(()),
+        }
+    }
 }
 
 impl Drop for TtsSession {
@@ -340,34 +354,11 @@ impl AudioOutput {
         session.finish().await
     }
 
-    /// 外部一次性媒体同步确认：等待消费者 job 结束；仅供短音频/自检，长 TTS 勿用
+    /// 外部一次性媒体同步确认：等待消费者播完；仅供短音频/自检，长 TTS 勿用
     pub async fn play_encoded_media_wait(&self, payload: Vec<u8>, codec: &str) -> Result<()> {
-        let (segment_tx, segment_rx) = mpsc::channel(2);
-        let (done_tx, done_rx) = oneshot::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let codec = if codec.is_empty() {
-            detect_audio_format(&payload).to_string()
-        } else {
-            codec.to_string()
-        };
-        segment_tx
-            .send(EncodedSegment { payload, codec })
-            .await
-            .map_err(|_| anyhow!("encoded media segment channel closed"))?;
-        drop(segment_tx);
-        self.inner
-            .status
-            .enqueue_job(&self.inner.job_tx, |_| AudioJob::EncodedStream {
-                source: JobSource::External,
-                segment_rx,
-                cancel,
-                done: done_tx,
-            })?;
-        match done_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(anyhow!(error)),
-            Err(_) => Err(anyhow!("encoded media job dropped")),
-        }
+        let mut session = self.open_encoded_session(JobSource::External).await?;
+        session.push_encoded(payload, codec).await?;
+        session.finish_drained().await
     }
 
     /// 级联取消全部仍在队列/播放中的 SkillClip
@@ -936,6 +927,54 @@ mod tests {
             .await
             .unwrap();
         session.finish().await.expect("accepted finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tts_session_finish_does_not_cancel_queued_segments() {
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let consumer = bus.consumer;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        tokio::spawn(consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        let mut session = output.open_tts_session().await.unwrap();
+        let cancel = session.cancel.clone();
+        session
+            .push_encoded(vec![0u8; 2], "warmup-probe")
+            .await
+            .unwrap();
+        session.finish().await.expect("accepted finish");
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "finish must not cancel queued segments"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tts_session_finish_drained_waits_for_queued_segments() {
+        let bus = AudioBus::new();
+        let output = bus.output.clone();
+        let consumer = bus.consumer;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        tokio::spawn(consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        let mut session = output.open_tts_session().await.unwrap();
+        let cancel = session.cancel.clone();
+        session
+            .push_encoded(vec![0u8; 2], "warmup-probe")
+            .await
+            .unwrap();
+        session
+            .finish_drained()
+            .await
+            .expect("drain wait must end when the job completes");
+
+        assert!(!cancel.load(Ordering::SeqCst));
+        assert_eq!(output.status().queued_jobs, 0);
+        assert!(output.status().current.is_none());
+        assert!(output.status().last_error.is_none());
     }
 
     #[test]
