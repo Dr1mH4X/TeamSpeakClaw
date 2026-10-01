@@ -26,6 +26,9 @@ Thumbs.db
 # 敏感配置
 config/secrets.toml
 
+# 模型文件：镜像不含模型，运行时经 ./models:/app/models 挂载
+models/
+
 # 其他
 .agents/
 .claude/

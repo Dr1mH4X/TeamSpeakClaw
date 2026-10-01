@@ -16,6 +16,7 @@ on:
       - "proto/**"
       - "src/**"
       - "tests/**"
+      - "models/**"
       - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"

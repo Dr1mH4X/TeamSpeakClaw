@@ -38,6 +38,7 @@ pub mod speaker_ring;
 pub mod speech;
 pub(crate) mod text_util;
 mod voice_service;
+pub mod wakeword;
 
 use crate::skills::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
 use audio_output::{AudioBus, AudioOutput, PcmClipPayload};
@@ -439,6 +440,13 @@ impl Runtime {
             });
         }
 
+        // 唤醒词模型启动期加载：失败明确返回 Err（与 gRPC bind 同为启动期资源）
+        let wakeword_models = if config.headless.wakeword.enabled {
+            Some(wakeword::load_models(&config.headless.wakeword)?)
+        } else {
+            None
+        };
+
         // 先完成 gRPC bind，失败明确返回 Err，避免后台任务只打日志导致语音静默全挂
         let listener = bind_grpc_listener().await?;
 
@@ -507,6 +515,7 @@ impl Runtime {
         let bridge_state_for_router = bridge_state.clone();
         let bridge_audio_output = router_audio_output.clone();
         let bridge_voice_audio = voice_audio;
+        let bridge_wakeword = wakeword_models;
         let bridge_task = tokio::spawn(async move {
             let mut attempt = 1u32;
             let _ = bridge_state_for_router.take_connected_since_retry();
@@ -526,6 +535,7 @@ impl Runtime {
                             bridge_state: bridge_state_for_router.clone(),
                             audio_output: bridge_audio_output.clone(),
                             voice_audio: bridge_voice_audio.clone(),
+                            wakeword: bridge_wakeword.clone(),
                         },
                     ).run(shutdown_for_bridge.clone()) => result,
                 };

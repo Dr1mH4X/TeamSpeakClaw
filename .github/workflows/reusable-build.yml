@@ -114,7 +114,7 @@ jobs:
           VERSION="${{ inputs.version }}"
           PLATFORM="${{ matrix.platform }}"
           STAGING="staging"
-          mkdir -p "$STAGING/config"
+          mkdir -p "$STAGING/config" "$STAGING/models"
           SRC="target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.bin_suffix }}"
           if [ -f "$SRC" ]; then
             cp "$SRC" "$STAGING/"
@@ -125,6 +125,7 @@ jobs:
           cp examples/config/settings.toml "$STAGING/config/"
           cp examples/config/acl.toml "$STAGING/config/"
           cp examples/config/prompts.toml "$STAGING/config/"
+          cp models/*.onnx models/README.md "$STAGING/models/"
           mkdir -p dist
           if [ "${{ runner.os }}" == "Windows" ]; then
             ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"

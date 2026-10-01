@@ -549,49 +549,16 @@ pub fn detect_audio_format(data: &[u8]) -> &'static str {
     }
 }
 
-pub fn preprocess_stt_text(
-    raw: &str,
-    cfg: &crate::config::headless::HeadlessSttConfig,
-) -> Option<String> {
+/// STT 文本清洗：归一化 → 剥前导标点 → 最小长度门 → 截断。
+/// `wakeword_gate` 为 `[headless.wakeword]` 启用状态：门开着时语音已在音频层过唤醒筛选，
+/// 不再按最小长度丢弃短句
+pub fn preprocess_stt_text(raw: &str, wakeword_gate: bool) -> Option<String> {
     const STT_TEXT_MAX_LEN: usize = 240;
-    const STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD: usize = 4;
+    const STT_MIN_CJK_LEN: usize = 4;
     let mut text = normalize_text(raw);
 
     if text.is_empty() {
         debug!(raw = %raw, "STT text is empty after normalization");
-        return None;
-    }
-
-    let mut wake_hit = cfg.wake_words.is_empty();
-    if !cfg.wake_words.is_empty() {
-        let lower = text.to_ascii_lowercase();
-        for wake in &cfg.wake_words {
-            let wake = wake.trim().to_ascii_lowercase();
-            if wake.is_empty() {
-                continue;
-            }
-            if lower == wake {
-                wake_hit = true;
-                text.clear();
-                break;
-            }
-            if let Some(rem) = lower.strip_prefix(&wake) {
-                let consumed = text.len() - rem.len();
-                let after_wake = &text[consumed..];
-                let after_trimmed = skip_punct_and_whitespace(after_wake);
-                text = after_trimmed.to_string();
-                wake_hit = true;
-                break;
-            }
-        }
-    }
-
-    if cfg.wake_word_required && !wake_hit {
-        debug!(
-            text = %text,
-            wake_words = ?cfg.wake_words,
-            "STT wake word not found"
-        );
         return None;
     }
 
@@ -600,14 +567,14 @@ pub fn preprocess_stt_text(
         debug!("STT text is empty after stripping leading punctuation");
         return None;
     }
-    if !cfg.wake_word_required {
+    if !wakeword_gate {
         let cjk_count = count_cjk_chars(&text);
-        if cjk_count > 0 && cjk_count < STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD {
+        if cjk_count > 0 && cjk_count < STT_MIN_CJK_LEN {
             debug!(
                 text = %text,
                 cjk_count = cjk_count,
-                min_len = STT_MIN_CJK_LEN_WITHOUT_WAKE_WORD,
-                "STT text too short without wake word"
+                min_len = STT_MIN_CJK_LEN,
+                "STT text too short without wakeword gate"
             );
             return None;
         }
@@ -631,16 +598,6 @@ pub fn preprocess_text_message(raw: &str) -> Option<String> {
 fn normalize_text(raw: &str) -> String {
     let replaced = raw.replace(['\r', '\n', '\t'], " ");
     replaced.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn skip_punct_and_whitespace(input: &str) -> &str {
-    let cjk_punct = [
-        '，', '。', '！', '？', '；', '：', '、', '—', '…', '（', '）', '【', '】', '《', '》',
-        '“', '”', '‘', '’',
-    ];
-    input.trim_start_matches(|c: char| {
-        c.is_whitespace() || c.is_ascii_punctuation() || cjk_punct.contains(&c)
-    })
 }
 
 fn strip_leading_punct(input: &str) -> String {
@@ -681,7 +638,7 @@ pub fn is_speakable(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_speech_api_key, OpusSttPipeline, SpeakerState};
+    use super::{preprocess_stt_text, resolve_speech_api_key, OpusSttPipeline, SpeakerState};
     use audiopus::coder::Decoder;
     use audiopus::{Channels, SampleRate};
     use std::collections::HashMap;
@@ -775,5 +732,32 @@ mod tests {
         pipeline.drain_inactive(now);
 
         assert!(pipeline.speakers.is_empty());
+    }
+
+    #[test]
+    fn preprocess_stt_text_normalizes_and_strips_leading_punctuation() {
+        let text = preprocess_stt_text("  播放\t周杰伦\n的夜曲 ", false);
+        assert_eq!(text, Some("播放 周杰伦 的夜曲".to_string()));
+
+        let text = preprocess_stt_text("!? 播放音乐", false);
+        assert_eq!(text, Some("播放音乐".to_string()));
+    }
+
+    #[test]
+    fn preprocess_stt_text_drops_short_cjk_only_without_wakeword_gate() {
+        assert_eq!(preprocess_stt_text("嗯", false), None);
+        // 唤醒门启用时语音已在音频层筛选，短句原样放行
+        assert_eq!(preprocess_stt_text("嗯", true), Some("嗯".to_string()));
+        assert_eq!(
+            preprocess_stt_text("播放音乐", false),
+            Some("播放音乐".to_string())
+        );
+    }
+
+    #[test]
+    fn preprocess_stt_text_truncates_to_240_chars() {
+        let raw = "夜".repeat(300);
+        let text = preprocess_stt_text(&raw, false).expect("long text passes");
+        assert_eq!(text.chars().count(), 240);
     }
 }

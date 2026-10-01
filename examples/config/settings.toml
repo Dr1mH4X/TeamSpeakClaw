@@ -31,8 +31,15 @@ base_url = "http://stt-api:9000/inference"  # 本地 whisper.cpp 服务（Docker
 api_key = ""  # 本地服务无需 API Key，在线服务需填写
 model = "ggml-large-v3-turbo"  # whisper 模型名称（本地）/ 在线服务的模型名称
 language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语) 等
-wake_words = ["tsclaw"]
-wake_word_required = false
+
+# 语音唤醒词：OpenWakeWord，三个 onnx 均从 models/ 目录读取（exe 同级，运行时加载，不内置于二进制）
+# 前置：enabled = true 时必须启用 [headless.stt] 或 [llm] omni_model
+# models/ 需含：melspectrogram.onnx、embedding_model.onnx（前端，随发行包提供）+ model 指定的唤醒词模型（自备）
+[headless.wakeword]
+enabled = false
+model = "wakeword.onnx"  # models/ 目录下的唤醒词模型文件名
+threshold = 0.3               # 检测阈值 (0, 1)
+window_secs = 15              # 唤醒后开门时长（秒），窗口内连续对话无需重复唤醒
 
 [headless.tts]
 enabled = false

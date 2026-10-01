@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
@@ -15,6 +15,7 @@ use crate::adapter::headless::speech::{
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
+use crate::adapter::headless::wakeword::{WakewordGate, WakewordModels};
 use crate::adapter::headless::{
     parse_server_groups, TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR,
 };
@@ -141,6 +142,8 @@ pub struct VoiceRouter {
     audio_output: AudioOutput,
     /// 直呼/技能共享的录制与出站句柄
     voice_audio: crate::skills::VoiceAudioHandles,
+    /// 唤醒门：`[headless.wakeword]` 启用时 Some；per-clid 会话状态仅 audio drain 任务访问
+    wakeword: Option<Mutex<WakewordGate>>,
 }
 
 /// VoiceRouter 装配句柄（避免构造参数列表过长）
@@ -154,6 +157,8 @@ pub struct VoiceRouterHandles {
     pub bridge_state: VoiceBridgeState,
     pub audio_output: AudioOutput,
     pub voice_audio: crate::skills::VoiceAudioHandles,
+    /// 已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
+    pub wakeword: Option<Arc<WakewordModels>>,
 }
 
 impl VoiceRouter {
@@ -172,12 +177,19 @@ impl VoiceRouter {
             bridge_state,
             audio_output,
             voice_audio,
+            wakeword,
         } = handles;
         let speech_provider =
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
                 .ok()
                 .map(Arc::new);
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
+        let wakeword = wakeword.map(|models| {
+            Mutex::new(WakewordGate::new(
+                models,
+                config.headless.wakeword.window_secs,
+            ))
+        });
         Self {
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
@@ -190,6 +202,7 @@ impl VoiceRouter {
             bridge_state,
             audio_output,
             voice_audio,
+            wakeword,
         }
     }
 
@@ -630,6 +643,35 @@ impl VoiceRouter {
         audio: voicev1::AudioFrameEvent,
         chunk: SpeechChunk,
     ) -> Result<()> {
+        // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销
+        if let Some(gate) = &self.wakeword {
+            let verdict = {
+                let mut gate = gate.lock().await;
+                gate.feed(
+                    chunk.speaker_client_id,
+                    &chunk.pcm16_mono_16k,
+                    Instant::now(),
+                )
+            };
+            if !verdict.open {
+                debug!(
+                    clid = chunk.speaker_client_id,
+                    speaker = %chunk.speaker_name,
+                    "wakeword gate closed; dropping utterance"
+                );
+                return Ok(());
+            }
+            if verdict.detected {
+                info!(
+                    event = "voice.wakeword",
+                    clid = chunk.speaker_client_id,
+                    speaker = %chunk.speaker_name,
+                    probability = verdict.probability,
+                    "wakeword detected; opening gate"
+                );
+            }
+        }
+
         let ctx = self
             .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
             .await?;
@@ -652,7 +694,8 @@ impl VoiceRouter {
                 return Ok(());
             }
         };
-        let Some(text) = preprocess_stt_text(&raw_text, &self.config.headless.stt) else {
+        let Some(text) = preprocess_stt_text(&raw_text, self.config.headless.wakeword.enabled)
+        else {
             return Ok(());
         };
 

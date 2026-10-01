@@ -10,6 +10,7 @@ pub struct HeadlessConfig {
     pub channel_id: String,
     pub stt: HeadlessSttConfig,
     pub tts: HeadlessTtsConfig,
+    pub wakeword: HeadlessWakewordConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -21,8 +22,6 @@ pub struct HeadlessSttConfig {
     pub api_key: String,
     pub model: String,
     pub language: String,
-    pub wake_words: Vec<String>,
-    pub wake_word_required: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -36,6 +35,17 @@ pub struct HeadlessTtsConfig {
     pub voice: String,
 }
 
+/// OpenWakeWord 语音唤醒：`enabled` 时从 `models_dir()` 加载前端模型
+/// 需要 `stt.enabled` 或 `llm.omni_model` 提供语音输入
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct HeadlessWakewordConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub threshold: f32,
+    pub window_secs: u32,
+}
+
 impl Default for HeadlessConfig {
     fn default() -> Self {
         Self {
@@ -46,6 +56,7 @@ impl Default for HeadlessConfig {
             channel_id: String::new(),
             stt: HeadlessSttConfig::default(),
             tts: HeadlessTtsConfig::default(),
+            wakeword: HeadlessWakewordConfig::default(),
         }
     }
 }
@@ -59,8 +70,6 @@ impl Default for HeadlessSttConfig {
             api_key: String::new(),
             model: String::new(),
             language: "zh".to_string(),
-            wake_words: vec!["tsclaw".to_string()],
-            wake_word_required: false,
         }
     }
 }
@@ -74,6 +83,17 @@ impl Default for HeadlessTtsConfig {
             api_key: String::new(),
             model: "gpt-4o-mini-tts".to_string(),
             voice: "alloy".to_string(),
+        }
+    }
+}
+
+impl Default for HeadlessWakewordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: String::new(),
+            threshold: 0.3,
+            window_secs: 15,
         }
     }
 }

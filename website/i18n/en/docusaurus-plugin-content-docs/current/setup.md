@@ -31,6 +31,7 @@ Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak se
 - `[headless]` — TeamSpeak server address, port, password, etc.
 - `[llm]` — API Key, Base URL, model name
 - `[headless.stt]` / `[headless.tts]` — Enable if you need voice services (optional)
+- `[headless.wakeword]` — Enable if you need voice wake: the release archive ships the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) in `models/`, so add your own wake word classifier and name it in `model` (optional; requires STT or omni input)
 - `[napcat]` — Enable and set WebSocket URL for QQ bot (optional)
 - `[voice_replay]` — Leave `enabled = false` unless you need replay; if enabled, grant access in `acl.toml` by group (optional; restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
 - `prompts.toml` — System prompts and error messages
@@ -41,6 +42,7 @@ Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak se
 - `[headless]` — Fill in TeamSpeak server address (`server_address`), port (`server_port`), password, etc.
 - `[llm]` — Fill in API Key, Base URL, and model name
 - `[headless.stt]` / `[headless.tts]` — Enable and configure if you need voice service (optional)
+- `[headless.wakeword]` — Enable if you need voice wake: the release archive ships the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) in `models/`, so add your own wake word classifier and name it in `model` (optional; requires STT or omni input)
 - `[voice_replay]` — Keep `enabled = false` unless you need replay; grant `voice_replay` in ACL if enabled
 - `[napcat]` — Enable and configure WebSocket URL if you need QQ bot (optional)
 
@@ -85,6 +87,7 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakCl
 ```
 
 - Download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) into the `models/` directory: the CPU variant defaults to `ggml-small.bin`, GPU/CUDA variants default to `ggml-large-v3-turbo.bin`
+- For voice wake, `models/` also needs the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`, see the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/models)) plus your own wake word classifier
 - NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host; Intel/AMD needs `/dev/dri` device mapping (already configured in the compose file)
 
 4. Start the service:
@@ -117,6 +120,7 @@ docker run -d \
   --restart unless-stopped \
   -v ./config:/app/config:ro \
   -v ./logs:/app/logs \
+  -v ./models:/app/models:ro \
   -e TZ=Asia/Shanghai \
   ghcr.io/dr1mh4x/teamspeakclaw:latest
 ```

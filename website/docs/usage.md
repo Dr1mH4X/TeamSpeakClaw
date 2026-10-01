@@ -39,10 +39,10 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 3.  **Headless 语音模式**（可选）：启用 Headless 服务后，可直接通过语音与机器人交互。
     -   配置 `settings.toml` 中的 `[headless]` 区段
-    -   说出唤醒词（默认 `tsclaw`）后说出指令
+    -   语音唤醒（可选）：启用 `[headless.wakeword]`，`models/` 目录放置 OpenWakeWord 模型（发行包已含 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型，另需自备唤醒词分类器并在 `model` 填其文件名），先说唤醒词再下指令；唤醒后 `window_secs`（默认 15s）内可连续对话
     -   机器人会通过语音回复（需配置 TTS）
-    -   例如: （说）`tsclaw 播放周杰伦的夜曲`
-    -   **未开 STT 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
+    -   例如: （说）`唤醒词 播放周杰伦的夜曲`
+    -   **未开 STT 且未启用 omni 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
 
 4.  **语音回放**（可选：在配置里启用录音窗回放，改配置后**重启**生效）：
 

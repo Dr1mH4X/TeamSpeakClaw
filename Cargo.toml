@@ -47,6 +47,10 @@ prost = "0.12"
 tonic = "0.11"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 
+# 唤醒词推理（vendor 自 oww_rs 的 ONNX 推理核心，MIT）
+tract-core = "0.23"
+tract-onnx = "0.23"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 
