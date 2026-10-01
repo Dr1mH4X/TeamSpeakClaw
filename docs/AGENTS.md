@@ -32,21 +32,9 @@
 
 - **用语审核。** 避免 contract、boundary、shape 这类模糊隐喻词，必须使用时先给出准确定义；例如用「响应字段」「JSON 校验」「模块导出」替代「响应形状」「校验边界」。
 
-## 字数预算（中文词数估量）
+## 文档索引
 
-| 文档 | 预算 |
-|---|---|
-| 根 `AGENTS.md` | ≤1600 |
-| `docs/architecture.md` | ≤1800 |
-| `docs/` 其余文档（development / testing / defensive-patterns / ci-cd / agent-notes） | ≤1200 |
-| 本文件 `docs/AGENTS.md` | ≤800 |
-
-预算只列 docs/ 将落地的文档；超出时按下述两步处理，不能直接删掉有价值内容：
-
-1. **relocate**：把属于其他层级的事实移过去，原处留一行链接。
-2. **condense**：仍超限的压缩措辞。
-
-预算是可突破的护栏而非减负目标；预算本身过低也是预算的缺陷。
+仓库级 standing orders 见根 `AGENTS.md`，源码内的模块级规则见各模块 `.instructions.md`，面向最终用户的文档在 `website/`。
 
 ## 精简版 slop checklist
 
