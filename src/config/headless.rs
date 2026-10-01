@@ -42,7 +42,6 @@ pub struct HeadlessTtsConfig {
 pub struct HeadlessWakewordConfig {
     pub enabled: bool,
     pub model: String,
-    pub threshold: f32,
     pub window_secs: u32,
 }
 
@@ -92,7 +91,6 @@ impl Default for HeadlessWakewordConfig {
         Self {
             enabled: false,
             model: String::new(),
-            threshold: 0.3,
             window_secs: 15,
         }
     }

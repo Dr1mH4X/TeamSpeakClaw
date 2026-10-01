@@ -115,9 +115,6 @@ impl AppConfig {
         }
 
         let wakeword = &self.headless.wakeword;
-        if !(wakeword.threshold > 0.0 && wakeword.threshold < 1.0) {
-            anyhow::bail!("headless.wakeword.threshold must be in (0, 1)");
-        }
         if wakeword.window_secs == 0 || wakeword.window_secs > 300 {
             anyhow::bail!("headless.wakeword.window_secs must be in 1..=300");
         }
@@ -256,18 +253,31 @@ max_context_turns = 3
     }
 
     #[test]
-    fn rejects_invalid_wakeword_threshold_and_window() {
+    fn rejects_invalid_wakeword_window() {
         let mut config = AppConfig::default();
-        config.headless.wakeword.threshold = 0.0;
-        assert!(config.validate().is_err());
-        config.headless.wakeword.threshold = 1.0;
-        assert!(config.validate().is_err());
-        config.headless.wakeword.threshold = 0.3;
         config.headless.wakeword.window_secs = 0;
         assert!(config.validate().is_err());
         config.headless.wakeword.window_secs = 301;
         assert!(config.validate().is_err());
         config.headless.wakeword.window_secs = 15;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_wakeword_threshold_key_is_ignored() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[headless.wakeword]
+enabled = false
+model = "wakeword.onnx"
+threshold = 0.3
+window_secs = 15
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.headless.wakeword.model, "wakeword.onnx");
+        assert_eq!(config.headless.wakeword.window_secs, 15);
         config.validate().unwrap();
     }
 

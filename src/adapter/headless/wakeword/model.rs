@@ -18,6 +18,8 @@ pub const CHUNK_SIZE: usize = 1280;
 const DETECTION_BUFFER_SIZE: usize = 12;
 /// 平滑均值触发所需的最小正检次数
 const MIN_POSITIVE_DETECTIONS: f32 = 2.0;
+/// 分类器命中阈值：固定值，不随配置变化
+pub const DETECTION_THRESHOLD: f32 = 0.3;
 /// 同一发声的再触发不应期
 const NO_DETECTION_MS: u32 = 2_000;
 /// embedding 滑窗：16 个 [1,1,1,96] 特征
@@ -45,7 +47,6 @@ pub struct WakewordModels {
     mel: ModelType,
     emb: ModelType,
     classifier: ModelType,
-    threshold: f32,
 }
 
 impl WakewordModels {
@@ -54,7 +55,6 @@ impl WakewordModels {
         mel_data: &[u8],
         emb_data: &[u8],
         classifier_data: &[u8],
-        threshold: f32,
     ) -> Result<Arc<Self>> {
         // 推理执行器按上游行为固定单线程（进程全局设置，此处设置一次）
         multithread::set_default_executor(Executor::SingleThread);
@@ -69,7 +69,6 @@ impl WakewordModels {
             mel,
             emb,
             classifier,
-            threshold,
         }))
     }
 }
@@ -155,7 +154,7 @@ impl WakewordModel {
 
         // 平滑均值越过阈值即触发（rising-edge，与 Python openWakeWord 一致）；
         // 触发后清空缓冲，同一发声在不应期内不会重复开门
-        if average > self.models.threshold && since_last_detection > u128::from(NO_DETECTION_MS) {
+        if average > DETECTION_THRESHOLD && since_last_detection > u128::from(NO_DETECTION_MS) {
             self.last_detection_time = Instant::now();
             self.detections_buffer.clear();
             return Detection {
@@ -181,7 +180,7 @@ impl WakewordModel {
         let mut cumulative = 0.0f32;
         let mut positive_count = 0.0f32;
         for &d in &self.detections_buffer {
-            if d > self.models.threshold {
+            if d > DETECTION_THRESHOLD {
                 positive_count += 1.0;
                 cumulative += d;
             }
@@ -190,7 +189,7 @@ impl WakewordModel {
             return 0.0;
         }
         let avg = cumulative / positive_count;
-        if avg > self.models.threshold {
+        if avg > DETECTION_THRESHOLD {
             avg
         } else {
             0.0

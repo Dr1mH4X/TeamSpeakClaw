@@ -16,7 +16,7 @@ use crate::config::headless::HeadlessWakewordConfig;
 use crate::config::models_dir;
 
 pub use model::WakewordModels;
-use model::{Detection, WakewordModel, CHUNK_SIZE};
+use model::{Detection, WakewordModel, CHUNK_SIZE, DETECTION_THRESHOLD};
 
 /// 唤醒门推理实现：生产为 OWW 推理，测试注入桩
 trait Detector: Send {
@@ -63,7 +63,7 @@ fn load_models_from(dir: &Path, cfg: &HeadlessWakewordConfig) -> Result<Arc<Wake
     // release 构建 panic = "abort"（Cargo.toml），catch_unwind 只在 debug 生效；
     // release 下非法模型靠上面的 metadata 预检兜底
     let models = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        WakewordModels::from_bytes(&mel, &emb, &classifier, cfg.threshold)
+        WakewordModels::from_bytes(&mel, &emb, &classifier)
     }))
     .map_err(|payload| {
         anyhow!(
@@ -74,7 +74,7 @@ fn load_models_from(dir: &Path, cfg: &HeadlessWakewordConfig) -> Result<Arc<Wake
     info!(
         dir = %dir.display(),
         model = %cfg.model,
-        threshold = cfg.threshold,
+        threshold = DETECTION_THRESHOLD,
         "wakeword models loaded"
     );
     Ok(models)
