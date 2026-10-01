@@ -2,6 +2,9 @@
 /target/
 website/build/
 
+# Models（CC BY-NC-SA 4.0 与 AGPL-3.0 冲突，不入库，由使用者按 models/README.md 下载）
+/models/*.onnx
+
 # Secrets
 /config/
 /config.json

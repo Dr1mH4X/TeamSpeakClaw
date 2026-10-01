@@ -125,7 +125,7 @@ jobs:
           cp examples/config/settings.toml "$STAGING/config/"
           cp examples/config/acl.toml "$STAGING/config/"
           cp examples/config/prompts.toml "$STAGING/config/"
-          cp models/*.onnx models/README.md "$STAGING/models/"
+          cp models/README.md models/fetch-models.sh models/fetch-models.ps1 "$STAGING/models/"
           mkdir -p dist
           if [ "${{ runner.os }}" == "Windows" ]; then
             ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.zip"

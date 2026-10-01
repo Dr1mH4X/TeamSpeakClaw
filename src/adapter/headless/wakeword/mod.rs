@@ -31,7 +31,7 @@ impl Detector for WakewordModel {
 
 type DetectorFactory = Box<dyn Fn(u32) -> Box<dyn Detector> + Send + Sync>;
 
-/// 唤醒词模型文件名（`models/` 目录内固定存在）
+/// 唤醒词模型文件名（`models/` 目录内固定存在，按 models/README.md 自行下载）
 const MEL_MODEL_FILE: &str = "melspectrogram.onnx";
 const EMBEDDING_MODEL_FILE: &str = "embedding_model.onnx";
 
@@ -81,8 +81,12 @@ fn load_models_from(dir: &Path, cfg: &HeadlessWakewordConfig) -> Result<Arc<Wake
 }
 
 fn read_model_file(path: &Path) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("wakeword model not found: {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| {
+        format!(
+            "wakeword model not found: {} (see models/README.md to download it)",
+            path.display()
+        )
+    })?;
     if meta.len() == 0 {
         bail!("wakeword model file is empty: {}", path.display());
     }

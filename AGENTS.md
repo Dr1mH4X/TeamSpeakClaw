@@ -36,7 +36,7 @@ docs/
 examples/
 ├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml；Release 打包含此三文件）
 └── docker-compose.yml       # Docker Compose 示例
-models/                      # OpenWakeWord 前端 onnx（随 Release 归档；许可与来源见 models/README.md）
+models/                      # 唤醒模型清单与下载脚本（onnx 不入库、不进归档；见 models/README.md）
 website/                     # Docusaurus 用户文档（排除在 Rust CI 路径外）
 ```
 

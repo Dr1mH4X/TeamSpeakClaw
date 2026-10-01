@@ -34,7 +34,7 @@ language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语)
 
 # 语音唤醒词：OpenWakeWord，三个 onnx 均从 models/ 目录读取（exe 同级，运行时加载，不内置于二进制）
 # 前置：enabled = true 时必须启用 [headless.stt] 或 [llm] omni_model
-# models/ 需含：melspectrogram.onnx、embedding_model.onnx（前端，随发行包提供）+ model 指定的唤醒词模型（自备）
+# models/ 需含：melspectrogram.onnx、embedding_model.onnx（前端，按 models/README.md 自行下载）+ model 指定的唤醒词模型（自备）
 [headless.wakeword]
 enabled = false
 model = "wakeword.onnx"  # models/ 目录下的唤醒词模型文件名
