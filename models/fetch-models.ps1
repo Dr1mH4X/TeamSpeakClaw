@@ -25,4 +25,4 @@ foreach ($Model in $Models) {
     Write-Host "verified: $($Model.Name)"
 }
 
-Write-Host "front-end models ready in $Dir; 唤醒词分类器请自行放入并填在 [headless.wakeword].model"
+Write-Host "front-end models ready in $Dir; 唤醒词分类器请自行放入并填在 [headless.wakeword].model（推荐 https://openwakeword.com/library 的 ONNX 导出）"

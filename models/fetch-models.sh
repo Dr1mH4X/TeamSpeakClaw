@@ -36,4 +36,4 @@ fetch() {
 fetch melspectrogram.onnx ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f
 fetch embedding_model.onnx 70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f
 
-echo "front-end models ready in $DIR; 唤醒词分类器请自行放入并填在 [headless.wakeword].model"
+echo "front-end models ready in $DIR; 唤醒词分类器请自行放入并填在 [headless.wakeword].model（推荐 https://openwakeword.com/library 的 ONNX 导出）"

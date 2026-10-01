@@ -29,15 +29,17 @@ enabled = false
 provider = "openai-compatibility"
 base_url = "http://stt-api:9000/inference"  # 本地 whisper.cpp 服务（Docker Compose 部署） / OpenAI 兼容的在线 STT 服务地址
 api_key = ""  # 本地服务无需 API Key，在线服务需填写
-model = "ggml-large-v3-turbo"  # whisper 模型名称（本地）/ 在线服务的模型名称
+model = "ggml-large-v3-turbo"  # 请求里的 model 字段：在线服务填其模型名；本地 whisper.cpp 服务忽略此值，用哪个模型由服务端 -m 决定
 language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语) 等
 
 # 语音唤醒词：OpenWakeWord，三个 onnx 均从 models/ 目录读取（exe 同级，运行时加载，不内置于二进制）
 # 前置：enabled = true 时必须启用 [headless.stt] 或 [llm] omni_model
-# models/ 需含：melspectrogram.onnx、embedding_model.onnx（前端，按 models/README.md 自行下载）+ model 指定的唤醒词模型（自备）
+# models/ 需含：melspectrogram.onnx、embedding_model.onnx（前端，按 models/README.md 自行下载）+ model 指定的唤醒词模型
+# 唤醒词模型推荐从社区模型库 https://openwakeword.com/library 下载 ONNX 导出（.tflite 不被加载）
+# cargo run --release 时 exe 同级即 target/release/，模型须放在 target/release/models/
 [headless.wakeword]
 enabled = false
-model = "wakeword.onnx"  # models/ 目录下的唤醒词模型文件名
+model = "wakeword.onnx"  # models/ 目录下的完整文件名（含 .onnx）
 threshold = 0.3               # 检测阈值 (0, 1)
 window_secs = 15              # 唤醒后开门时长（秒），窗口内连续对话无需重复唤醒
 

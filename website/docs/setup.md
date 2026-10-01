@@ -31,7 +31,7 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 - `[headless]` — 填写 TeamSpeak 服务器地址（`server_address`）、端口（`server_port`）、密码等
 - `[llm]` — 填写 API Key、Base URL 和模型名称
 - `[headless.stt]` / `[headless.tts]` — 如需语音服务，启用并配置（可选）
-- `[headless.wakeword]` — 如需语音唤醒，启用并按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`），另需自备分类器，文件名填在 `model`（可选，依赖 STT 或多模态输入）
+- `[headless.wakeword]` — 如需语音唤醒，启用并按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`），再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并把文件名填在 `model`（可选，依赖 STT 或多模态输入）
 - `[napcat]` — 如需 QQ 机器人，启用并配置 WebSocket 地址（可选）
 - `[voice_replay]` — 如需语音回放，默认保持 `enabled = false`；开启后在 `acl.toml` 按组授权（可选，改配置需重启）。直呼与技能共用 ACL。用法见 [usage.md](usage.md)
 
@@ -75,8 +75,8 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-cuda.yml
 ```
 
-- 下载 [whisper.cpp GGML 模型](https://huggingface.co/ggerganov/whisper.cpp/tree/main)到 `models/` 目录：CPU 默认 `ggml-small.bin`，GPU/CUDA 默认 `ggml-large-v3-turbo.bin`
-- 启用语音唤醒时，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`）到 `models/` 目录，并放入自备的唤醒词分类器；模型文件不随发行包提供
+- 下载 [whisper.cpp GGML 模型](https://huggingface.co/ggerganov/whisper.cpp/tree/main)到 `models/` 目录
+- 启用语音唤醒时，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`）到 `models/` 目录，并从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）一并放入；模型文件不随发行包提供
 - NVIDIA（CUDA）需在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)；Intel/AMD 需要 `/dev/dri` 设备映射（compose 中已配置）
 
 4. 启动服务：
