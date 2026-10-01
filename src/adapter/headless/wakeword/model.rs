@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tract_core::internal::{RunnableModel, TypedFact, TypedOp};
@@ -113,7 +113,11 @@ impl WakewordModel {
             feature_buffer,
             mel_spectrogram_buffer,
             detections_buffer: VecDeque::with_capacity(DETECTION_BUFFER_SIZE),
-            last_detection_time: Instant::now(),
+            // 不应期只用于抑制同一发声的重复触发；初值置于不应期之前，
+            // 让会话建立后第一次越过阈值的命中立即触发（会话按 utterance 建立，
+            // 若以 now 初始化，本会话第一条语音的命中会被整体吞掉）
+            last_detection_time: Instant::now()
+                - Duration::from_millis(u64::from(NO_DETECTION_MS) + 1),
         }
     }
 
