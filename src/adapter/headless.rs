@@ -410,6 +410,8 @@ pub struct HeadlessStartHandles {
     pub ts_adapter: Arc<TsAdapter>,
     pub bridge_state: VoiceBridgeState,
     pub voice_audio: VoiceAudioHandles,
+    /// 连接前已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
+    pub wakeword_models: Option<Arc<wakeword::WakewordModels>>,
 }
 
 impl Runtime {
@@ -425,6 +427,7 @@ impl Runtime {
             ts_adapter,
             bridge_state,
             voice_audio,
+            wakeword_models,
         } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
@@ -439,13 +442,6 @@ impl Runtime {
                 failed_tx,
             });
         }
-
-        // 唤醒词模型启动期加载：失败明确返回 Err（与 gRPC bind 同为启动期资源）
-        let wakeword_models = if config.headless.wakeword.enabled {
-            Some(wakeword::load_models(&config.headless.wakeword)?)
-        } else {
-            None
-        };
 
         // 先完成 gRPC bind，失败明确返回 Err，避免后台任务只打日志导致语音静默全挂
         let listener = bind_grpc_listener().await?;

@@ -3,7 +3,7 @@ pub(crate) mod reconnect;
 pub mod headless;
 pub mod napcat;
 
-use headless::{TsAdapter, TsEvent};
+use headless::{wakeword::WakewordModels, TsAdapter, TsEvent};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,17 @@ use crate::skills::SkillRegistry;
 
 const COMPONENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 连接前的唤醒模型加载：`[headless.wakeword]` 启用时缺文件或模型非法直接返回 Err，
+/// 不进入连接与重连循环
+fn load_wakeword_models(config: &AppConfig) -> Result<Option<Arc<WakewordModels>>> {
+    if !config.headless.wakeword.enabled {
+        return Ok(None);
+    }
+    Ok(Some(headless::wakeword::load_models(
+        &config.headless.wakeword,
+    )?))
+}
+
 pub async fn run(
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
@@ -33,6 +44,8 @@ pub async fn run(
     shutdown: CancellationToken,
     voice_audio: crate::skills::VoiceAudioHandles,
 ) -> Result<()> {
+    let wakeword_models = load_wakeword_models(&config)?;
+
     let mut reconnect = ReconnectState::default();
     let context = RouterContext::new(config, prompts, gate, llm, registry, voice_audio.clone());
 
@@ -110,6 +123,7 @@ pub async fn run(
             disconnect_rx,
             shutdown.clone(),
             voice_audio.clone(),
+            wakeword_models.clone(),
         )
         .await;
 
@@ -168,6 +182,7 @@ async fn run_connected_session(
     mut disconnect_rx: watch::Receiver<bool>,
     shutdown: CancellationToken,
     voice_audio: crate::skills::VoiceAudioHandles,
+    wakeword_models: Option<Arc<WakewordModels>>,
 ) -> SessionCompletion {
     let napcat_shutdown = shutdown.child_token();
     let nc_adapter = match wait_for_initialization(
@@ -220,6 +235,7 @@ async fn run_connected_session(
             ts_adapter: adapter.clone(),
             bridge_state: voice_bridge_state,
             voice_audio,
+            wakeword_models,
         },
     )
     .await
@@ -389,10 +405,11 @@ async fn disconnect_adapter(adapter: &TsAdapter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        wait_for_initialization, wait_headless_failure, wait_nc_supervisor_failure,
-        wait_with_timeout, InitializationWait, SessionCompletion,
+        load_wakeword_models, wait_for_initialization, wait_headless_failure,
+        wait_nc_supervisor_failure, wait_with_timeout, InitializationWait, SessionCompletion,
     };
     use crate::adapter::napcat::ConnectionExit;
+    use crate::config::AppConfig;
     use crate::router::RouterExit;
     use std::future::pending;
     use std::time::Duration;
@@ -426,6 +443,13 @@ mod tests {
             .unwrap();
 
         assert!(matches!(outcome, InitializationWait::Shutdown));
+    }
+
+    #[test]
+    fn wakeword_models_are_skipped_when_disabled() {
+        let config = AppConfig::default();
+
+        assert!(load_wakeword_models(&config).unwrap().is_none());
     }
 
     #[test]
