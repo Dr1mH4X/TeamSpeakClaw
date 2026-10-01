@@ -643,7 +643,8 @@ impl VoiceRouter {
         audio: voicev1::AudioFrameEvent,
         chunk: SpeechChunk,
     ) -> Result<()> {
-        // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销
+        // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销；
+        // 命中则这条 utterance 整体下行（含唤醒词本身），音频层切不出唤醒词前缀
         if let Some(gate) = &self.wakeword {
             let verdict = {
                 let mut gate = gate.lock().await;
