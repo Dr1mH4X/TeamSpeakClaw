@@ -75,6 +75,9 @@ pub struct WakeEvent {
     pub calibration: CalibrationStats,
     /// 本段输入是否在既有开门窗口内（区分「窗口内续说」与「关门外新命中」）
     pub window_open_before_feed: bool,
+    /// 本次输入之前该说话人累计喂入的采样数：流式逐帧喂入时，
+    /// `fire_offset` 只在一帧内有意义，加它才是绝对命中位置
+    pub fed_samples_before: usize,
 }
 
 /// 加载三个模型文件：启动期执行，失败按 anyhow 上抛终止启动
@@ -146,6 +149,8 @@ struct SpeakerSession {
     acc: Vec<f32>,
     last_wake: Option<Instant>,
     last_seen: Instant,
+    /// 累计喂入的采样数（打点用绝对命中位置）
+    fed_samples: usize,
 }
 
 impl WakewordGate {
@@ -168,7 +173,11 @@ impl WakewordGate {
         }
     }
 
-    /// 喂入一段 16kHz 单声道 PCM，返回本次裁决与打点数据
+    /// 喂入一段 16kHz 单声道 PCM，返回本次裁决与打点数据。
+    ///
+    /// 生产路径按音频帧逐次喂入：门内部按 80ms 块推理，跨帧余量由 `acc` 携带，
+    /// 所以通话期间的连续推理与一次性喂整段 utterance 等价，且命中能立刻返回
+    /// （插话不必等 utterance 收尾）。
     pub fn feed(&mut self, clid: u32, pcm16: &[i16], now: Instant) -> WakeEvent {
         let window = self.window;
         self.evict_idle(now);
@@ -180,6 +189,7 @@ impl WakewordGate {
         // 所以「已消耗采样数 − carry」才是本段输入里的偏移（可为负 → 钳到 0）。
         // 必须在 extend 之前取，否则 carry 含进本次输入，偏移恒被钳成 0
         let carry = session.acc.len();
+        let fed_samples_before = session.fed_samples;
         session
             .acc
             .extend(pcm16.iter().map(|sample| f32::from(*sample) / 32_768.0));
@@ -203,6 +213,7 @@ impl WakewordGate {
                 }
             }
         }
+        session.fed_samples += pcm16.len();
 
         if detected {
             session.last_wake = Some(now);
@@ -221,6 +232,32 @@ impl WakewordGate {
             fire_offset,
             calibration,
             window_open_before_feed,
+            fed_samples_before,
+        }
+    }
+
+    /// 当前开门窗口状态：收帧路径已经把这条 utterance 的音频喂过门，
+    /// 收尾裁决只需要问「窗口还开着吗」，不能再喂一遍（重复喂会打乱推理窗口）
+    pub fn window_state(&mut self, clid: u32, now: Instant) -> GateVerdict {
+        self.evict_idle(now);
+        let open = self.speakers.get(&clid).is_some_and(|session| {
+            session
+                .last_wake
+                .is_some_and(|wake| now.duration_since(wake) < self.window)
+        });
+        GateVerdict {
+            open,
+            detected: false,
+            probability: 0.0,
+        }
+    }
+
+    /// 从确认时刻续上开门窗口：确认音代表「我在听」，用户接话不必抢在原窗口到期前。
+    /// 只刷新已存在的会话——能播确认音意味着该 clid 刚被喂过，不在此新建状态
+    pub fn refresh_window(&mut self, clid: u32, now: Instant) {
+        if let Some(session) = self.speakers.get_mut(&clid) {
+            session.last_seen = now;
+            session.last_wake = Some(now);
         }
     }
 
@@ -250,6 +287,7 @@ impl WakewordGate {
                     acc: Vec::new(),
                     last_wake: None,
                     last_seen: now,
+                    fed_samples: 0,
                 },
             );
         }
@@ -439,6 +477,41 @@ mod tests {
         assert!(!closed.open);
     }
 
+    /// 确认播报续窗：把开门窗口从确认时刻重算，用户接话不必抢在原到期点前；
+    /// 未建会话的 clid 不因此新建状态
+    #[test]
+    fn refresh_window_reopens_the_gate_from_the_confirmation() {
+        let mut gate = hit_gate();
+        let base = Instant::now();
+        gate.feed(1, &[0i16; CHUNK_SIZE], base);
+
+        // 距命中满 15s 关门
+        assert!(
+            !gate
+                .feed(1, &[], base + Duration::from_secs(15))
+                .verdict
+                .open
+        );
+
+        // 续窗后重新计时：20s 处仍开门，35s（续窗 +15s）关门
+        gate.refresh_window(1, base + Duration::from_secs(20));
+        assert!(
+            gate.feed(1, &[], base + Duration::from_secs(20))
+                .verdict
+                .open
+        );
+        assert!(
+            !gate
+                .feed(1, &[], base + Duration::from_secs(35))
+                .verdict
+                .open
+        );
+
+        // 没有会话的 clid：刷新是 no-op，不会凭空开门
+        gate.refresh_window(9, base);
+        assert!(!gate.feed(9, &[], base).verdict.open);
+    }
+
     #[test]
     fn gate_isolates_speakers() {
         let mut gate = hit_gate();
@@ -449,6 +522,73 @@ mod tests {
         assert!(!other.open);
         let own = gate.feed(1, &[], now).verdict;
         assert!(own.open);
+    }
+
+    /// 窗口状态查询不喂音频、不改推理状态：收帧路径已喂过本条 utterance
+    #[test]
+    fn window_state_reads_the_gate_without_feeding() {
+        let mut gate = hit_gate();
+        let now = Instant::now();
+
+        // 未建会话的 clid 恒关门
+        assert!(!gate.window_state(9, now).open);
+
+        gate.feed(1, &[0i16; CHUNK_SIZE], now);
+        assert!(gate.window_state(1, now + Duration::from_secs(14)).open);
+        assert!(!gate.window_state(1, now + Duration::from_secs(15)).open);
+    }
+
+    /// 窗口状态查询不得再喂模型：收尾时重复喂会打乱推理窗口
+    #[test]
+    fn window_state_does_not_feed_the_detector() {
+        let chunk_sizes = Arc::new(Mutex::new(Vec::new()));
+        let mut gate = WakewordGate::with_factory(15, {
+            let chunk_sizes = chunk_sizes.clone();
+            move |_| {
+                Box::new(CountingStub {
+                    chunk_sizes: chunk_sizes.clone(),
+                })
+            }
+        });
+        let now = Instant::now();
+
+        gate.feed(1, &[0i16; CHUNK_SIZE], now);
+        assert_eq!(chunk_sizes.lock().expect("stub lock").len(), 1);
+
+        gate.window_state(1, now);
+        assert_eq!(
+            chunk_sizes.lock().expect("stub lock").len(),
+            1,
+            "查询只读窗口状态，不再推理"
+        );
+    }
+
+    /// 逐帧喂入：`fire_offset` 只在一帧内有意义，`fed_samples_before` 提供绝对位置基准
+    #[test]
+    fn fed_samples_before_accumulates_across_frames() {
+        let mut gate = WakewordGate::with_factory(15, |_| {
+            Box::new(NthBlockStub {
+                seen: 0,
+                fire_after_blocks: 3,
+            })
+        });
+        let now = Instant::now();
+
+        assert_eq!(gate.feed(1, &vec![0i16; 1_000], now).fed_samples_before, 0);
+        assert_eq!(
+            gate.feed(1, &vec![0i16; 1_000], now).fed_samples_before,
+            1_000
+        );
+        let third = gate.feed(1, &vec![0i16; 1_000], now);
+        assert_eq!(third.fed_samples_before, 2_000);
+        assert!(!third.verdict.detected);
+
+        // 第 3 块（绝对 2560..3840）在第四次喂入才凑齐：命中块的起点落在
+        // 上一次 feed 的余量里，偏移被钳到 0，绝对位置由 fed_samples_before 给出
+        let hit = gate.feed(1, &vec![0i16; 1_000], now);
+        assert_eq!(hit.fed_samples_before, 3_000);
+        assert!(hit.verdict.detected);
+        assert_eq!(hit.fire_offset, Some(0));
     }
 
     #[test]

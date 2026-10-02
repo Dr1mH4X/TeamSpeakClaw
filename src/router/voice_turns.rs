@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -51,8 +51,12 @@ pub(crate) fn decide_wakeword_action(open: bool, detected: bool, busy: bool) -> 
 pub(crate) struct ActiveTurn {
     /// LLM 流取消令牌：工具循环在每个 await 点检查
     pub(crate) cancel: CancellationToken,
-    /// TTS 播放取消：置位后音频消费者在当前帧或段边界停止
-    playback_cancel: OnceLock<Arc<AtomicBool>>,
+    /// TTS 播放取消：置位后音频消费者在当前帧或段边界停止。
+    ///
+    /// 回合创建即持有，一轮对话里的多条 TTS 流（工具轮与最终回复各占一条会话）
+    /// 与本回合的提示音片段共用它——注册成「最后一个会话的句柄」会让先前的标志
+    /// 在插话时停止不了后来的流。
+    playback_cancel: Arc<AtomicBool>,
     /// 是否已进入 LLM 回合。准入的「忙」只看它，避免解析与 STT 期间挡住同说话人的后续语音
     producing: AtomicBool,
     /// 准入时刻：出站音频按 FIFO 播放，最早准入的回合先占通道，插话据此在并发产出中定序
@@ -63,19 +67,15 @@ impl ActiveTurn {
     pub(crate) fn new() -> Self {
         Self {
             cancel: CancellationToken::new(),
-            playback_cancel: OnceLock::new(),
+            playback_cancel: Arc::new(AtomicBool::new(false)),
             producing: AtomicBool::new(false),
             started_at: Instant::now(),
         }
     }
 
-    /// 登记本轮 TTS 播放取消句柄；每回合只登记一次
-    pub(crate) fn set_playback_cancel(&self, cancel: Arc<AtomicBool>) {
-        let _ = self.playback_cancel.set(cancel);
-    }
-
-    pub(crate) fn playback_cancel(&self) -> Option<Arc<AtomicBool>> {
-        self.playback_cancel.get().cloned()
+    /// 本轮 TTS 播放取消位；回合内所有会话与片段共用同一个
+    pub(crate) fn playback_cancel(&self) -> Arc<AtomicBool> {
+        self.playback_cancel.clone()
     }
 
     pub(crate) fn mark_producing(&self) {
@@ -302,8 +302,7 @@ mod tests {
     fn barge_in_racing_turn_completion_only_clears_its_own_entry() {
         let registry = TurnRegistry::default();
         let finished = Arc::new(ActiveTurn::new());
-        let playback = Arc::new(AtomicBool::new(false));
-        finished.set_playback_cancel(playback.clone());
+        let playback = finished.playback_cancel();
         registry.begin_turn(5, &finished);
         finished.mark_producing();
 
@@ -314,10 +313,7 @@ mod tests {
         assert_eq!(owner, 5);
         target.cancel.cancel();
         target.cancel.cancel();
-        target
-            .playback_cancel()
-            .expect("handle registered")
-            .store(true, Ordering::SeqCst);
+        target.playback_cancel().store(true, Ordering::SeqCst);
         assert!(playback.load(Ordering::SeqCst));
         assert!(registry.remove_turn(&target));
 
@@ -329,19 +325,17 @@ mod tests {
         assert!(Arc::ptr_eq(&registered, &successor));
     }
 
+    /// 播放取消位在回合创建时就存在，且同一回合的多次取用共享同一个位：
+    /// 一轮对话的多条 TTS 流靠它一起被插话停声
     #[test]
-    fn playback_cancel_handle_survives_the_turn_registration() {
+    fn playback_cancel_handle_is_turn_scoped_and_shared() {
         let turn = ActiveTurn::new();
-        assert!(turn.playback_cancel().is_none());
+        let first = turn.playback_cancel();
+        let second = turn.playback_cancel();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!first.load(Ordering::SeqCst));
 
-        let cancel = Arc::new(AtomicBool::new(false));
-        turn.set_playback_cancel(cancel.clone());
-        turn.set_playback_cancel(Arc::new(AtomicBool::new(false)));
-
-        cancel.store(true, Ordering::SeqCst);
-        assert!(turn
-            .playback_cancel()
-            .expect("handle registered")
-            .load(Ordering::SeqCst));
+        first.store(true, Ordering::SeqCst);
+        assert!(second.load(Ordering::SeqCst));
     }
 }

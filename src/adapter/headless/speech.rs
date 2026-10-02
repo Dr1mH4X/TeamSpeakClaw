@@ -21,6 +21,19 @@ pub struct SpeechChunk {
     pub pcm16_mono_16k: Vec<i16>,
 }
 
+/// 单帧音频的处理产物：唤醒门要在收帧路径上实时喂入，所以这里同时给出
+/// 本帧的 16k 单声道 PCM 与 VAD 结果，以及本帧是否冲刷出完整 utterance。
+pub struct SttFrameOutcome {
+    /// 本帧解码后的 16k 单声道 PCM；无论是否落在 utterance 缓冲里都要喂唤醒门
+    pub mono_16k: Vec<i16>,
+    /// 本帧 VAD 判为活跃语音（命中唤醒词之后的活跃语音据此累计）
+    pub voiced: bool,
+    /// 本帧开启了新的 utterance 缓冲（本帧之前没有在飞的 utterance）
+    pub utterance_started: bool,
+    /// 本帧达到断句端点时冲刷出的完整 utterance
+    pub chunk: Option<SpeechChunk>,
+}
+
 struct SpeakerState {
     decoder: Decoder,
     pcm16_mono_16k: Vec<i16>,
@@ -31,7 +44,7 @@ struct SpeakerState {
     name: String,
 }
 
-const VAD_ENERGY_THRESHOLD: f32 = 0.015;
+pub(crate) const VAD_ENERGY_THRESHOLD: f32 = 0.015;
 /// 断句端点：连续静音（帧内 VAD）或连续无帧（对端停止发送）达到该时长即冲刷当前 utterance；
 /// 两条路径共用同一常量，避免调其一时另一条仍在旧值上切句
 const VAD_SILENCE_MS: u64 = 1200;
@@ -65,7 +78,7 @@ impl OpusSttPipeline {
     pub fn process_audio_frame(
         &mut self,
         event: &voicev1::AudioFrameEvent,
-    ) -> Result<Option<SpeechChunk>> {
+    ) -> Result<Option<SttFrameOutcome>> {
         let now = Instant::now();
         self.evict_idle_speakers(now, event.from_client_id);
 
@@ -142,6 +155,7 @@ impl OpusSttPipeline {
         let frame_ms = ((samples_per_channel as u64) * 1000 / 48000).max(1);
         let energy = normalized_average_abs(&mono_16k);
         let is_voiced = energy >= VAD_ENERGY_THRESHOLD;
+        let utterance_started = is_voiced && !state.speaking;
 
         if is_voiced {
             state.speaking = true;
@@ -159,20 +173,26 @@ impl OpusSttPipeline {
             && state.speech_ms >= MIN_CHUNK_MS
             && (state.silence_ms >= VAD_SILENCE_MS || state.speech_ms >= MAX_CHUNK_MS);
 
-        if !should_flush {
-            return Ok(None);
-        }
-
-        let chunk = SpeechChunk {
-            speaker_client_id: event.from_client_id,
-            speaker_name: event.from_client_name.clone(),
-            pcm16_mono_16k: std::mem::take(&mut state.pcm16_mono_16k),
+        let chunk = if should_flush {
+            let chunk = SpeechChunk {
+                speaker_client_id: event.from_client_id,
+                speaker_name: event.from_client_name.clone(),
+                pcm16_mono_16k: std::mem::take(&mut state.pcm16_mono_16k),
+            };
+            state.speaking = false;
+            state.speech_ms = 0;
+            state.silence_ms = 0;
+            Some(chunk)
+        } else {
+            None
         };
-        state.speaking = false;
-        state.speech_ms = 0;
-        state.silence_ms = 0;
 
-        Ok(Some(chunk))
+        Ok(Some(SttFrameOutcome {
+            mono_16k,
+            voiced: is_voiced,
+            utterance_started,
+            chunk,
+        }))
     }
 
     /// 定时冲刷不活跃 speaker：达到最短语音长度则产出完整 utterance；
@@ -458,7 +478,7 @@ pub fn pcm16_mono_to_wav_bytes(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     out
 }
 
-fn normalized_average_abs(samples: &[i16]) -> f32 {
+pub(crate) fn normalized_average_abs(samples: &[i16]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
@@ -644,7 +664,7 @@ pub fn is_speakable(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        preprocess_stt_text, resolve_speech_api_key, resolve_stt_url, OpusSttPipeline,
+        preprocess_stt_text, resolve_speech_api_key, resolve_stt_url, voicev1, OpusSttPipeline,
         SpeakerState, VAD_SILENCE_MS,
     };
     use audiopus::coder::Decoder;
@@ -767,6 +787,51 @@ mod tests {
 
         assert!(chunks.is_empty());
         assert_eq!(pipeline.speakers[&1].speech_ms, 800);
+    }
+
+    /// 单帧产物带出本帧 PCM 与 VAD 结果：唤醒门要在收帧路径上实时喂入
+    #[test]
+    fn frame_outcome_carries_pcm_and_vad_state() {
+        let mut pipeline = OpusSttPipeline::new();
+
+        let silence = pipeline
+            .process_audio_frame(&audio_event(opus_frame_bytes(0.0)))
+            .expect("decode silence")
+            .expect("silence frame produces an outcome");
+        assert_eq!(silence.mono_16k.len(), 320, "20ms @16k mono");
+        assert!(!silence.voiced);
+        assert!(!silence.utterance_started);
+        assert!(silence.chunk.is_none());
+
+        // 活跃语音开启新 utterance；不足最短长度时不冲刷
+        let speech = pipeline
+            .process_audio_frame(&audio_event(opus_frame_bytes(0.4)))
+            .expect("decode speech")
+            .expect("speech frame produces an outcome");
+        assert!(speech.voiced);
+        assert!(speech.utterance_started);
+        assert!(speech.chunk.is_none());
+        assert!(!pipeline.speakers[&7].pcm16_mono_16k.is_empty());
+    }
+
+    fn audio_event(frame: Vec<u8>) -> voicev1::AudioFrameEvent {
+        voicev1::AudioFrameEvent {
+            from_client_id: 7,
+            from_client_name: "speaker-a".to_string(),
+            codec: 4,
+            frame,
+        }
+    }
+
+    fn opus_frame_bytes(amplitude: f32) -> Vec<u8> {
+        let encoder =
+            crate::adapter::headless::audio_codec::new_opus_stereo_encoder().expect("opus encoder");
+        let pcm = vec![amplitude; crate::adapter::headless::audio_codec::PCM_FRAME_SAMPLES_STEREO];
+        let mut out = [0u8; 1275];
+        let encoded = encoder
+            .encode_float(&pcm, &mut out)
+            .expect("opus encode frame");
+        out[..encoded].to_vec()
     }
 
     #[test]

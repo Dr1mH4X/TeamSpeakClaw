@@ -19,10 +19,14 @@ const MAX_TOOL_CALLS_TOTAL: usize = 32;
 pub type AsyncTokenCallback =
     Box<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// 流式与工具循环回调；各槽位的实参不同：文本槽收 token 或 finish_reason，
+/// 工具槽收工具名（`on_tool_call_start` 在该工具实际执行之前）
 #[derive(Default)]
 pub struct StreamCallbacks {
     pub on_text_token: Option<AsyncTokenCallback>,
     pub on_turn_end: Option<AsyncTokenCallback>,
+    /// 工具开始执行：调用方可据此播一句短反馈
+    pub on_tool_call_start: Option<AsyncTokenCallback>,
 }
 
 #[async_trait]
@@ -247,6 +251,12 @@ pub async fn run_tool_loop(
                 "executing tool call"
             );
 
+            if let Some(cb) = callbacks {
+                if let Some(ref on_start) = cb.on_tool_call_start {
+                    on_start(&call.name).await;
+                }
+            }
+
             let result = executor.execute(call).await;
 
             info!(
@@ -272,6 +282,7 @@ mod tests {
     use super::*;
     use futures_util::stream::{self, BoxStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct RepeatingProvider {
         calls: AtomicUsize,
@@ -569,5 +580,97 @@ mod tests {
 
         assert!(error.to_string().contains("total byte limit"));
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct ToolThenStopProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolThenStopProvider {
+        async fn chat_completion_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Vec<Value>,
+        ) -> Result<BoxStream<'static, Result<LlmStreamEvent>>> {
+            let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+            let event = if turn == 0 {
+                LlmStreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".to_string(),
+                        name: "web_search".to_string(),
+                        arguments: json!({}),
+                    }],
+                }
+            } else {
+                LlmStreamEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    tool_calls: Vec::new(),
+                }
+            };
+            Ok(Box::pin(stream::iter([Ok(event)])))
+        }
+    }
+
+    /// 工具回调成对出现且按「开始 → 执行 → 结束」排列，实参是工具名
+    #[tokio::test]
+    async fn tool_callbacks_wrap_tool_execution_in_order() {
+        struct RecordingExecutor {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl ToolExecutor for RecordingExecutor {
+            async fn execute(&self, call: &ToolCall) -> String {
+                self.events
+                    .lock()
+                    .expect("event log")
+                    .push(format!("execute:{}", call.name));
+                "ok".to_string()
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorder = |slot: &'static str| {
+            let events = events.clone();
+            Box::new(move |name: &str| {
+                let events = events.clone();
+                let entry = format!("{slot}:{name}");
+                Box::pin(async move {
+                    events.lock().expect("event log").push(entry);
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }) as AsyncTokenCallback
+        };
+        let callbacks = StreamCallbacks {
+            on_tool_call_start: Some(recorder("start")),
+            ..StreamCallbacks::default()
+        };
+        let executor = RecordingExecutor {
+            events: events.clone(),
+        };
+        let provider = ToolThenStopProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let mut messages = Vec::new();
+
+        run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            Some(&callbacks),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("tool loop completes");
+
+        assert_eq!(
+            *events.lock().expect("event log"),
+            vec![
+                "start:web_search".to_string(),
+                "execute:web_search".to_string()
+            ]
+        );
     }
 }
