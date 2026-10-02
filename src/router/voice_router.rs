@@ -551,9 +551,11 @@ impl VoiceRouter {
         {
             return Ok(());
         }
-        // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌
+        // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
+        // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完，被替换的旧条目
+        // 由它自己的任务收敛，不在这里取消
         let active = Arc::new(ActiveTurn::new());
-        self.turns.insert(ctx.caller_id, &active);
+        self.turns.begin_turn(ctx.caller_id, &active);
         self.handle_user_input(channel, ctx, clean_text, &active)
             .await
     }
@@ -650,29 +652,44 @@ impl VoiceRouter {
         turn_tasks: &mut JoinSet<()>,
     ) -> Result<()> {
         let clid = chunk.speaker_client_id;
-        // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销；
-        // 命中则这条 utterance 整体下行（含唤醒词本身），音频层切不出唤醒词前缀
+        // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销。
+        // 门按整段喂入、内部仍按 80ms 块推理，所以命中块偏移与原始分数序列都能打点出来，
+        // 供 Phase 0.5 标定唤醒词末端（裁切点）用
         if let Some(gate) = &self.wakeword {
-            let verdict = {
+            let event = {
                 let mut gate = gate.lock().await;
                 gate.feed(clid, &chunk.pcm16_mono_16k, Instant::now())
             };
+            let verdict = event.verdict;
             if verdict.detected {
                 info!(
                     event = "voice.wakeword",
                     clid,
                     speaker = %chunk.speaker_name,
                     probability = verdict.probability,
+                    fire_sample = event.fire_offset.unwrap_or(0),
+                    input_samples = chunk.pcm16_mono_16k.len(),
+                    window_open_before_feed = event.window_open_before_feed,
                     "wakeword detected; opening gate"
                 );
+                debug!(
+                    event = "voice.wakeword.calibration",
+                    clid,
+                    fire_sample = event.fire_offset.unwrap_or(0),
+                    input_samples = chunk.pcm16_mono_16k.len(),
+                    first_chunk_index = event.calibration.first_chunk_index,
+                    peak_chunk_index = event.calibration.peak_chunk_index().unwrap_or(0),
+                    peak_score = event.calibration.peak_score().unwrap_or(0.0),
+                    raw_scores = %event.calibration.scores_compact(),
+                    "wakeword raw score history for boundary calibration"
+                );
             }
-            // 可取消 = 本条说话人自己有正在产出的回合；「忙」是全局的（出站音频只有一路）
-            let cancellable = self
-                .turns
-                .active(clid)
-                .is_some_and(|turn| turn.is_producing());
-            let busy = self.turns.any_producing();
-            match decide_wakeword_action(verdict.open, verdict.detected, busy, cancellable) {
+            // 「忙」与插话取消目标取自同一次快照：出站音频只有一路，产出中的回合就是通道持有者。
+            // 分两次查询（先判忙再取目标）会在两次加锁之间漂移，出现「判定为忙却取不到目标」
+            // 或反过来该插话却判成空闲
+            let producing = self.turns.producing_turn();
+            let busy = producing.is_some();
+            match decide_wakeword_action(verdict.open, verdict.detected, busy) {
                 WakewordAction::Talk => {}
                 WakewordAction::Drop => {
                     debug!(
@@ -686,33 +703,40 @@ impl VoiceRouter {
                     );
                     return Ok(());
                 }
-                WakewordAction::BargeIn => match self.turns.take(clid) {
-                    Some(active) => {
-                        info!(
-                            event = "voice.wakeword.barge_in",
-                            clid,
-                            speaker = %chunk.speaker_name,
-                            turn_age_ms = active.age_ms(),
-                            "wakeword barge-in; cancelling the active turn"
-                        );
-                        active.cancel.cancel();
-                        if let Some(playback) = active.playback_cancel() {
-                            playback.store(true, Ordering::SeqCst);
-                        }
-                    }
-                    // 竞态：条目在裁决与取走之间失效，无可取消，直接处理本句
-                    None => debug!(
-                        event = "voice.wakeword.barge_in_missed",
-                        clid,
+                // BargeIn 由 busy 推出，而 busy 就是本快照的 Some/None，目标必然存在
+                WakewordAction::BargeIn => {
+                    let (owner_clid, target) =
+                        producing.expect("barge-in implies a producing turn");
+                    info!(
+                        event = "voice.wakeword.barge_in",
+                        barge_in_by = clid,
+                        cancelled_owner = owner_clid,
                         speaker = %chunk.speaker_name,
-                        "barge-in target expired before cancellation"
-                    ),
-                },
+                        turn_age_ms = target.age_ms(),
+                        "wakeword barge-in; cancelling the turn that owns the output"
+                    );
+                    // 取消幂等：令牌与播放取消位各自可重复置位。摘除只做一次，
+                    // 条目即时失效让后续语音立刻回到空闲准入，不必等旧回合任务收敛；
+                    // 若条目已被新回合顶替，remove_turn 按身份匹配不动新条目
+                    target.cancel.cancel();
+                    if let Some(playback) = target.playback_cancel() {
+                        playback.store(true, Ordering::SeqCst);
+                    }
+                    self.turns.remove_turn(&target);
+                }
             }
         }
 
         let active = Arc::new(ActiveTurn::new());
-        self.turns.insert(clid, &active);
+        // 第二道闸：同说话人可能还有一条尚未进入产出（正在解析/STT）的旧回合。它不在「忙」的
+        // 视野里，第一道闸看不到它，却已持有回合状态与播放取消句柄；begin_turn 把它挤下槽位，
+        // 这里顺手取消——否则两条并发回合里会有一条的取消句柄再也不可达
+        if let Some(displaced) = self.turns.begin_turn(clid, &active) {
+            displaced.cancel.cancel();
+            if let Some(playback) = displaced.playback_cancel() {
+                playback.store(true, Ordering::SeqCst);
+            }
+        }
         let router = self.clone();
         let channel = channel.clone();
         turn_tasks.spawn(async move {

@@ -12,6 +12,8 @@ use tract_core::model::IntoRunnable;
 use tract_core::prelude::multithread::{self, Executor};
 use tract_onnx::prelude::*;
 
+use super::calibration::ScorePoint;
+
 /// 上游 OWW 音频块：1280 采样 = 80ms @ 16kHz
 pub const CHUNK_SIZE: usize = 1280;
 /// 检测平滑窗：12 次检测约 1 秒
@@ -32,6 +34,9 @@ const MEL_INPUT_SIZE: usize = MEL_LOOKBACK + CHUNK_SIZE;
 const MELS_PER_CHUNK: usize = MEL_INPUT_SIZE / 160 - 3;
 /// mel 滑窗：80 帧 / 每块 8 帧 = 10
 const MEL_CIRC_SIZE: usize = 80 / MELS_PER_CHUNK;
+/// 打点用的原始分数环形缓冲：40 块 × 80ms = 3.2s，覆盖唤醒词前后完整窗口。
+/// 与 `detections_buffer` 分开：后者在命中时清空，无法用于回溯峰值
+pub const SCORE_HISTORY_SIZE: usize = 40;
 
 type ModelType = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
@@ -89,6 +94,10 @@ pub struct WakewordModel {
     feature_buffer: VecDeque<Tensor>,
     mel_spectrogram_buffer: VecDeque<Tensor>,
     detections_buffer: VecDeque<f32>,
+    /// 打点用：最近 `SCORE_HISTORY_SIZE` 块的原始分数与绝对块序号；命中不清空，
+    /// 保证命中时刻仍能回溯峰值位置
+    score_history: VecDeque<ScorePoint>,
+    chunks_seen: u64,
     last_detection_time: Instant,
 }
 
@@ -113,6 +122,8 @@ impl WakewordModel {
             feature_buffer,
             mel_spectrogram_buffer,
             detections_buffer: VecDeque::with_capacity(DETECTION_BUFFER_SIZE),
+            score_history: VecDeque::with_capacity(SCORE_HISTORY_SIZE),
+            chunks_seen: 0,
             // 不应期只用于抑制同一发声的重复触发；初值置于不应期之前，
             // 让会话建立后第一次越过阈值的命中立即触发（会话按 utterance 建立，
             // 若以 now 初始化，本会话第一条语音的命中会被整体吞掉）
@@ -153,6 +164,16 @@ impl WakewordModel {
             probability,
             DETECTION_BUFFER_SIZE,
         );
+        // 打点在原始输出处采集：此缓冲不清空，命中时仍能回溯峰值
+        push_ring(
+            &mut self.score_history,
+            ScorePoint {
+                raw: probability,
+                chunk_index: self.chunks_seen,
+            },
+            SCORE_HISTORY_SIZE,
+        );
+        self.chunks_seen = self.chunks_seen.saturating_add(1);
         let average = self.calculate_average();
         let since_last_detection = self.last_detection_time.elapsed().as_millis();
 
@@ -178,6 +199,11 @@ impl WakewordModel {
             detected: false,
             probability: average,
         }
+    }
+
+    /// 打点用原始分数序列（绝对块序号 + 原始分数，升序）
+    pub fn raw_score_history(&self) -> Vec<ScorePoint> {
+        self.score_history.iter().copied().collect()
     }
 
     fn calculate_average(&self) -> f32 {
