@@ -667,11 +667,10 @@ impl VoiceRouter {
                 );
             }
             // 可取消 = 本条说话人自己有正在产出的回合；「忙」是全局的（出站音频只有一路）
-            let cancellable = self.config.headless.wakeword.barge_in
-                && self
-                    .turns
-                    .active(clid)
-                    .is_some_and(|turn| turn.is_producing());
+            let cancellable = self
+                .turns
+                .active(clid)
+                .is_some_and(|turn| turn.is_producing());
             let busy = self.turns.any_producing();
             match decide_wakeword_action(verdict.open, verdict.detected, busy, cancellable) {
                 WakewordAction::Talk => {}
