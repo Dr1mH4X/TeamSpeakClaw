@@ -178,11 +178,14 @@ async fn warm_audio_surface(output: &AudioOutput, rings: &SpeakerRings) -> Resul
         .current
         .as_ref()
         .map(|info| info.started_at.elapsed());
-    info!(
-        queued_jobs = status.queued_jobs,
-        last_error = ?status.last_error,
-        "audio output surface warmed"
-    );
+    // 正常路径（队列已清空、无错误）不产生日志，仅异常残留时提示
+    if status.queued_jobs > 0 || status.last_error.is_some() {
+        warn!(
+            queued_jobs = status.queued_jobs,
+            last_error = ?status.last_error,
+            "audio output surface warmup left pending state"
+        );
+    }
 
     let stats = rings.stats();
     let snapshot = rings.snapshot(ReplayFilter::All, Some(1));
