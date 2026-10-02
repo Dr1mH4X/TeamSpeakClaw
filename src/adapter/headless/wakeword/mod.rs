@@ -311,6 +311,34 @@ mod tests {
         assert!(!verdict.open);
     }
 
+    /// 窗口与二次命中互不干扰：窗口内重命中仍报 `detected`，且窗口起点顺延到最近一次命中。
+    /// 下游用 `detected` 表达「窗口内喊唤醒词」（插话权），`open` 只表达「未命中时是否放行」，
+    /// 两者必须一直独立，否则插话语义会被窗口吞掉。
+    #[test]
+    fn gate_re_detection_inside_window_keeps_detected_and_refreshes_window() {
+        let mut gate = hit_gate();
+        let base = Instant::now();
+
+        let first = gate.feed(1, &[0i16; CHUNK_SIZE], base);
+        assert!(first.detected);
+        assert!(first.open);
+
+        // 窗口内重命中：窗口状态不抑制命中，仍报 detected 并仍开门
+        let second = gate.feed(1, &[0i16; CHUNK_SIZE], base + Duration::from_secs(10));
+        assert!(second.detected);
+        assert!(second.open);
+
+        // 未再命中：距第二次命中 14s。此处仍开门只能由「窗口顺延到最近命中」解释，
+        // 若窗口固定在第一次命中，距它 24s 早已关门
+        let inside = gate.feed(1, &[], base + Duration::from_secs(24));
+        assert!(inside.open);
+        assert!(!inside.detected);
+
+        // 距第二次命中满 15s 才关门
+        let closed = gate.feed(1, &[], base + Duration::from_secs(25));
+        assert!(!closed.open);
+    }
+
     #[test]
     fn gate_isolates_speakers() {
         let mut gate = hit_gate();
