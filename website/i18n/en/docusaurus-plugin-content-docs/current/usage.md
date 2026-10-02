@@ -39,7 +39,7 @@ You can interact with the bot in the following ways:
 
 3.  **Headless Voice Mode** (Optional): After enabling Headless service, you can interact with the bot directly via voice.
     -   Configure the `[headless]` section in `settings.toml`
-    -   Voice wake (optional): enable `[headless.wakeword]` and download `melspectrogram.onnx` and `embedding_model.onnx` into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md); download a classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model`, say the wake word first, then your command; within `window_secs` (default 15s) after waking you can keep talking
+    -   Voice wake (optional): enable `[headless.wakeword]` and download `melspectrogram.onnx` and `embedding_model.onnx` into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md); download a classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model`, say the wake word first, then your command; within `window_secs` (default 15s) after waking you can keep talking; saying the wake word again while the bot is speaking interrupts the current reply and handles that sentence instead, while extra speech without the wake word is dropped during playback
     -   The bot will reply via voice (requires TTS configuration)
     -   Example: (Say) `wake word play Nocturne by Jay Chou`
     -   **Without STT and omni**: spoken natural-language triggers are unavailable; chat into the bridge and direct commands still work

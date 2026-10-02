@@ -34,17 +34,6 @@ Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak se
 - `[headless.wakeword]` — Enable if you need voice wake: download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), then download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model` (optional; requires STT or omni input)
 - `[napcat]` — Enable and set WebSocket URL for QQ bot (optional)
 - `[voice_replay]` — Leave `enabled = false` unless you need replay; if enabled, grant access in `acl.toml` by group (optional; restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
-- `prompts.toml` — System prompts and error messages
-
-Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
-
-**Quick Configuration Checklist**:
-- `[headless]` — Fill in TeamSpeak server address (`server_address`), port (`server_port`), password, etc.
-- `[llm]` — Fill in API Key, Base URL, and model name
-- `[headless.stt]` / `[headless.tts]` — Enable and configure if you need voice service (optional)
-- `[headless.wakeword]` — Enable if you need voice wake: download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), then download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model` (optional; requires STT or omni input)
-- `[voice_replay]` — Keep `enabled = false` unless you need replay; grant `voice_replay` in ACL if enabled
-- `[napcat]` — Enable and configure WebSocket URL if you need QQ bot (optional)
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).
 
