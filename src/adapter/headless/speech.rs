@@ -295,8 +295,9 @@ impl OpenAiSpeechProvider {
         }
         let resp = request.send().await?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let err = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("stt request failed: {err}"));
+            return Err(anyhow!("stt request failed: {status} {err}"));
         }
         let body = resp.text().await?;
         let text = parse_stt_text(&body);
@@ -507,7 +508,10 @@ fn resolve_base_url(value: &str, fallback: &str) -> String {
 
 fn resolve_stt_url(value: &str, fallback: &str) -> String {
     let base = resolve_base_url(value, fallback);
-    if base.ends_with("/audio/transcriptions") || base.ends_with("/inference") {
+    if base.ends_with("/audio/transcriptions")
+        || base.ends_with("/inference")
+        || base.ends_with("/asr/transcription")
+    {
         base
     } else {
         format!("{base}/audio/transcriptions")
@@ -640,7 +644,8 @@ pub fn is_speakable(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        preprocess_stt_text, resolve_speech_api_key, OpusSttPipeline, SpeakerState, VAD_SILENCE_MS,
+        preprocess_stt_text, resolve_speech_api_key, resolve_stt_url, OpusSttPipeline,
+        SpeakerState, VAD_SILENCE_MS,
     };
     use audiopus::coder::Decoder;
     use audiopus::{Channels, SampleRate};
@@ -665,6 +670,45 @@ mod tests {
         assert_eq!(
             resolve_speech_api_key("speech-secret", "https://speech.example/v1", "llm-secret"),
             "speech-secret"
+        );
+    }
+
+    #[test]
+    fn stt_url_appends_transcriptions_to_plain_base() {
+        assert_eq!(
+            resolve_stt_url("https://speech.example/v1", ""),
+            "https://speech.example/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn stt_url_keeps_whisper_inference_and_openai_paths() {
+        assert_eq!(
+            resolve_stt_url("http://localhost:9000/inference", ""),
+            "http://localhost:9000/inference"
+        );
+        assert_eq!(
+            resolve_stt_url("https://speech.example/v1/audio/transcriptions", ""),
+            "https://speech.example/v1/audio/transcriptions"
+        );
+    }
+
+    #[test]
+    fn stt_url_keeps_asr_transcription_path() {
+        // 百炼/DashScope 异步转写路径：不得再追加 /audio/transcriptions
+        assert_eq!(
+            resolve_stt_url(
+                "https://ws-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/services/audio/asr/transcription",
+                ""
+            ),
+            "https://ws-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/services/audio/asr/transcription"
+        );
+        assert_eq!(
+            resolve_stt_url(
+                "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription/",
+                ""
+            ),
+            "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
         );
     }
 
