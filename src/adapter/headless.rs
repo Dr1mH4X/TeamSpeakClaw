@@ -103,7 +103,7 @@ pub fn voice_features_enabled(config: &AppConfig) -> bool {
         || config.voice_replay.enabled
 }
 
-/// bot 麦克风/扬声器开关：与 STT/TTS/omni 配置对齐
+/// bot 麦克风/扬声器开关：扬声器随 `voice_features_enabled()`（听），麦克风随需要出声的配置（说）
 pub struct VoiceMuteFlags {
     pub input_muted: bool,
     pub input_hardware_on: bool,
@@ -113,7 +113,8 @@ pub struct VoiceMuteFlags {
 
 pub fn voice_mute_flags(config: &AppConfig) -> VoiceMuteFlags {
     let speaker_on = voice_features_enabled(config);
-    let mic_on = config.headless.tts.enabled;
+    // TTS 与语音回放都经 `AudioOutput` 从 bot 发送通道出声，任一开启即需解除输入静音
+    let mic_on = config.headless.tts.enabled || config.voice_replay.enabled;
     VoiceMuteFlags {
         input_muted: !mic_on,
         input_hardware_on: mic_on,
@@ -684,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_mute_flags_follow_stt_tts_omni() {
+    fn voice_mute_flags_follow_voice_features() {
         let mut config = AppConfig::default();
         let flags = voice_mute_flags(&config);
         assert!(flags.input_muted);
@@ -713,7 +714,9 @@ mod tests {
         assert!(voice_features_enabled(&config));
         let flags = voice_mute_flags(&config);
         assert!(flags.output_hardware_on);
-        assert!(flags.input_muted);
+        // 回放经 bot 发送通道出声，仅开回放也必须解除输入静音
+        assert!(!flags.input_muted);
+        assert!(flags.input_hardware_on);
     }
 
     #[tokio::test]

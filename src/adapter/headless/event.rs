@@ -115,7 +115,7 @@ impl TsAdapter {
 
             match tokio::time::timeout(HANDSHAKE_TIMEOUT, client.wait_connected(None)).await {
                 Ok(Ok(())) => {
-                    // 根据 STT/TTS/omni 配置设置 mute/硬件状态
+                    // 根据语音功能配置（STT/TTS/omni/回放）设置 mute/硬件状态
                     {
                         let flags = super::voice_mute_flags(&config);
                         let cmd = format!(

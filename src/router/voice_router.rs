@@ -1,7 +1,5 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::StreamExt;
-use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -692,8 +690,8 @@ impl VoiceRouter {
         chunk: SpeechChunk,
     ) -> Result<()> {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
-        let audio_base64 = BASE64.encode(&wav_bytes);
-        let audio_data = format!("data:audio/wav;base64,{}", audio_base64);
+        // 请求与上下文各持一份：音频轮随后的消息按 input_audio 回放历史
+        let request_wav = wav_bytes.clone();
 
         // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
         let (system_prompt, user_ctx, allowed_skills, session_source) =
@@ -715,11 +713,7 @@ impl VoiceRouter {
         match run_llm_turn(
             &self.llm,
             &self.registry,
-            |llm| {
-                let content =
-                    vec![json!({ "type": "input_audio", "input_audio": { "data": audio_data } })];
-                llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, content)
-            },
+            |llm| llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, &request_wav),
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             || {
@@ -749,7 +743,7 @@ impl VoiceRouter {
                     );
                     self.send_reply(client, &ctx, &result.content).await?;
                     self.llm
-                        .save_turn(&session_source, "[Audio message]".into(), result.content);
+                        .save_omni_turn(&session_source, wav_bytes, result.content);
                 }
             }
             Err(e) => {

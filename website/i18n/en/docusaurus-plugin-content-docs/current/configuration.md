@@ -25,7 +25,7 @@ The `[llm]` section configures an OpenAI-compatible Chat Completions endpoint:
 | `api_key` | string | `""` | API key; may be empty for unauthenticated local services |
 | `base_url` | string | `https://api.openai.com/v1` | API base URL; only HTTP and HTTPS are supported |
 | `model` | string | `gpt-4o` | Model name |
-| `omni_model` | bool | `false` | Whether to process voice directly with a multimodal model |
+| `omni_model` | bool | `false` | Send speech straight to a multimodal model (audio as `input_audio`, no STT; `model` must accept audio input). Replies are still text; `[headless.tts]` provides spoken replies. Audio turns stay in context within `max_context_turns` |
 | `max_context_turns` | integer | `0` | Maximum conversation turns retained per session; `0` disables context |
 
 ### NapCat Configuration Details

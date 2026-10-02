@@ -69,7 +69,7 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 
 Use the base `docker-compose.yml`:
 - Online STT: configure an OpenAI-compatible online STT API under `[headless.stt]` in `config/settings.toml`
-- Multimodal model: set `omni_model = true` under `[llm]` — TTS/STT are disabled automatically and voice goes in/out directly, no STT config needed
+- Multimodal model: set `omni_model = true` under `[llm]` — speech is sent to that model as audio (no STT, so `[headless.stt]` is not needed; `model` must accept audio input). Replies are still text; enable `[headless.tts]` separately for spoken replies
 
 **Option 2: Local STT (whisper.cpp, offline)**
 

@@ -25,7 +25,7 @@ sidebar_position: 3
 | `api_key` | string | `""` | API 密钥；本地免鉴权服务可留空 |
 | `base_url` | string | `https://api.openai.com/v1` | API 基础 URL，仅支持 HTTP 或 HTTPS |
 | `model` | string | `gpt-4o` | 模型名称 |
-| `omni_model` | bool | `false` | 是否直接使用多模态模型处理语音 |
+| `omni_model` | bool | `false` | 语音输入多模态模型（音频作为 `input_audio`，跳过 STT，`model` 需支持音频输入）；模型回复仍是文本，语音回复由 `[headless.tts]` 提供 |
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
 
 ### NapCat 配置详解

@@ -108,10 +108,40 @@ impl TurnCoordinator {
     }
 }
 
+/// 单会话保留的 omni 音频历史字节上限；超出时从最早的轮整轮丢弃
+const MAX_AUDIO_HISTORY_BYTES: usize = 50 * 1024 * 1024;
+
+/// 上下文里的用户侧内容
+#[derive(Debug, Clone)]
+pub enum ContextUser {
+    /// 文本轮原文
+    Text(String),
+    /// omni 音频轮：16 kHz 单声道 WAV 字节，装配请求时转成 `input_audio` content
+    Audio(Vec<u8>),
+}
+
+impl ContextUser {
+    /// 文本轮原文；音频轮返回 None。仅测试断言用
+    #[cfg(test)]
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContextUser::Text(text) => Some(text),
+            ContextUser::Audio(_) => None,
+        }
+    }
+
+    fn audio_bytes(&self) -> usize {
+        match self {
+            ContextUser::Text(_) => 0,
+            ContextUser::Audio(wav) => wav.len(),
+        }
+    }
+}
+
 /// 单轮对话
 #[derive(Debug, Clone)]
 pub struct ContextTurn {
-    pub user: String,
+    pub user: ContextUser,
     pub assistant: String,
 }
 
@@ -170,9 +200,11 @@ impl ContextWindow {
         let entry = state.histories.entry(session_id).or_default();
         entry.push_back(turn);
 
+        // 两种上限都以「一轮对话」为单位从最早逐轮丢弃：先按 max_context_turns，再按音频字节预算兜底
         while entry.len() > self.max_turns {
             entry.pop_front();
         }
+        drop_excess_audio(entry, MAX_AUDIO_HISTORY_BYTES);
     }
 
     /// 获取会话历史
@@ -188,6 +220,19 @@ impl ContextWindow {
     }
 }
 
+/// 音频历史超预算时从最早的一轮对话逐轮丢弃：user/assistant 成对移除，历史保持连续；
+/// 至少保留最新一轮，预算不会把会话历史清空
+fn drop_excess_audio(entry: &mut VecDeque<ContextTurn>, budget: usize) {
+    let mut total: usize = entry.iter().map(|turn| turn.user.audio_bytes()).sum();
+    while total > budget && entry.len() > 1 {
+        let Some(front) = entry.front() else {
+            break;
+        };
+        total -= front.user.audio_bytes();
+        entry.pop_front();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,8 +240,22 @@ mod tests {
 
     fn turn(value: usize) -> ContextTurn {
         ContextTurn {
-            user: format!("user-{value}"),
+            user: ContextUser::Text(format!("user-{value}")),
             assistant: format!("assistant-{value}"),
+        }
+    }
+
+    fn audio_turn(bytes: usize) -> ContextTurn {
+        ContextTurn {
+            user: ContextUser::Audio(vec![0u8; bytes]),
+            assistant: "assistant-audio".to_string(),
+        }
+    }
+
+    fn audio_bytes(turn: &ContextTurn) -> Option<usize> {
+        match &turn.user {
+            ContextUser::Text(_) => None,
+            ContextUser::Audio(wav) => Some(wav.len()),
         }
     }
 
@@ -223,8 +282,45 @@ mod tests {
 
         let history = context.get(&source);
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].user, "user-2");
-        assert_eq!(history[1].user, "user-3");
+        assert_eq!(history[0].user.as_text(), Some("user-2"));
+        assert_eq!(history[1].user.as_text(), Some("user-3"));
+    }
+
+    #[test]
+    fn audio_turns_within_the_byte_budget_are_kept() {
+        let context = ContextWindow::new(4, 10);
+        let source = SessionSource::TeamSpeak {
+            uid: "uid-audio".to_string(),
+        };
+
+        context.push(&source, audio_turn(256 * 1024));
+        context.push(&source, audio_turn(256 * 1024));
+
+        let history = context.get(&source);
+        assert_eq!(history.len(), 2);
+        assert_eq!(audio_bytes(&history[0]), Some(256 * 1024));
+        assert_eq!(audio_bytes(&history[1]), Some(256 * 1024));
+    }
+
+    #[test]
+    fn excess_audio_drops_whole_earliest_turns() {
+        let mut entry = VecDeque::from(vec![audio_turn(8 * 1024), turn(1), audio_turn(8 * 1024)]);
+
+        drop_excess_audio(&mut entry, 10 * 1024);
+
+        assert_eq!(entry.len(), 2);
+        assert_eq!(entry[0].user.as_text(), Some("user-1"));
+        assert_eq!(audio_bytes(&entry[1]), Some(8 * 1024));
+    }
+
+    #[test]
+    fn single_turn_over_budget_still_keeps_the_latest_turn() {
+        let mut entry = VecDeque::from(vec![audio_turn(8 * 1024), audio_turn(4 * 1024)]);
+
+        drop_excess_audio(&mut entry, 2 * 1024);
+
+        assert_eq!(entry.len(), 1);
+        assert_eq!(audio_bytes(&entry[0]), Some(4 * 1024));
     }
 
     #[test]

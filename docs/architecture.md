@@ -18,7 +18,7 @@ NapCat 侧（`adapter/napcat.rs`）是 OneBot 11 WebSocket 客户端，仅当 `c
 
 voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router.rs`）路由而非 `EventRouter`。由 `should_route_text_through_bridge(voice_configured, bridge_ready)` 决定：语音已配置（`voice_features_enabled()` = STT/TTS/omni 任一开启）且 `VoiceBridgeState` 就绪（gRPC 服务运行、事件流订阅就绪、actor 事件 handler 已注册）时，`ts_router::handle_message()` 直接跳过文本处理，语音桥接管。TS 触发策略（私聊直触 / 前缀剥离 / 回复目标）由 `router/trigger.rs:resolve_ts_inbound()` 统一计算；adapter 的 actor 只搬运原始文本。
 
-`VoiceRouter` 以独立任务运行在 headless 运行时内，自带重连与退避循环，失败时置 `stream_ready=false` 触发文本回退。它提供音频 STT/TTS 双流水线：`audio_pipeline`（`OpusSttPipeline`）做音频分段，STT 经 `OpenAiSpeechProvider` 转写（omni 模式下改发 audio content），回复经流式句段切分器 + `stream_tts_audio` 返回语音；出站音频统一经 `AudioOutput` FIFO（唯一持有 `ts3_audio_tx` 写端），每轮 TTS 会话归该轮 synth 任务所有，句段通道关闭后由任务 `finish` 会话，轮次收尾只关句段通道、不等播放；音乐 bot 的音频与聊天按其名字（`musicbot_name`）过滤，不进入 LLM。`[headless.wakeword]` 启用时，`handle_audio_chunk` 在 caller 解析与 gRPC 查询之前先过唤醒门（per-clid 实例池 + `window_secs` 开门窗口），关门语音直接丢弃，omni 与 STT 两路走同一道门。聊天与音频事件经 `actor.rs` 广播通道（控制/音频分离）送达，gRPC 定义见 `proto/voice.proto`，`build.rs` 用 `protoc-bin-vendored` + `tonic_build` 生成代码，内部监听地址为 `INTERNAL_GRPC_ADDR = "127.0.0.1:50051"`。
+`VoiceRouter` 以独立任务运行在 headless 运行时内，自带重连与退避循环，失败时置 `stream_ready=false` 触发文本回退。它提供音频 STT/TTS 双流水线：`audio_pipeline`（`OpusSttPipeline`）做音频分段，STT 经 `OpenAiSpeechProvider` 转写（omni 模式下音频以 `input_audio` 直送 LLM），模型回复始终是文本、在 `[headless.tts]` 开启时经流式句段切分器 + `stream_tts_audio` 合成语音；出站音频统一经 `AudioOutput` FIFO（唯一持有 `ts3_audio_tx` 写端），每轮 TTS 会话归该轮 synth 任务所有，句段通道关闭后由任务 `finish` 会话，轮次收尾只关句段通道、不等播放；音乐 bot 的音频与聊天按其名字（`musicbot_name`）过滤，不进入 LLM。`[headless.wakeword]` 启用时，`handle_audio_chunk` 在 caller 解析与 gRPC 查询之前先过唤醒门（per-clid 实例池 + `window_secs` 开门窗口），关门语音直接丢弃，omni 与 STT 两路走同一道门。聊天与音频事件经 `actor.rs` 广播通道（控制/音频分离）送达，gRPC 定义见 `proto/voice.proto`，`build.rs` 用 `protoc-bin-vendored` + `tonic_build` 生成代码，内部监听地址为 `INTERNAL_GRPC_ADDR = "127.0.0.1:50051"`。
 
 ## 关键代码路径
 
@@ -30,7 +30,7 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 `llm.rs` 聚合 `llm/` 子模块：`engine` 是 `LlmEngine`（上下文装配与工具循环入口），`provider` 是 OpenAI 兼容 HTTP 客户端，`context` 是上下文窗口与轮次协调（`TurnCoordinator`：每会话串行锁 + 全局容量钳制），`tool_loop` 是流式工具循环。
 
-引擎请求任意 `base_url/chat/completions`（流式）；解析流时忽略 `reasoning_content`（不存不转发）。上下文受 `max_context_turns` 与固定常量上限（`MAX_CONTEXT_SESSIONS = 1000`）控制；并发门禁只有 `TurnCoordinator`（容量 4 + 同会话串行锁），ts/nc/voice 三入口均 `try_reserve_turn_capacity` + `acquire_turn_session`；超时为常量：连接 10s、流空闲 30s、流总 300s。`omni_model`（`config/llm.rs`）开启时文本请求改走语音桥音频通道。
+引擎请求任意 `base_url/chat/completions`（流式）；解析流时忽略 `reasoning_content`（不存不转发）。上下文受 `max_context_turns` 与固定常量上限（`MAX_CONTEXT_SESSIONS = 1000`）控制；并发门禁只有 `TurnCoordinator`（容量 4 + 同会话串行锁），ts/nc/voice 三入口均 `try_reserve_turn_capacity` + `acquire_turn_session`；超时为常量：连接 10s、流空闲 30s、流总 300s。`omni_model`（`config/llm.rs`）开启时语音输入以 `input_audio` content 送入模型替代 STT，模型输出仍是文本流；该标志同时计入 `voice_features_enabled()`，bridge 就绪时 TS 文本消息随之经 `VoiceRouter` 路由。上下文的历史轮同样可携带音频：音频轮以 WAV 字节存入会话，构建请求时按 `input_audio` content 回放；`max_context_turns` 与单会话 50 MiB 音频预算都以「一轮对话」（user+assistant 成对）为单位从最早逐轮丢弃，字节预算至少保留最新一轮，不会清空会话历史。
 
 ## 权限体系
 

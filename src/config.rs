@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::config::music_backend::VALID_BACKENDS;
+use tracing::warn;
 
 /// 读取并解析 TOML 配置文件；`hint` 为文件缺失/不可读时的提示文案。
 pub(crate) fn load_toml<T: DeserializeOwned>(path: &Path, hint: &str) -> Result<T> {
@@ -131,6 +132,20 @@ impl AppConfig {
         Ok(())
     }
 
+    /// 语音输入来源冲突提示：`omni_model` 开启时音频直送多模态模型，STT 转写不会执行
+    pub fn log_voice_input_conflicts(&self) {
+        if let Some(hint) = self.ignored_voice_input_hint() {
+            warn!("{hint}");
+        }
+    }
+
+    /// 冲突提示文案；两者未同时开启时为 None
+    fn ignored_voice_input_hint(&self) -> Option<&'static str> {
+        (self.llm.omni_model && self.headless.stt.enabled).then_some(
+            "llm.omni_model is enabled: audio goes to the multimodal model directly, so headless.stt.enabled is ignored",
+        )
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let config: AppConfig = load_toml(
@@ -184,6 +199,18 @@ max_context_turns = 3
         assert!(!config.voice_replay.enabled);
         assert_eq!(config.voice_replay.window_secs, 30);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn voice_input_conflict_hint_requires_omni_and_stt_together() {
+        let mut config = AppConfig::default();
+        assert!(config.ignored_voice_input_hint().is_none());
+
+        config.llm.omni_model = true;
+        assert!(config.ignored_voice_input_hint().is_none());
+
+        config.headless.stt.enabled = true;
+        assert!(config.ignored_voice_input_hint().is_some());
     }
 
     #[test]

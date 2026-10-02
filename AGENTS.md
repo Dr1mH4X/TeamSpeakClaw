@@ -80,7 +80,7 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 
 ## LLM / Provider
 
-OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时文本走语音桥。详见 [docs/architecture.md](docs/architecture.md)。
+OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。详见 [docs/architecture.md](docs/architecture.md)。
 
 ## Defensive patterns
 

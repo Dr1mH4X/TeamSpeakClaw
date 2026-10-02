@@ -58,7 +58,7 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 
 直接使用 `docker-compose.yml`：
 - 在线 STT：在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
-- 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，自动禁用 TTS/STT、直接用语音输入输出，无需配置 STT
+- 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，语音以音频直接送入该模型（跳过 STT，无需配置 `[headless.stt]`；`model` 需支持音频输入）；模型回复仍是文本，需要语音回复时另行启用 `[headless.tts]`
 
 **方案二：本地 STT（whisper.cpp，离线）**
 
