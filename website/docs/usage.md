@@ -39,7 +39,7 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 3.  **Headless 语音模式**（可选）：启用 Headless 服务后，可直接通过语音与机器人交互。
     -   配置 `settings.toml` 中的 `[headless]` 区段
-    -   语音唤醒（可选）：启用 `[headless.wakeword]`，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型到 `models/` 目录，再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并在 `model` 填其文件名，先说唤醒词再下指令；唤醒后 `window_secs`（默认 15s）内可连续对话
+    -   语音唤醒（可选）：启用 `[headless.wakeword]`，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型到 `models/` 目录，再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并在 `model` 填其文件名，先说唤醒词再下指令；唤醒后 `window_secs`（默认 15s）内可连续对话，机器人在播报时再说一次唤醒词会打断当前回复并接着处理这一句（`barge_in`，默认开启）；播报期间不含唤醒词的补充语音会被丢弃
     -   机器人会通过语音回复（需配置 TTS）
     -   例如: （说）`唤醒词 播放周杰伦的夜曲`
     -   **未开 STT 且未启用 omni 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用

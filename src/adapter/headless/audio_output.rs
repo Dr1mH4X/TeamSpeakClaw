@@ -196,6 +196,11 @@ pub struct TtsSession {
 }
 
 impl TtsSession {
+    /// 本轮音频 job 的取消句柄：句段通道关闭后仍有效，置位后消费者在当前帧停止播放
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
     /// 段 channel 容量见 `TTS_SEGMENT_CAPACITY`；满时 `send` 背压阻塞调用方（固有行为）
     pub async fn push_encoded(&mut self, payload: Vec<u8>, codec: &str) -> Result<()> {
         let tx = self
@@ -551,7 +556,11 @@ async fn play_encoded_stream(
                         ));
                     }
                     // 段处理期间也强制总截止时间，避免超大 payload 拖穿 MAX_JOB_SECS
-                    match timeout(remaining, process_encoded_segment(&segment, ts3_audio_tx)).await
+                    match timeout(
+                        remaining,
+                        process_encoded_segment(&segment, cancel, ts3_audio_tx),
+                    )
+                    .await
                     {
                         Ok(result) => result?,
                         Err(_) => {
@@ -561,7 +570,7 @@ async fn play_encoded_stream(
                         }
                     }
                 }
-                None => process_encoded_segment(&segment, ts3_audio_tx).await?,
+                None => process_encoded_segment(&segment, cancel, ts3_audio_tx).await?,
             }
         }
         let recv_timeout = match total_deadline {
@@ -608,6 +617,7 @@ impl Drop for ChildKillOnDrop {
 
 async fn process_encoded_segment(
     segment: &EncodedSegment,
+    cancel: &AtomicBool,
     ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
 ) -> Result<()> {
     let input_format = if segment.codec.eq_ignore_ascii_case("wav") {
@@ -681,6 +691,10 @@ async fn process_encoded_segment(
     let mut opus_out = [0u8; 1275];
 
     loop {
+        // 逐帧检查取消：插话不必等当前段（整句）播完
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         match stdout.read_exact(&mut pcm).await {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,

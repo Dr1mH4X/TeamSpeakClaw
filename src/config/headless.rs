@@ -43,6 +43,8 @@ pub struct HeadlessWakewordConfig {
     pub enabled: bool,
     pub model: String,
     pub window_secs: u32,
+    /// 窗口内再次命中唤醒词时打断同说话人正在产出的回合（LLM 流 + TTS 播放）
+    pub barge_in: bool,
 }
 
 impl Default for HeadlessConfig {
@@ -92,6 +94,7 @@ impl Default for HeadlessWakewordConfig {
             enabled: false,
             model: String::new(),
             window_secs: 15,
+            barge_in: true,
         }
     }
 }

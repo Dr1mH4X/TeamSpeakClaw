@@ -45,8 +45,17 @@ impl LlmEngine {
         tools: &[Value],
         executor: &dyn ToolExecutor,
         callbacks: Option<&StreamCallbacks>,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<ToolLoopResult, ToolLoopError> {
-        run_tool_loop(messages, tools, self.provider.as_ref(), executor, callbacks).await
+        run_tool_loop(
+            messages,
+            tools,
+            self.provider.as_ref(),
+            executor,
+            callbacks,
+            cancel,
+        )
+        .await
     }
 
     /// 同步获取容量占位（不等待）：事件循环内调用，满立即返回 TurnQueueFull。

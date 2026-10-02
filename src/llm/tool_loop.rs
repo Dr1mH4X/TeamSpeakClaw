@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 const MAX_TOOL_LOOP_TURNS: usize = 16;
@@ -33,6 +34,9 @@ pub trait ToolExecutor: Send + Sync {
 pub enum ToolLoopError {
     #[error("tool loop exceeded {max_turns} model turns")]
     MaxTurnsExceeded { max_turns: usize },
+    /// 插话取消：调用方不回错误文案、不落上下文
+    #[error("tool loop cancelled")]
+    Cancelled,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -55,15 +59,27 @@ async fn accumulate_stream(
     tools: &[Value],
     provider: &dyn LlmProvider,
     callbacks: Option<&StreamCallbacks>,
-) -> Result<AccumulatedResult> {
-    let mut stream = provider
-        .chat_completion_stream(messages.to_vec(), tools.to_vec())
-        .await?;
+    cancel: &CancellationToken,
+) -> Result<AccumulatedResult, ToolLoopError> {
+    // 连接期与流读取期都可取消：插话不必等当前流自然结束
+    let mut stream = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ToolLoopError::Cancelled),
+        stream = provider.chat_completion_stream(messages.to_vec(), tools.to_vec()) => stream?,
+    };
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut finish_reason = String::new();
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ToolLoopError::Cancelled),
+            event = stream.next() => event,
+        };
+        let Some(event) = event else {
+            break;
+        };
         match event? {
             LlmStreamEvent::Token(token) => {
                 text.push_str(&token);
@@ -90,7 +106,9 @@ async fn accumulate_stream(
     }
 
     if finish_reason.is_empty() {
-        anyhow::bail!("LLM stream ended without a completion event");
+        return Err(ToolLoopError::Other(anyhow::anyhow!(
+            "LLM stream ended without a completion event"
+        )));
     }
 
     Ok(AccumulatedResult {
@@ -151,11 +169,15 @@ pub async fn run_tool_loop(
     provider: &dyn LlmProvider,
     executor: &dyn ToolExecutor,
     callbacks: Option<&StreamCallbacks>,
+    cancel: &CancellationToken,
 ) -> Result<ToolLoopResult, ToolLoopError> {
     let mut executed_tool_calls = 0usize;
     let mut argument_bytes_total = 0usize;
 
     for turn in 0..MAX_TOOL_LOOP_TURNS {
+        if cancel.is_cancelled() {
+            return Err(ToolLoopError::Cancelled);
+        }
         debug!(
             "Tool loop turn {}/{} (messages: {})",
             turn + 1,
@@ -163,7 +185,7 @@ pub async fn run_tool_loop(
             messages.len()
         );
 
-        let acc = accumulate_stream(messages, tools, provider, callbacks).await?;
+        let acc = accumulate_stream(messages, tools, provider, callbacks, cancel).await?;
         let turn_argument_bytes = validate_tool_batch(
             &acc.finish_reason,
             &acc.tool_calls,
@@ -216,6 +238,9 @@ pub async fn run_tool_loop(
         messages.push(assistant_msg);
 
         for call in &acc.tool_calls {
+            if cancel.is_cancelled() {
+                return Err(ToolLoopError::Cancelled);
+            }
             info!(
                 event = "tool_loop.execute",
                 tool_name = %call.name,
@@ -293,9 +318,16 @@ mod tests {
         };
         let mut messages = Vec::new();
 
-        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None)
-            .await
-            .unwrap_err();
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(error, ToolLoopError::MaxTurnsExceeded { .. }));
         assert_eq!(provider.calls.load(Ordering::SeqCst), MAX_TOOL_LOOP_TURNS);
@@ -320,13 +352,81 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_stream_without_completion_event() {
-        let error = accumulate_stream(&[], &[], &EmptyProvider, None)
+        let error = accumulate_stream(&[], &[], &EmptyProvider, None, &CancellationToken::new())
             .await
             .unwrap_err();
 
         assert!(error
             .to_string()
             .contains("ended without a completion event"));
+    }
+
+    /// 取消在流中途生效：不等当前流自然结束
+    #[tokio::test]
+    async fn cancel_interrupts_a_running_stream() {
+        struct EndlessProvider;
+
+        #[async_trait]
+        impl LlmProvider for EndlessProvider {
+            async fn chat_completion_stream(
+                &self,
+                _messages: Vec<Value>,
+                _tools: Vec<Value>,
+            ) -> Result<BoxStream<'static, Result<LlmStreamEvent>>> {
+                Ok(Box::pin(stream::unfold((), |_| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    Some((Ok(LlmStreamEvent::Token("t".to_string())), ()))
+                })))
+            }
+        }
+
+        let executor = CountingExecutor {
+            calls: AtomicUsize::new(0),
+        };
+        let mut messages = Vec::new();
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &EndlessProvider,
+            &executor,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ToolLoopError::Cancelled));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// 已取消的令牌在调用模型前就短路，不产生请求
+    #[tokio::test]
+    async fn cancel_before_the_turn_skips_the_model_call() {
+        let provider = FixedProvider {
+            calls: AtomicUsize::new(0),
+            finish_reason: "stop",
+            tool_calls: Vec::new(),
+        };
+        let executor = CountingExecutor {
+            calls: AtomicUsize::new(0),
+        };
+        let mut messages = Vec::new();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None, &cancel)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolLoopError::Cancelled));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
     struct FixedProvider {
@@ -372,9 +472,16 @@ mod tests {
         };
         let mut messages = Vec::new();
 
-        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None)
-            .await
-            .unwrap_err();
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("expected 'tool_calls'"));
         assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
@@ -392,9 +499,16 @@ mod tests {
         };
         let mut messages = Vec::new();
 
-        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None)
-            .await
-            .unwrap_err();
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("per-turn limit"));
         assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
@@ -412,9 +526,16 @@ mod tests {
         };
         let mut messages = Vec::new();
 
-        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None)
-            .await
-            .unwrap_err();
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("total limit"));
         assert_eq!(executor.calls.load(Ordering::SeqCst), MAX_TOOL_CALLS_TOTAL);
@@ -435,9 +556,16 @@ mod tests {
         };
         let mut messages = Vec::new();
 
-        let error = run_tool_loop(&mut messages, &[], &provider, &executor, None)
-            .await
-            .unwrap_err();
+        let error = run_tool_loop(
+            &mut messages,
+            &[],
+            &provider,
+            &executor,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("total byte limit"));
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);

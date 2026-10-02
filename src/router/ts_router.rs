@@ -16,6 +16,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 #[derive(Clone)]
@@ -246,6 +247,7 @@ Online: {}"#,
             |llm| llm.build_messages(&source, system_prompt, &user_ctx, msg_content),
             &allowed_skills,
             None,
+            &CancellationToken::new(),
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {

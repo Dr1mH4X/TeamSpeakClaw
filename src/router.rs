@@ -3,6 +3,7 @@ mod trigger;
 mod ts_router;
 mod unified;
 mod voice_router;
+mod voice_turns;
 
 pub use nc_router::NcRouter;
 pub use trigger::{resolve_ts_inbound, strip_trigger_prefix};
@@ -58,6 +59,7 @@ pub(crate) async fn run_llm_turn<F, M>(
     build_messages: M,
     allowed_skills: &[String],
     callbacks: Option<&StreamCallbacks>,
+    cancel: &CancellationToken,
     build_exec_ctx: F,
 ) -> Result<ToolLoopResult, ToolLoopError>
 where
@@ -71,7 +73,7 @@ where
         allowed_skills,
         build_exec_ctx,
     };
-    llm.run_tool_loop(&mut messages, &tools, &executor, callbacks)
+    llm.run_tool_loop(&mut messages, &tools, &executor, callbacks, cancel)
         .await
 }
 

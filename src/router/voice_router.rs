@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -17,12 +18,14 @@ use crate::adapter::headless::wakeword::{WakewordGate, WakewordModels};
 use crate::adapter::headless::{
     parse_server_groups, TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR,
 };
-use crate::adapter::reconnect::{
-    abort_managed_tasks, now_unix_ms, wait_for_retry, ReconnectState, RetryDecision,
-};
+use crate::adapter::reconnect::{abort_managed_tasks, now_unix_ms};
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
+use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
+use crate::router::voice_turns::{
+    decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
+};
 use crate::router::{resolve_ts_inbound, run_llm_turn, LLM_ERROR_REPLY};
 
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
@@ -30,6 +33,49 @@ use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
 const AUDIO_MAX_IN_FLIGHT: usize = 8;
+
+/// 出站 gRPC 通道持有者：`Channel` clone 共享同一条连接，准入路径与各回合任务共用。
+/// 传输失败时后台重连替换通道，避免单个回合的失败拖住后续通知。
+#[derive(Clone)]
+struct VoiceChannel {
+    channel: Arc<Mutex<Channel>>,
+    reconnecting: Arc<AtomicBool>,
+}
+
+impl VoiceChannel {
+    fn new(channel: Channel) -> Self {
+        Self {
+            channel: Arc::new(Mutex::new(channel)),
+            reconnecting: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn client(&self) -> VoiceServiceClient<Channel> {
+        VoiceServiceClient::new(self.channel.lock().await.clone())
+    }
+
+    /// 后台重连一次并替换通道；同一时刻只允许一次重连在飞
+    fn refresh_in_background(&self) {
+        if self.reconnecting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let holder = self.clone();
+        tokio::spawn(async move {
+            match connect_voice_channel().await {
+                Ok(channel) => {
+                    *holder.channel.lock().await = channel;
+                }
+                Err(error) => warn!(error = %error, "voice channel reconnect failed"),
+            }
+            holder.reconnecting.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+async fn connect_voice_channel() -> Result<Channel> {
+    let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
+    Ok(Channel::from_shared(endpoint)?.connect().await?)
+}
 
 struct CallerContext {
     caller_id: u32,
@@ -65,6 +111,8 @@ struct TtsTurnRuntime {
     shared_tx: TtsSentenceSender,
     shared_session: SharedTtsSession,
     synth_task: tokio::task::JoinHandle<()>,
+    /// 本轮音频 job 的取消句柄：abort 时先置位，保证已交给消费者的音频也停
+    playback_cancel: Arc<AtomicBool>,
 }
 
 impl TtsTurnRuntime {
@@ -81,8 +129,9 @@ impl TtsTurnRuntime {
         drop(self.synth_task);
     }
 
-    /// 取消：abort 合成任务并 drop 未 finish 的会话（消费者 abort 该 job）
+    /// 取消：先置播放取消位，再 abort 合成任务并 drop 未 finish 的会话
     async fn abort(self) {
+        self.playback_cancel.store(true, Ordering::SeqCst);
         self.synth_task.abort();
         let _ = self.synth_task.await;
         if let Some(session) = self.shared_session.lock().await.take() {
@@ -124,6 +173,8 @@ pub struct VoiceRouter {
     voice_audio: crate::skills::VoiceAudioHandles,
     /// 唤醒门：`[headless.wakeword]` 启用时 Some；per-clid 会话状态仅 audio drain 任务访问
     wakeword: Option<Mutex<WakewordGate>>,
+    /// per-clid 活跃回合：准入判断「忙」与插话取消目标
+    turns: TurnRegistry,
 }
 
 /// VoiceRouter 装配句柄（避免构造参数列表过长）
@@ -183,6 +234,7 @@ impl VoiceRouter {
             audio_output,
             voice_audio,
             wakeword,
+            turns: TurnRegistry::default(),
         }
     }
 
@@ -192,9 +244,9 @@ impl VoiceRouter {
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         self.bridge_state.set_stream_ready(false);
-        let endpoint = format!("http://{}", INTERNAL_GRPC_ADDR);
-        let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
-        let mut client = VoiceServiceClient::new(channel);
+        let channel = connect_voice_channel().await?;
+        let mut client = VoiceServiceClient::new(channel.clone());
+        let channel = VoiceChannel::new(channel);
 
         let req = tonic::Request::new(voicev1::SubscribeRequest {
             include_chat: true,
@@ -211,64 +263,31 @@ impl VoiceRouter {
             SpeechChunk,
         )>(AUDIO_MAX_IN_FLIGHT);
 
+        // 准入与执行分离：本任务只喂唤醒门并裁决，回合在执行任务里跑，
+        // 所以机器人播报期间仍能即时裁决后续语音（含第二次唤醒词的插话）
         let drain_router = router.clone();
+        let drain_channel = channel.clone();
         tasks.spawn(async move {
-            let mut client = None;
-            let mut reconnect_state = ReconnectState::default();
+            let mut turn_tasks: JoinSet<()> = JoinSet::new();
             loop {
-                let Some((audio, chunk)) = audio_chunk_rx.recv().await else {
+                let next = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => None,
+                    next = audio_chunk_rx.recv() => next,
+                };
+                let Some((audio, chunk)) = next else {
                     break;
                 };
-                // 连接失败时重试，不永久退出；重试期间队列照常消费（不阻塞聊天）
-                if client.is_none() {
-                    let connect_result: anyhow::Result<Channel> =
-                        match Channel::from_shared(format!("http://{INTERNAL_GRPC_ADDR}")) {
-                            Ok(channel) => channel
-                                .connect()
-                                .await
-                                .map_err(|error| anyhow::anyhow!("connect failed: {error}")),
-                            Err(error) => Err(anyhow::anyhow!("invalid endpoint: {error}")),
-                        };
-                    match connect_result {
-                        Ok(channel) => {
-                            client = Some(VoiceServiceClient::new(channel));
-                            reconnect_state.record_session_started();
-                        }
-                        Err(error) => {
-                            // 重试策略委托 reconnect 工具：失败计数与退避等待不在此处自行实现
-                            let RetryDecision::Retry { attempt, delay } =
-                                reconnect_state.record_failure()
-                            else {
-                                warn!(error = %error, "voice audio worker reconnect attempts exhausted; giving up");
-                                break;
-                            };
-                            warn!(
-                                attempt = attempt,
-                                error = %error,
-                                "voice audio worker connect failed; retrying"
-                            );
-                            // 退避等待感知取消令牌：shutdown 触发时立即退出
-                            if !wait_for_retry(delay, &shutdown).await {
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                let mut handle_error = None;
-                if let Some(client_ref) = client.as_mut() {
-                    if let Err(error) = drain_router
-                        .handle_audio_chunk(client_ref, audio, chunk)
-                        .await
-                    {
-                        handle_error = Some(error);
-                    }
-                }
-                if let Some(error) = handle_error {
-                    // gRPC 调用失败可能是连接失效：丢弃客户端触发重连
-                    client = None;
+                if let Err(error) = drain_router
+                    .admit_audio_chunk(&drain_channel, audio, chunk, &mut turn_tasks)
+                    .await
+                {
                     error!("Voice router audio handling failed: {error}");
+                }
+                while let Some(result) = turn_tasks.try_join_next() {
+                    if let Err(error) = result {
+                        error!("voice turn task failed: {error}");
+                    }
                 }
             }
         });
@@ -294,9 +313,9 @@ impl VoiceRouter {
                     match payload {
                         voicev1::event::Payload::Chat(chat) => {
                             let router = router.clone();
-                            let mut client = client.clone();
+                            let channel = channel.clone();
                             tasks.spawn(async move {
-                                if let Err(error) = router.handle_chat_event(&mut client, chat).await {
+                                if let Err(error) = router.handle_chat_event(&channel, chat).await {
                                     error!("Voice router chat handling failed: {error}");
                                 }
                             });
@@ -499,7 +518,7 @@ impl VoiceRouter {
 
     async fn handle_chat_event(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        channel: &VoiceChannel,
         chat: voicev1::ChatEvent,
     ) -> Result<()> {
         let Some(decision) = resolve_ts_inbound(
@@ -527,18 +546,22 @@ impl VoiceRouter {
             return Ok(());
         };
         if self
-            .try_handle_direct_replay(client, &ctx, &clean_text)
+            .try_handle_direct_replay(channel, &ctx, &clean_text)
             .await?
         {
             return Ok(());
         }
-        self.handle_user_input(client, ctx, clean_text).await
+        // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌
+        let active = Arc::new(ActiveTurn::new());
+        self.turns.insert(ctx.caller_id, &active);
+        self.handle_user_input(channel, ctx, clean_text, &active)
+            .await
     }
 
     /// 直呼：与技能同一 ACL（voice_replay）；成功处理返回 true
     async fn try_handle_direct_replay(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        channel: &VoiceChannel,
         ctx: &CallerContext,
         text: &str,
     ) -> Result<bool> {
@@ -556,12 +579,12 @@ impl VoiceRouter {
             &ctx.groups,
             ctx.channel_group_id,
         ) {
-            self.send_reply(client, ctx, "voice_replay denied by ACL")
+            self.send_reply(channel, ctx, "voice_replay denied by ACL")
                 .await?;
             return Ok(true);
         }
         let Some(runtime) = self.voice_audio.get() else {
-            self.send_reply(client, ctx, "voice replay runtime not ready")
+            self.send_reply(channel, ctx, "voice replay runtime not ready")
                 .await?;
             return Ok(true);
         };
@@ -588,10 +611,10 @@ impl VoiceRouter {
                     }
                     None => "voice_replay ok".to_string(),
                 };
-                self.send_reply(client, ctx, &msg).await?;
+                self.send_reply(channel, ctx, &msg).await?;
             }
             Err(error) => {
-                self.send_reply(client, ctx, &format!("voice_replay failed: {error}"))
+                self.send_reply(channel, ctx, &format!("voice_replay failed: {error}"))
                     .await?;
             }
         }
@@ -617,42 +640,101 @@ impl VoiceRouter {
         pipeline.process_audio_frame(audio)
     }
 
-    async fn handle_audio_chunk(
-        &self,
-        client: &mut VoiceServiceClient<Channel>,
+    /// 准入：喂唤醒门 → 状态表裁决 → 丢弃 / 插话 / 注册并派发回合任务。
+    /// 这里不做 gRPC 解析与 STT，保证机器人播报期间仍能即时裁决后续语音。
+    async fn admit_audio_chunk(
+        self: &Arc<Self>,
+        channel: &VoiceChannel,
         audio: voicev1::AudioFrameEvent,
         chunk: SpeechChunk,
+        turn_tasks: &mut JoinSet<()>,
     ) -> Result<()> {
+        let clid = chunk.speaker_client_id;
         // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销；
         // 命中则这条 utterance 整体下行（含唤醒词本身），音频层切不出唤醒词前缀
         if let Some(gate) = &self.wakeword {
             let verdict = {
                 let mut gate = gate.lock().await;
-                gate.feed(
-                    chunk.speaker_client_id,
-                    &chunk.pcm16_mono_16k,
-                    Instant::now(),
-                )
+                gate.feed(clid, &chunk.pcm16_mono_16k, Instant::now())
             };
-            if !verdict.open {
-                debug!(
-                    clid = chunk.speaker_client_id,
-                    speaker = %chunk.speaker_name,
-                    "wakeword gate closed; dropping utterance"
-                );
-                return Ok(());
-            }
             if verdict.detected {
                 info!(
                     event = "voice.wakeword",
-                    clid = chunk.speaker_client_id,
+                    clid,
                     speaker = %chunk.speaker_name,
                     probability = verdict.probability,
                     "wakeword detected; opening gate"
                 );
             }
+            // 可取消 = 本条说话人自己有正在产出的回合；「忙」是全局的（出站音频只有一路）
+            let cancellable = self.config.headless.wakeword.barge_in
+                && self
+                    .turns
+                    .active(clid)
+                    .is_some_and(|turn| turn.is_producing());
+            let busy = self.turns.any_producing();
+            match decide_wakeword_action(verdict.open, verdict.detected, busy, cancellable) {
+                WakewordAction::Talk => {}
+                WakewordAction::Drop => {
+                    debug!(
+                        event = "voice.wakeword.drop",
+                        clid,
+                        speaker = %chunk.speaker_name,
+                        open = verdict.open,
+                        detected = verdict.detected,
+                        busy,
+                        "dropping utterance at wakeword gate"
+                    );
+                    return Ok(());
+                }
+                WakewordAction::BargeIn => match self.turns.take(clid) {
+                    Some(active) => {
+                        info!(
+                            event = "voice.wakeword.barge_in",
+                            clid,
+                            speaker = %chunk.speaker_name,
+                            turn_age_ms = active.age_ms(),
+                            "wakeword barge-in; cancelling the active turn"
+                        );
+                        active.cancel.cancel();
+                        if let Some(playback) = active.playback_cancel() {
+                            playback.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    // 竞态：条目在裁决与取走之间失效，无可取消，直接处理本句
+                    None => debug!(
+                        event = "voice.wakeword.barge_in_missed",
+                        clid,
+                        speaker = %chunk.speaker_name,
+                        "barge-in target expired before cancellation"
+                    ),
+                },
+            }
         }
 
+        let active = Arc::new(ActiveTurn::new());
+        self.turns.insert(clid, &active);
+        let router = self.clone();
+        let channel = channel.clone();
+        turn_tasks.spawn(async move {
+            if let Err(error) = router
+                .run_admitted_utterance(channel, active, audio, chunk)
+                .await
+            {
+                error!("Voice turn failed: {error}");
+            }
+        });
+        Ok(())
+    }
+
+    /// 执行一条已准入的 utterance：解析 caller → STT / omni → LLM 回合
+    async fn run_admitted_utterance(
+        self: Arc<Self>,
+        channel: VoiceChannel,
+        active: Arc<ActiveTurn>,
+        audio: voicev1::AudioFrameEvent,
+        chunk: SpeechChunk,
+    ) -> Result<()> {
         let ctx = self
             .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
             .await?;
@@ -661,7 +743,9 @@ impl VoiceRouter {
         }
 
         if self.config.llm.omni_model {
-            return self.handle_omni_audio_chunk(client, ctx, chunk).await;
+            return self
+                .handle_omni_audio_chunk(&channel, ctx, chunk, &active)
+                .await;
         }
 
         let Some(speech_provider) = self.speech_provider.as_ref() else {
@@ -680,14 +764,15 @@ impl VoiceRouter {
             return Ok(());
         };
 
-        self.handle_user_input(client, ctx, text).await
+        self.handle_user_input(&channel, ctx, text, &active).await
     }
 
     async fn handle_omni_audio_chunk(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        channel: &VoiceChannel,
         ctx: CallerContext,
         chunk: SpeechChunk,
+        active: &Arc<ActiveTurn>,
     ) -> Result<()> {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
         // 请求与上下文各持一份：音频轮随后的消息按 input_audio 回放历史
@@ -705,10 +790,11 @@ impl VoiceRouter {
         };
         let _session = self.llm.acquire_turn_session(&session_source).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks().await?)
+            Some(self.build_tts_callbacks(active).await?)
         } else {
             None
         };
+        active.mark_producing();
 
         match run_llm_turn(
             &self.llm,
@@ -716,6 +802,7 @@ impl VoiceRouter {
             |llm| llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, &request_wav),
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            &active.cancel,
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {
@@ -741,16 +828,27 @@ impl VoiceRouter {
                         reply_chars = result.content.chars().count(),
                         "Voice LLM reply generated"
                     );
-                    self.send_reply(client, &ctx, &result.content).await?;
+                    self.send_reply(channel, &ctx, &result.content).await?;
                     self.llm
                         .save_omni_turn(&session_source, wav_bytes, result.content);
                 }
+            }
+            Err(ToolLoopError::Cancelled) => {
+                // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
+                if let Some(runtime) = tts_runtime {
+                    runtime.abort().await;
+                }
+                debug!(
+                    caller_uid = %ctx.caller_uid,
+                    "voice omni turn cancelled by barge-in"
+                );
+                return Ok(());
             }
             Err(e) => {
                 if let Some(runtime) = tts_runtime {
                     runtime.abort().await;
                 }
-                self.send_reply(client, &ctx, LLM_ERROR_REPLY).await?;
+                self.send_reply(channel, &ctx, LLM_ERROR_REPLY).await?;
                 return Err(e.into());
             }
         };
@@ -762,9 +860,10 @@ impl VoiceRouter {
 
     async fn handle_user_input(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        channel: &VoiceChannel,
         ctx: CallerContext,
         user_msg: String,
+        active: &Arc<ActiveTurn>,
     ) -> Result<()> {
         info!(
             event = "voice.user_message",
@@ -789,10 +888,11 @@ impl VoiceRouter {
         let _session = self.llm.acquire_turn_session(&session_source).await;
 
         let tts_runtime = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks().await?)
+            Some(self.build_tts_callbacks(active).await?)
         } else {
             None
         };
+        active.mark_producing();
 
         let result = match run_llm_turn(
             &self.llm,
@@ -800,6 +900,7 @@ impl VoiceRouter {
             |llm| llm.build_messages(&session_source, &system_prompt, &user_ctx, &user_msg),
             &allowed_skills,
             tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            &active.cancel,
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {
@@ -818,11 +919,22 @@ impl VoiceRouter {
         .await
         {
             Ok(r) => r,
+            Err(ToolLoopError::Cancelled) => {
+                // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
+                if let Some(runtime) = tts_runtime {
+                    runtime.abort().await;
+                }
+                debug!(
+                    caller_uid = %ctx.caller_uid,
+                    "voice turn cancelled by barge-in"
+                );
+                return Ok(());
+            }
             Err(e) => {
                 if let Some(runtime) = tts_runtime {
                     runtime.abort().await;
                 }
-                self.send_reply(client, &ctx, LLM_ERROR_REPLY).await?;
+                self.send_reply(channel, &ctx, LLM_ERROR_REPLY).await?;
                 return Err(e.into());
             }
         };
@@ -834,7 +946,7 @@ impl VoiceRouter {
                 reply_chars = result.content.chars().count(),
                 "Voice LLM reply generated"
             );
-            self.send_reply(client, &ctx, &result.content).await?;
+            self.send_reply(channel, &ctx, &result.content).await?;
             self.llm
                 .save_turn(&session_source, user_msg, result.content);
         }
@@ -844,13 +956,18 @@ impl VoiceRouter {
         Ok(())
     }
 
-    /// 每轮 TTS：open_tts_session 占 FIFO 槽；句段合成后 push_encoded；收尾只关句段通道，不等播放
-    async fn build_tts_callbacks(&self) -> Result<TtsTurnRuntime> {
+    /// 每轮 TTS：open_tts_session 占 FIFO 槽；句段合成后 push_encoded；收尾只关句段通道，不等播放。
+    /// `keepalive` 是准入注册的活跃回合：synth 任务持一份直到本轮音频播放收尾，
+    /// 让「机器人正在产出」覆盖播放尾，插话在 LLM 流结束后仍能取消播放。
+    async fn build_tts_callbacks(&self, keepalive: &Arc<ActiveTurn>) -> Result<TtsTurnRuntime> {
         let speech_provider = self
             .speech_provider
             .clone()
             .ok_or_else(|| anyhow::anyhow!("TTS provider missing"))?;
         let session = self.audio_output.open_tts_session().await?;
+        let playback_cancel = session.cancel_handle();
+        keepalive.set_playback_cancel(playback_cancel.clone());
+        let keepalive = keepalive.clone();
         let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
         let (sentence_tx, sentence_rx) = mpsc::channel::<(usize, String)>(128);
         let trace_id = format!("tts-{}", now_unix_ms());
@@ -899,14 +1016,16 @@ impl VoiceRouter {
             }
             let session = synth_session.lock().await.take();
             if let Some(session) = session {
-                if let Err(error) = session.finish().await {
+                // 等本轮音频真正播完再放掉 active 句柄；被插话时 job 已取消，立即返回
+                if let Err(error) = session.finish_drained().await {
                     warn!(
                         trace_id = %synth_trace,
                         error = %error,
-                        "tts session finish failed"
+                        "tts session drain failed"
                     );
                 }
             }
+            drop(keepalive);
         });
 
         let chunker = Arc::new(std::sync::Mutex::new(StreamingSentenceChunker::new(
@@ -981,6 +1100,7 @@ impl VoiceRouter {
             shared_tx,
             shared_session,
             synth_task,
+            playback_cancel,
         })
     }
 
@@ -1013,7 +1133,7 @@ Online: {}"#,
 
     async fn send_reply(
         &self,
-        client: &mut VoiceServiceClient<Channel>,
+        channel: &VoiceChannel,
         ctx: &CallerContext,
         text: &str,
     ) -> Result<()> {
@@ -1022,10 +1142,15 @@ Online: {}"#,
             target_mode: ctx.reply_target_mode,
             target_client_id: ctx.reply_target_client_id,
         };
-        let response = client
-            .send_notice(tonic::Request::new(req))
-            .await?
-            .into_inner();
+        let mut client = channel.client().await;
+        let response = match client.send_notice(tonic::Request::new(req)).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                // 传输失败：后台重连替换通道，本次通知不重试（避免重复发送）
+                channel.refresh_in_background();
+                return Err(anyhow::anyhow!("voice notice failed: {status}"));
+            }
+        };
         if !response.ok {
             anyhow::bail!("voice notice rejected: {}", response.message);
         }
@@ -1211,11 +1336,13 @@ mod tests {
         // 挂起任务模拟未收尾的 synth：旧实现会在 5s 超时后 drop 会话，消费者随即取消播放
         let synth_task = tokio::spawn(std::future::pending::<()>());
 
+        let playback_cancel = Arc::new(AtomicBool::new(false));
         let runtime = TtsTurnRuntime {
             callbacks: StreamCallbacks::default(),
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
             shared_session: shared_session.clone(),
             synth_task,
+            playback_cancel: playback_cancel.clone(),
         };
 
         runtime.finish();
@@ -1228,6 +1355,8 @@ mod tests {
             shared_session.lock().await.is_some(),
             "finish must not drop an unfinished session (drop sets cancel and cuts queued audio)"
         );
+        // finish 是正常收尾：已入队音频照常播完
+        assert!(!playback_cancel.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1248,14 +1377,45 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
+        let playback_cancel = Arc::new(AtomicBool::new(false));
         let runtime = TtsTurnRuntime {
             callbacks: StreamCallbacks::default(),
             shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
             shared_session: shared_session.clone(),
             synth_task,
+            playback_cancel: playback_cancel.clone(),
         };
 
         runtime.abort().await;
         assert!(shared_session.lock().await.is_none());
+        assert!(playback_cancel.load(Ordering::SeqCst));
+    }
+
+    /// 会话已被 synth 任务取走（播放中）时 abort：仍必须置播放取消位，否则已交给消费者的音频不会停
+    #[tokio::test]
+    async fn tts_turn_runtime_abort_cancels_playing_audio_without_the_session() {
+        let (sentence_tx, _sentence_rx) = mpsc::channel::<(usize, String)>(8);
+        let audio_bus = crate::adapter::headless::audio_output::AudioBus::new();
+        let audio_output = audio_bus.output;
+        let _consumer = audio_bus.consumer;
+        let session = audio_output.open_tts_session().await.unwrap();
+        let shared_session: SharedTtsSession = Arc::new(tokio::sync::Mutex::new(Some(session)));
+
+        let playback_cancel = Arc::new(AtomicBool::new(false));
+        let runtime = TtsTurnRuntime {
+            callbacks: StreamCallbacks::default(),
+            shared_tx: Arc::new(std::sync::Mutex::new(Some(sentence_tx))),
+            shared_session: shared_session.clone(),
+            synth_task: tokio::spawn(std::future::pending::<()>()),
+            playback_cancel: playback_cancel.clone(),
+        };
+        // 模拟 synth 任务已把会话取走并 await finish_drained
+        let taken = shared_session.lock().await.take();
+        assert!(taken.is_some());
+        drop(taken);
+
+        runtime.abort().await;
+        assert!(shared_session.lock().await.is_none());
+        assert!(playback_cancel.load(Ordering::SeqCst));
     }
 }
