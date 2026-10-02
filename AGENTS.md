@@ -10,7 +10,7 @@ src/
 ├── cli.rs                   # --log-level
 ├── log.rs                   # 按日轮转文件日志 + tracing 初始化
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
-├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）+ .instructions.md
+├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）
 ├── router.rs                # 事件路由；组合路由器循环入口
 ├── router/                  # 子模块（ts_router, nc_router, voice_router, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
@@ -88,7 +88,7 @@ OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reaso
 
 ## Editing these instructions
 
-根 `AGENTS.md` 只放全局 standing orders；具体事实移入 docs/ 各归属地，这里只留指针。新增内容须符合 [docs/AGENTS.md](docs/AGENTS.md) 的分层归属。
+根 `AGENTS.md` 只放全局 standing orders；具体事实移入 docs/ 各归属地，这里只留指针。目录级规则写在该目录的 `AGENTS.md`，不写进根文件。新增内容须符合 [docs/AGENTS.md](docs/AGENTS.md) 的分层归属。
 
 ## Output Conventions
 

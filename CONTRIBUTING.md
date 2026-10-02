@@ -17,7 +17,7 @@
 | 测试与提交前质量门 | [docs/testing.md](docs/testing.md)、[docs/ci-cd.md](docs/ci-cd.md) |
 | 架构、生命周期、并发、音频/语音桥、重连等非平凡变更 | [docs/defensive-patterns.md](docs/defensive-patterns.md)、[docs/agent-notes.md](docs/agent-notes.md) |
 | 新增或修改 `docs/` | [docs/AGENTS.md](docs/AGENTS.md) |
-| 源码模块内规则 | 对应模块的 `.instructions.md` |
+| 模块内规则 | 对应目录的 `AGENTS.md`，如 `src/config/AGENTS.md`、`website/AGENTS.md` |
 | 面向最终用户的文档 | `website/` |
 
 ## 提交
