@@ -12,10 +12,22 @@ use crate::config::{config_dir, AppConfig};
 const IDENTITY_MAX_LEVEL: i32 = 29;
 /// 每次重试提升的等级步长
 const IDENTITY_UPGRADE_STEP: i32 = 5;
+/// 判定"服务端要求更高身份等级"前允许的连续握手超时次数
+const HANDSHAKE_TIMEOUTS_BEFORE_IDENTITY_UPGRADE: u32 = 3;
+/// 握手超时后重连前的等待时间
+const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn next_identity_level(current_level: i32) -> Option<i32> {
     (current_level < IDENTITY_MAX_LEVEL)
         .then(|| (current_level + IDENTITY_UPGRADE_STEP).min(IDENTITY_MAX_LEVEL))
+}
+
+/// 握手超时后是否按"身份等级不足"处理。
+///
+/// 服务端要求的身份等级高于本地密钥时表现为握手超时，但网络抖动、服务端丢包
+/// 也是同样的表现。挖矿升级代价高且会写回 identity 文件，所以只有连续超时才升级。
+fn should_upgrade_identity(consecutive_handshake_timeouts: u32) -> bool {
+    consecutive_handshake_timeouts >= HANDSHAKE_TIMEOUTS_BEFORE_IDENTITY_UPGRADE
 }
 
 fn write_identity_file(path: &std::path::Path, serialized: &str) -> Result<()> {
@@ -98,6 +110,7 @@ impl TsAdapter {
 
         let mut current_level = identity.security_level();
         const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+        let mut handshake_timeouts = 0u32;
 
         loop {
             let opts = make_opts();
@@ -172,6 +185,18 @@ impl TsAdapter {
                 }
                 Err(_) => {
                     let _ = client.disconnect().await;
+                    handshake_timeouts += 1;
+                    if !should_upgrade_identity(handshake_timeouts) {
+                        warn!(
+                            "Handshake timed out after {HANDSHAKE_TIMEOUT:?} at identity level {current_level}; reconnecting"
+                        );
+                        tokio::time::sleep(HANDSHAKE_RETRY_DELAY).await;
+                        continue;
+                    }
+                    warn!(
+                        "Handshake timed out {handshake_timeouts} times in a row at identity level {current_level}; assuming the server requires a higher identity level"
+                    );
+                    handshake_timeouts = 0;
                     current_level = Self::upgrade_identity_and_save(
                         &mut identity,
                         current_level,
@@ -239,7 +264,7 @@ impl TsAdapter {
     ) -> Result<i32> {
         let next_level = next_identity_level(current_level).ok_or_else(|| {
             anyhow!(
-                "Server rejected connection at identity level {current_level} (tried max {IDENTITY_MAX_LEVEL})"
+                "handshake kept timing out at identity level {current_level}, which is already the maximum ({IDENTITY_MAX_LEVEL}); raise IDENTITY_MAX_LEVEL if the server really requires more, otherwise the server is not answering the handshake (check address, port and firewall)"
             )
         })?;
 
@@ -427,7 +452,10 @@ pub enum TextMessageTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_identity_level, parse_client_channel_group_id, write_identity_file};
+    use super::{
+        next_identity_level, parse_client_channel_group_id, should_upgrade_identity,
+        write_identity_file,
+    };
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -463,6 +491,13 @@ mod tests {
     #[test]
     fn identity_upgrade_stops_at_maximum() {
         assert_eq!(next_identity_level(29), None);
+    }
+
+    #[test]
+    fn identity_upgrade_waits_for_repeated_handshake_timeouts() {
+        assert!(!should_upgrade_identity(1));
+        assert!(!should_upgrade_identity(2));
+        assert!(should_upgrade_identity(3));
     }
 
     #[test]
