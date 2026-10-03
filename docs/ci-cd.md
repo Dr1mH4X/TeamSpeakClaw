@@ -28,4 +28,4 @@ GitHub Actions 共 9 个 workflow，位于 `.github/workflows/`。下表为每�
 
 ## 变更日志
 
-`reusable-changelog.yml` 用 `git-cliff`（配置 `.github/cliff.toml`，`conventional_commits = true`）按分组生成历代变更，`--latest --strip header` 输出最新一版，写 `CHANGES.md` 并作为 `release_body` 输出。含 `[skip changelog]` 的提交被跳过，`rc` tag 被忽略。
+`reusable-changelog.yml` 用 `git-cliff`（配置 `.github/cliff.toml`，`conventional_commits = true`）生成历代变更，每条提交按「主题 + 正文 + 作者」排版，末尾列出首次贡献者，`--latest --strip header` 输出最新一版，写 `CHANGES.md` 并作为 `release_body` 输出。含 `[skip changelog]` 的提交被跳过，`rc` tag 被忽略。

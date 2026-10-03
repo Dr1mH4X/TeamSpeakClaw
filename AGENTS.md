@@ -35,7 +35,9 @@ docs/
 └── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
 examples/
 ├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml；Release 打包含此三文件）
-└── docker-compose.yml       # Docker Compose 示例
+├── funasr/                  # FunASR 本地 STT 的 Compose 示例
+├── whisper/                 # whisper.cpp 本地 STT 的 Compose 示例（CPU / Vulkan / CUDA）
+└── docker-compose.yml       # 基础 Compose 示例（在线 / 多模态 STT）
 models/                      # 唤醒模型清单与下载脚本（onnx 不入库、不进归档；见 models/README.md）
 website/                     # Docusaurus 用户文档（排除在 Rust CI 路径外）
 ```
