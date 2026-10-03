@@ -1,4 +1,5 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +24,7 @@ use crate::adapter::headless::{
 };
 use crate::adapter::reconnect::{abort_managed_tasks, now_unix_ms};
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
-use crate::llm::tool_loop::{AsyncTokenCallback, ToolLoopError};
+use crate::llm::tool_loop::AsyncTokenCallback;
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
 use crate::router::voice_feedback::{
@@ -32,9 +33,7 @@ use crate::router::voice_feedback::{
 use crate::router::voice_turns::{
     decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
 };
-use crate::router::{
-    resolve_ts_inbound, run_llm_turn_with_audio_recovery, TurnLoopSpec, LLM_ERROR_REPLY,
-};
+use crate::router::{resolve_ts_inbound, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink};
 
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
@@ -1185,20 +1184,17 @@ impl VoiceRouter {
         active: &Arc<ActiveTurn>,
     ) -> Result<()> {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
-        // 请求与上下文各持一份：音频轮随后的消息按 input_audio 回放历史
-        let request_wav = wav_bytes.clone();
 
         // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
-        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
                 "Voice LLM turn queue full; dropping audio chunk"
             );
             return Ok(());
         };
-        let _session = self.llm.acquire_turn_session(&session_source).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             // omni 与 STT 同属语音回合：挂工具调用提示音，走 STT 路径同一块反馈基建
             Some(self.build_tts_callbacks(active, true).await?)
@@ -1207,69 +1203,62 @@ impl VoiceRouter {
         };
         active.mark_producing();
 
-        match run_llm_turn_with_audio_recovery(
-            &self.llm,
-            &self.registry,
-            &session_source,
-            |llm| llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, &request_wav),
-            TurnLoopSpec {
-                allowed_skills: &allowed_skills,
-                callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-                cancel: &active.cancel,
-            },
-            || {
-                UnifiedExecutionContext::for_ts(
-                    TsCaller {
-                        adapter: self.ts_adapter.clone(),
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.groups.clone(),
-                        caller_channel_group_id: ctx.channel_group_id,
-                        nc_adapter: None,
-                    },
-                    self.gate.clone(),
-                    self.config.clone(),
-                )
-            },
-        )
-        .await
-        {
-            Ok(result) => {
-                if !result.content.is_empty() {
-                    info!(
-                        event = "voice.llm.reply",
-                        caller_uid = %ctx.caller_uid,
-                        reply_chars = result.content.chars().count(),
-                        "Voice LLM reply generated"
-                    );
-                    self.send_reply(channel, &ctx, &result.content).await?;
-                    self.llm
-                        .save_omni_turn(&session_source, wav_bytes, result.content);
-                }
+        let sink = VoiceNoticeSink {
+            channel: channel.clone(),
+            target_mode: ctx.reply_target_mode,
+            target_client_id: ctx.reply_target_client_id,
+        };
+        let request = TurnRequest {
+            llm: &self.llm,
+            registry: &self.registry,
+            source: &session_source,
+            system_prompt: &system_prompt,
+            user_ctx: &user_ctx,
+            allowed_skills: &allowed_skills,
+            input: TurnInput::Audio(&wav_bytes),
+            callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            cancel: &active.cancel,
+        };
+        let result = request
+            .run(
+                permit,
+                || {
+                    UnifiedExecutionContext::for_ts(
+                        TsCaller {
+                            adapter: self.ts_adapter.clone(),
+                            caller_id: ctx.caller_id,
+                            caller_name: ctx.caller_name.clone(),
+                            caller_groups: ctx.groups.clone(),
+                            caller_channel_group_id: ctx.channel_group_id,
+                            nc_adapter: None,
+                        },
+                        self.gate.clone(),
+                        self.config.clone(),
+                    )
+                },
+                &sink,
+            )
+            .await;
+
+        if let Some(runtime) = tts_runtime {
+            if result.is_ok() {
+                runtime.finish();
+            } else {
+                runtime.abort().await;
             }
-            Err(ToolLoopError::Cancelled) => {
-                // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
-                if let Some(runtime) = tts_runtime {
-                    runtime.abort().await;
-                }
+        }
+        match result {
+            // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
+            Err(TurnError::Cancelled) => {
                 debug!(
                     caller_uid = %ctx.caller_uid,
                     "voice omni turn cancelled by barge-in"
                 );
-                return Ok(());
+                Ok(())
             }
-            Err(e) => {
-                if let Some(runtime) = tts_runtime {
-                    runtime.abort().await;
-                }
-                self.send_reply(channel, &ctx, LLM_ERROR_REPLY).await?;
-                return Err(e.into());
-            }
-        };
-        if let Some(runtime) = tts_runtime {
-            runtime.finish();
+            Err(TurnError::Failed(error)) | Err(TurnError::ReplyFailed(error)) => Err(error),
+            Ok(()) => Ok(()),
         }
-        Ok(())
     }
 
     /// `tool_feedback` 为真时挂工具调用提示音：STT 与 omni 两条语音回合都挂，
@@ -1295,14 +1284,13 @@ impl VoiceRouter {
         }
         let (system_prompt, user_ctx, allowed_skills, session_source) =
             self.build_llm_request(&ctx).await;
-        let Ok(_capacity) = self.llm.try_reserve_turn_capacity() else {
+        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
                 "Voice LLM turn queue full; dropping message"
             );
             return Ok(());
         };
-        let _session = self.llm.acquire_turn_session(&session_source).await;
 
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
@@ -1311,69 +1299,62 @@ impl VoiceRouter {
         };
         active.mark_producing();
 
-        let result = match run_llm_turn_with_audio_recovery(
-            &self.llm,
-            &self.registry,
-            &session_source,
-            |llm| llm.build_messages(&session_source, &system_prompt, &user_ctx, &user_msg),
-            TurnLoopSpec {
-                allowed_skills: &allowed_skills,
-                callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-                cancel: &active.cancel,
-            },
-            || {
-                UnifiedExecutionContext::for_ts(
-                    TsCaller {
-                        adapter: self.ts_adapter.clone(),
-                        caller_id: ctx.caller_id,
-                        caller_name: ctx.caller_name.clone(),
-                        caller_groups: ctx.groups.clone(),
-                        caller_channel_group_id: ctx.channel_group_id,
-                        nc_adapter: None,
-                    },
-                    self.gate.clone(),
-                    self.config.clone(),
-                )
-            },
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(ToolLoopError::Cancelled) => {
-                // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
-                if let Some(runtime) = tts_runtime {
-                    runtime.abort().await;
-                }
+        let sink = VoiceNoticeSink {
+            channel: channel.clone(),
+            target_mode: ctx.reply_target_mode,
+            target_client_id: ctx.reply_target_client_id,
+        };
+        let request = TurnRequest {
+            llm: &self.llm,
+            registry: &self.registry,
+            source: &session_source,
+            system_prompt: &system_prompt,
+            user_ctx: &user_ctx,
+            allowed_skills: &allowed_skills,
+            input: TurnInput::Text(&user_msg),
+            callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+            cancel: &active.cancel,
+        };
+        let result = request
+            .run(
+                permit,
+                || {
+                    UnifiedExecutionContext::for_ts(
+                        TsCaller {
+                            adapter: self.ts_adapter.clone(),
+                            caller_id: ctx.caller_id,
+                            caller_name: ctx.caller_name.clone(),
+                            caller_groups: ctx.groups.clone(),
+                            caller_channel_group_id: ctx.channel_group_id,
+                            nc_adapter: None,
+                        },
+                        self.gate.clone(),
+                        self.config.clone(),
+                    )
+                },
+                &sink,
+            )
+            .await;
+
+        if let Some(runtime) = tts_runtime {
+            if result.is_ok() {
+                runtime.finish();
+            } else {
+                runtime.abort().await;
+            }
+        }
+        match result {
+            // 插话取消：不回错误文案、不落上下文；播放取消句柄已由插话方置位
+            Err(TurnError::Cancelled) => {
                 debug!(
                     caller_uid = %ctx.caller_uid,
                     "voice turn cancelled by barge-in"
                 );
-                return Ok(());
+                Ok(())
             }
-            Err(e) => {
-                if let Some(runtime) = tts_runtime {
-                    runtime.abort().await;
-                }
-                self.send_reply(channel, &ctx, LLM_ERROR_REPLY).await?;
-                return Err(e.into());
-            }
-        };
-
-        if !result.content.is_empty() {
-            info!(
-                event = "voice.llm.reply",
-                caller_uid = %ctx.caller_uid,
-                reply_chars = result.content.chars().count(),
-                "Voice LLM reply generated"
-            );
-            self.send_reply(channel, &ctx, &result.content).await?;
-            self.llm
-                .save_turn(&session_source, user_msg, result.content);
+            Err(TurnError::Failed(error)) | Err(TurnError::ReplyFailed(error)) => Err(error),
+            Ok(()) => Ok(()),
         }
-        if let Some(runtime) = tts_runtime {
-            runtime.finish();
-        }
-        Ok(())
     }
 
     /// 每轮 TTS：会话按 LLM 流创建（首个可播句段）与关闭（finish_reason），
@@ -1534,24 +1515,54 @@ Online: {}"#,
         ctx: &CallerContext,
         text: &str,
     ) -> Result<()> {
-        let req = voicev1::NoticeRequest {
-            message: text.to_string(),
-            target_mode: ctx.reply_target_mode,
-            target_client_id: ctx.reply_target_client_id,
-        };
-        let mut client = channel.client().await;
-        let response = match client.send_notice(tonic::Request::new(req)).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => {
-                // 传输失败：后台重连替换通道，本次通知不重试（避免重复发送）
-                channel.refresh_in_background();
-                return Err(anyhow::anyhow!("voice notice failed: {status}"));
-            }
-        };
-        if !response.ok {
-            anyhow::bail!("voice notice rejected: {}", response.message);
+        send_notice(
+            channel,
+            ctx.reply_target_mode,
+            ctx.reply_target_client_id,
+            text,
+        )
+        .await
+    }
+}
+
+/// 经语音桥发送一条文本通知：回合回复与命令回执共用一条出站路径
+async fn send_notice(
+    channel: &VoiceChannel,
+    target_mode: i32,
+    target_client_id: u32,
+    text: &str,
+) -> Result<()> {
+    let req = voicev1::NoticeRequest {
+        message: text.to_string(),
+        target_mode,
+        target_client_id,
+    };
+    let mut client = channel.client().await;
+    let response = match client.send_notice(tonic::Request::new(req)).await {
+        Ok(response) => response.into_inner(),
+        Err(status) => {
+            // 传输失败：后台重连替换通道，本次通知不重试（避免重复发送）
+            channel.refresh_in_background();
+            return Err(anyhow::anyhow!("voice notice failed: {status}"));
         }
-        Ok(())
+    };
+    if !response.ok {
+        anyhow::bail!("voice notice rejected: {}", response.message);
+    }
+    Ok(())
+}
+
+/// 语音桥回复落点：回复目标在准入时解析后固定
+struct VoiceNoticeSink {
+    channel: VoiceChannel,
+    target_mode: i32,
+    target_client_id: u32,
+}
+
+#[async_trait]
+impl TurnSink for VoiceNoticeSink {
+    async fn send(&self, text: &str) -> Result<()> {
+        send_notice(&self.channel, self.target_mode, self.target_client_id, text).await
     }
 }
 

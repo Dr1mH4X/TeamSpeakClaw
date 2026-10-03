@@ -6,14 +6,15 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
+use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{
-    run_llm_turn_with_audio_recovery, ReplyPolicy, RouterContext, TurnLoopSpec,
-    UnifiedInboundEvent, LLM_ERROR_REPLY,
+    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink,
+    UnifiedInboundEvent,
 };
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinSet;
@@ -84,10 +85,7 @@ impl EventRouter {
             {
                 TsEvent::TextMessage(msg) => {
                     let this = self.clone();
-                    let source = SessionSource::TeamSpeak {
-                        uid: msg.invoker_uid.clone(),
-                    };
-                    let Ok(capacity) = this.llm.try_reserve_turn_capacity() else {
+                    let Ok(permit) = TurnPermit::reserve(&this.llm) else {
                         warn!(
                             invoker = %msg.invoker_name,
                             "TS LLM turn queue full; dropping message"
@@ -95,8 +93,7 @@ impl EventRouter {
                         continue;
                     };
                     tasks.spawn(async move {
-                        let session = this.llm.acquire_turn_session(&source).await;
-                        this.handle_message(msg, capacity, session).await;
+                        this.handle_message(msg, permit).await;
                     });
                 }
                 TsEvent::Disconnected => {
@@ -147,13 +144,7 @@ impl EventRouter {
         }
     }
 
-    async fn handle_message(
-        &self,
-        event: TextMessageEvent,
-        // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
-        _capacity: TurnCapacityPermit,
-        _session: TurnSessionGuard,
-    ) {
+    async fn handle_message(&self, event: TextMessageEvent, permit: TurnPermit) {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
@@ -213,7 +204,7 @@ impl EventRouter {
             warn!(error = %error, "TS message dropped for exceeding size limit");
             return;
         }
-        let system_prompt = &self.prompts.system.content;
+        let system_prompt = self.prompts.system.content.as_str();
 
         let (online_clients, invoker_channel) =
             self.adapter.list_clients_json(event.invoker_id).await;
@@ -241,60 +232,67 @@ Online: {}"#,
             }
         }
 
-        // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复；
-        // 该会话可能回放音频历史，故走体积类失败可自愈的入口
-        match run_llm_turn_with_audio_recovery(
-            &self.llm,
-            &self.registry,
-            &source,
-            |llm| llm.build_messages(&source, system_prompt, &user_ctx, msg_content),
-            TurnLoopSpec {
-                allowed_skills: &allowed_skills,
-                callbacks: None,
-                cancel: &CancellationToken::new(),
-            },
-            || {
-                UnifiedExecutionContext::for_ts(
-                    TsCaller {
-                        adapter: self.adapter.clone(),
-                        caller_id: event.invoker_id,
-                        caller_name: event.invoker_name.clone(),
-                        caller_groups: groups.clone(),
-                        caller_channel_group_id: channel_group_id,
-                        nc_adapter: self.nc_adapter.clone(),
-                    },
-                    self.gate.clone(),
-                    self.config.clone(),
-                )
-            },
-        )
-        .await
+        // 文本回合不挂流式回调：等整体回复再送达
+        let sink = TsTextSink {
+            adapter: self.adapter.clone(),
+            target_mode: reply_mode,
+            target: reply_target,
+        };
+        let cancel = CancellationToken::new();
+        let request = TurnRequest {
+            llm: &self.llm,
+            registry: &self.registry,
+            source: &source,
+            system_prompt,
+            user_ctx: user_ctx.as_str(),
+            allowed_skills: &allowed_skills,
+            input: TurnInput::Text(msg_content),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        match request
+            .run(
+                permit,
+                || {
+                    UnifiedExecutionContext::for_ts(
+                        TsCaller {
+                            adapter: self.adapter.clone(),
+                            caller_id: event.invoker_id,
+                            caller_name: event.invoker_name.clone(),
+                            caller_groups: groups.clone(),
+                            caller_channel_group_id: channel_group_id,
+                            nc_adapter: self.nc_adapter.clone(),
+                        },
+                        self.gate.clone(),
+                        self.config.clone(),
+                    )
+                },
+                &sink,
+            )
+            .await
         {
-            Ok(result) => {
-                if !result.content.is_empty() {
-                    info!(
-                        reply_chars = result.content.chars().count(),
-                        "[TS] LLM final reply ready"
-                    );
-                    if self
-                        .adapter
-                        .send_text_message(reply_mode, reply_target, &result.content)
-                        .await
-                        .is_ok()
-                    {
-                        self.llm
-                            .save_turn(&source, msg_content.to_string(), result.content);
-                    }
-                }
+            Err(TurnError::Failed(error)) => error!("LLM error: {error}"),
+            Err(TurnError::ReplyFailed(error)) => {
+                warn!(error = %error, "TS reply delivery failed")
             }
-            Err(e) => {
-                error!("LLM error: {}", e);
-                let _ = self
-                    .adapter
-                    .send_text_message(reply_mode, reply_target, LLM_ERROR_REPLY)
-                    .await;
-            }
+            _ => {}
         }
+    }
+}
+
+/// TS 文本回复落点：回复目标由事件触发策略解析后固定
+struct TsTextSink {
+    adapter: Arc<TsAdapter>,
+    target_mode: u8,
+    target: u32,
+}
+
+#[async_trait]
+impl TurnSink for TsTextSink {
+    async fn send(&self, text: &str) -> Result<()> {
+        self.adapter
+            .send_text_message(self.target_mode, self.target, text)
+            .await
     }
 }
 
