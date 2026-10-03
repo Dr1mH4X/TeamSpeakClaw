@@ -79,6 +79,18 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakCl
 - For voice wake, download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), and download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) into the same directory; model files are not shipped with the release archive
 - NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host; Intel/AMD needs `/dev/dri` device mapping (already configured in the compose file)
 
+**Option 3: Local STT (FunASR, offline)**
+
+Switch to the compose variant that includes the `funasr-server` service:
+
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-funasr.yml
+```
+
+- Download a model from [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) into the `models/` directory
+- Set `base_url = "http://funasr-server:8000/v1"` under `[headless.stt]` in `config/settings.toml`; leave `api_key` empty and `model` can be any value
+- The service is published for amd64 only; on ARM or when you need GPU acceleration, use Option 1 or Option 2
+
 4. Start the service:
 
 ```bash

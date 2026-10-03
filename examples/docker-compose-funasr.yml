@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  teamspeakclaw:
+    image: ghcr.io/dr1mh4x/teamspeakclaw:latest
+    container_name: teamspeakclaw
+    user: "1000:10" #PUID:GUID
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models:ro # 模型目录
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - openteamspeak
+    depends_on:
+      - funasr-server
+
+  # 本地离线 STT：SenseVoiceSmall GGUF + llama.cpp，中文识别效果好。
+  # 模型自行下载到 ./models，
+  # 并把 config/settings.toml 的 [headless.stt] 配成 base_url = "http://funasr-server:8000/v1"。
+  funasr-server:
+    image: ghcr.io/dr1mh4x/funasr-server:latest
+    container_name: funasr-server
+    restart: unless-stopped
+    # ports:
+    #   - "127.0.0.1:9000:8000"
+    volumes:
+      - ./models:/models:ro # FunASR 模型目录（只读）
+    environment:
+      - TZ=Asia/Shanghai
+      - FUNASR_MODEL=/models/sensevoice-small-q8.gguf
+    networks:
+      - openteamspeak
+
+networks:
+  openteamspeak:
+    driver: bridge

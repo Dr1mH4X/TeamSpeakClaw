@@ -79,6 +79,18 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakCl
 - 启用语音唤醒时，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`）到 `models/` 目录，并从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）一并放入；模型文件不随发行包提供
 - NVIDIA（CUDA）需在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)；Intel/AMD 需要 `/dev/dri` 设备映射（compose 中已配置）
 
+**方案三：本地 STT（FunASR，离线）**
+
+换用带 `funasr-server` 服务的 compose 变体：
+
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-funasr.yml
+```
+
+- 从 [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) 下载模型到 `models/` 目录
+- 在 `config/settings.toml` 的 `[headless.stt]` 中设 `base_url = "http://funasr-server:8000/v1"`，`api_key` 留空、`model` 可填任意值
+- 该服务仅提供 amd64 镜像；ARM 设备或需要 GPU 加速时请改用方案一或方案二
+
 4. 启动服务：
 
 ```bash
