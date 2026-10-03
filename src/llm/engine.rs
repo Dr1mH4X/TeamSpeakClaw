@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::llm::context::{
-    ContextTurn, ContextUser, ContextWindow, SessionSource, TurnCoordinator, TurnQueueFull,
+    AudioBytes, ContextTurn, ContextUser, ContextWindow, SessionSource, TurnCoordinator,
+    TurnQueueFull, MAX_WIRE_AUDIO_BYTES,
 };
 use crate::llm::provider::{LlmProvider, OpenAiProvider};
 use crate::llm::tool_loop::{
@@ -13,6 +14,9 @@ use std::sync::Arc;
 
 /// 单回合用户文本最大字节数（UTF-8 字节数，1 MiB）
 pub const MAX_USER_TEXT_BYTES: usize = 1024 * 1024;
+
+/// `input_audio` 的 data URL 前缀；wire 格式只在 `omni_audio_part` 一处拼装
+const AUDIO_DATA_URL_PREFIX: &str = "data:audio/wav;base64,";
 
 /// 上下文最多保留的会话数
 const MAX_CONTEXT_SESSIONS: usize = 1000;
@@ -86,18 +90,19 @@ impl LlmEngine {
     }
 
     /// 构建可信系统提示与原始上下文历史（不含最后一条用户消息）。
-    /// 音频轮的历史项按 `input_audio` content 回放。
+    /// 音频轮的历史项按 `input_audio` content 回放；装配按 `MAX_WIRE_AUDIO_BYTES`
+    /// 从最早的音频轮逐轮裁剪，文本轮不受影响。
     fn build_context_base(&self, source: &SessionSource, system_prompt: &str) -> Vec<Value> {
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let system_prompt = system_prompt.replace("{date}", &date);
         let mut messages = vec![json!({"role": "system", "content": system_prompt})];
 
         if self.context.is_enabled() {
-            let history = self.context.get(source);
+            let history = self.context.history_for_wire(source, MAX_WIRE_AUDIO_BYTES);
             for turn in history {
                 let history_content = match &turn.user {
                     ContextUser::Text(text) => json!(text),
-                    ContextUser::Audio(wav) => json!([omni_audio_part(wav)]),
+                    ContextUser::Audio(audio) => json!([omni_audio_part(audio)]),
                 };
                 messages.push(json!({"role": "user", "content": history_content}));
                 messages.push(json!({"role": "assistant", "content": turn.assistant}));
@@ -137,7 +142,7 @@ impl LlmEngine {
         let context_text = json!({"runtime_context": user_ctx}).to_string();
         let content = vec![
             json!({"type": "text", "text": context_text}),
-            omni_audio_part(user_audio_wav),
+            current_audio_part(user_audio_wav),
         ];
         messages.push(json!({"role": "user", "content": content}));
         messages
@@ -164,16 +169,48 @@ impl LlmEngine {
         self.context.push(
             source,
             ContextTurn {
-                user: ContextUser::Audio(user_audio_wav),
+                user: ContextUser::Audio(AudioBytes::new(user_audio_wav)),
                 assistant,
             },
         );
     }
+
+    /// 测试可见：会话的完整存储历史（不做 wire 裁剪）
+    #[cfg(test)]
+    pub(crate) fn stored_history(&self, source: &SessionSource) -> Vec<ContextTurn> {
+        self.context.get(source)
+    }
+
+    /// 体积类失败自愈：丢弃该会话最早的音频轮，返回是否真的丢了一轮。
+    /// 只丢音频轮，文本轮与最新一轮音频保留。
+    pub fn drop_oldest_audio_turn(&self, source: &SessionSource) -> bool {
+        self.context.drop_oldest_audio_turn(source)
+    }
+
+    /// 测试可见：注入 provider 的引擎，供路由层重试路径的单测使用
+    #[cfg(test)]
+    pub(crate) fn with_provider(provider: Box<dyn LlmProvider>, max_context_turns: usize) -> Self {
+        Self {
+            provider,
+            context: ContextWindow::new(max_context_turns, MAX_CONTEXT_SESSIONS),
+            turn_coordinator: TurnCoordinator::new(MAX_CONCURRENT_TURNS),
+        }
+    }
 }
 
-/// 把 16 kHz 单声道 WAV 字节组装成 OpenAI 兼容的 `input_audio` content 元素
-fn omni_audio_part(wav_bytes: &[u8]) -> Value {
-    let data = format!("data:audio/wav;base64,{}", BASE64.encode(wav_bytes));
+/// 历史音频轮：base64 命中 `AudioBytes` 的缓存，重复回放不再编码
+fn omni_audio_part(audio: &AudioBytes) -> Value {
+    audio_content(&audio.base64())
+}
+
+/// 当前轮音频：本轮新音频只编码一次，不进缓存
+fn current_audio_part(wav_bytes: &[u8]) -> Value {
+    audio_content(&BASE64.encode(wav_bytes))
+}
+
+/// `input_audio` content 的 wire 格式唯一出处：`data:` URL 的拼装与 JSON 结构只在这里
+fn audio_content(base64_payload: &str) -> Value {
+    let data = format!("{AUDIO_DATA_URL_PREFIX}{base64_payload}");
     json!({"type": "input_audio", "input_audio": {"data": data}})
 }
 
@@ -300,6 +337,48 @@ mod tests {
 
     fn omni_audio_data(wav: &[u8]) -> String {
         format!("data:audio/wav;base64,{}", BASE64.encode(wav))
+    }
+
+    #[test]
+    fn assembled_omni_request_stays_within_the_wire_budget() {
+        let mut config = AppConfig::default();
+        config.llm.max_context_turns = 8;
+        let engine = LlmEngine::new(Arc::new(config)).unwrap();
+        let source = SessionSource::TeamSpeak {
+            uid: "wire-budget".to_string(),
+        };
+
+        // 每条 600 KiB WAV 约 800 KiB wire：装入 5 条后装配必须裁到 2 条（1.6 MiB）加当前轮
+        for _ in 0..5 {
+            engine.save_omni_turn(&source, vec![0u8; 600 * 1024], "reply".to_string());
+        }
+
+        let messages =
+            engine.build_omni_messages(&source, "Trusted voice prompt", "{}", &[0u8; 64]);
+        let body = serde_json::to_vec(&messages).unwrap();
+
+        let audio_parts = messages
+            .iter()
+            .filter(|message| message["content"].is_array())
+            .count();
+        assert_eq!(audio_parts, 3);
+        assert!(
+            body.len() <= MAX_WIRE_AUDIO_BYTES + 4 * 1024,
+            "assembled omni body is {} bytes",
+            body.len()
+        );
+        // 存储历史不受装配裁剪影响
+        assert_eq!(engine.stored_history(&source).len(), 5);
+    }
+
+    #[test]
+    fn wire_estimate_matches_the_serialized_audio_part() {
+        let audio = AudioBytes::new(vec![7u8; 3000]);
+        let message = json!({"role": "user", "content": [omni_audio_part(&audio)]});
+        let actual = serde_json::to_vec(&message).unwrap().len();
+
+        // 估算与真实序列化逐字节一致：wire 格式漂移会在这里失败
+        assert_eq!(audio.wire_bytes(), actual);
     }
 
     #[tokio::test]

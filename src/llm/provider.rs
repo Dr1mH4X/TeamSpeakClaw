@@ -3,10 +3,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -18,6 +19,75 @@ const MAX_SSE_STREAM_BYTES: usize = 8 * 1024 * 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 30;
 const STREAM_TOTAL_TIMEOUT_SECS: u64 = 300;
+
+/// 序列化后请求体的绝对上限（64 MiB）。超过就不发请求，直接返回 `PayloadTooLarge`。
+///
+/// 它与装配层的 `MAX_WIRE_AUDIO_BYTES`（2 MiB，只约束历史音频）是两层预算：
+/// 正常装配出的 omni 请求体 ≤ wire 预算加当前轮（约 2.6 MiB），远在此值之下，
+/// 预检不会误杀；它拦的是装配预算管不到的部分（超大文本历史、工具 schema）失控，
+/// 把「发出去再被网关拒绝」变成发送前可识别、可自愈的体积类失败。
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// 网关按体积拒绝或发送前预检失败时可识别的错误类型。
+///
+/// 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，调用点用
+/// `downcast_ref::<PayloadTooLarge>()` 判定，据此收缩音频历史后重试一次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadTooLarge {
+    message: String,
+}
+
+impl PayloadTooLarge {
+    fn rejected_body(body_bytes: usize, limit: usize) -> Self {
+        Self {
+            message: format!("request body of {body_bytes} bytes exceeds the {limit}-byte limit"),
+        }
+    }
+
+    fn from_response(status: StatusCode) -> Self {
+        Self {
+            message: format!("LLM gateway rejected the request payload with HTTP {status}"),
+        }
+    }
+
+    /// 测试可见：构造体积类错误，供重试路径的单测使用
+    #[cfg(test)]
+    pub(crate) fn for_test(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for PayloadTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LLM payload too large: {}", self.message)
+    }
+}
+
+impl std::error::Error for PayloadTooLarge {}
+
+/// 发送前预检：序列化后的请求体超过上限就不发请求
+fn ensure_payload_within_limit(body_bytes: usize, limit: usize) -> Result<(), PayloadTooLarge> {
+    if body_bytes > limit {
+        return Err(PayloadTooLarge::rejected_body(body_bytes, limit));
+    }
+    Ok(())
+}
+
+/// 归类网关的体积类拒绝：413 一律算；400 需要响应体文案佐证，
+/// 避免把参数错误误判为体积类（自建反代也可能返回自定义页，故归类只作兜底）。
+fn classify_payload_too_large(status: StatusCode, body: &str) -> Option<PayloadTooLarge> {
+    let has_size_marker =
+        body.to_ascii_lowercase().contains("too large") || body.contains("请求体过大");
+    if status == StatusCode::PAYLOAD_TOO_LARGE
+        || (status == StatusCode::BAD_REQUEST && has_size_marker)
+    {
+        Some(PayloadTooLarge::from_response(status))
+    } else {
+        None
+    }
+}
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -151,8 +221,13 @@ impl OpenAiProvider {
         Ok(Self { client, config })
     }
 
-    fn build_request(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
-        let request = self.client.post(url).json(body);
+    fn build_request(&self, url: &str, body: Vec<u8>) -> reqwest::RequestBuilder {
+        // 请求体在调用点已序列化并预检，这里只补 content-type，避免 reqwest 再序列化一次
+        let request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let api_key = self.config.api_key.trim();
         if api_key.is_empty() {
             request
@@ -314,8 +389,14 @@ impl LlmProvider for OpenAiProvider {
         let stream_idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS);
         let stream_total_timeout = Duration::from_secs(STREAM_TOTAL_TIMEOUT_SECS);
         let total_deadline = tokio::time::Instant::now() + stream_total_timeout;
+
+        // 发送前预检：体积类失败在本地就能识别，不必等网关拒绝
+        let body_bytes =
+            serde_json::to_vec(&body).context("failed to serialize the LLM request")?;
+        ensure_payload_within_limit(body_bytes.len(), MAX_REQUEST_BODY_BYTES)?;
+
         let resp = match wait_with_deadlines(
-            self.build_request(&url, &body).send(),
+            self.build_request(&url, body_bytes).send(),
             stream_idle_timeout,
             total_deadline,
         )
@@ -333,7 +414,13 @@ impl LlmProvider for OpenAiProvider {
         };
 
         if !resp.status().is_success() {
-            return Err(anyhow::anyhow!("LLM API error: HTTP {}", resp.status()));
+            let status = resp.status();
+            // 响应体只用于体积类归类，读不到就按状态码处理
+            let body = resp.text().await.unwrap_or_default();
+            if let Some(error) = classify_payload_too_large(status, &body) {
+                return Err(error.into());
+            }
+            return Err(anyhow::anyhow!("LLM API error: HTTP {status}"));
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -528,7 +615,7 @@ mod tests {
         let provider = OpenAiProvider::new(config).unwrap();
 
         let request = provider
-            .build_request("http://localhost/chat/completions", &json!({}))
+            .build_request("http://localhost/chat/completions", vec![])
             .build()
             .unwrap();
 
@@ -544,7 +631,7 @@ mod tests {
         let provider = OpenAiProvider::new(config).unwrap();
 
         let request = provider
-            .build_request("http://localhost/chat/completions", &json!({}))
+            .build_request("http://localhost/chat/completions", vec![])
             .build()
             .unwrap();
 
@@ -552,6 +639,59 @@ mod tests {
             request.headers().get(AUTHORIZATION).unwrap(),
             "Bearer test-key"
         );
+    }
+
+    #[test]
+    fn omni_request_body_over_the_limit_is_rejected_before_send() {
+        let body = json!({
+            "model": "omni",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": format!("data:audio/wav;base64,{}", "A".repeat(4096))}
+                }]
+            }],
+            "stream": true,
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+
+        // 恰好等于上限放行；超 1 字节即拒绝，且拒绝发生在发送之前
+        assert!(ensure_payload_within_limit(body_bytes.len(), body_bytes.len()).is_ok());
+
+        let error =
+            ensure_payload_within_limit(body_bytes.len(), body_bytes.len() - 1).unwrap_err();
+        assert!(error.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn classifies_413_and_matching_400_as_payload_too_large() {
+        let rejected = classify_payload_too_large(StatusCode::PAYLOAD_TOO_LARGE, "").unwrap();
+        assert!(rejected.to_string().contains("413"));
+
+        let hinted =
+            classify_payload_too_large(StatusCode::BAD_REQUEST, "Request entity too large")
+                .unwrap();
+        assert!(hinted.to_string().contains("400"));
+
+        let chinese = classify_payload_too_large(StatusCode::BAD_REQUEST, "请求体过大").unwrap();
+        assert!(chinese.to_string().contains("400"));
+    }
+
+    #[test]
+    fn non_size_http_errors_are_not_payload_errors() {
+        assert!(classify_payload_too_large(StatusCode::BAD_REQUEST, "invalid model").is_none());
+        assert!(
+            classify_payload_too_large(StatusCode::INTERNAL_SERVER_ERROR, "entity too large")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn payload_too_large_keeps_its_type_through_anyhow() {
+        let error: anyhow::Error = PayloadTooLarge::for_test("test payload").into();
+
+        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
     }
 
     #[test]

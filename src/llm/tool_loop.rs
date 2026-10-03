@@ -613,7 +613,8 @@ mod tests {
         }
     }
 
-    /// 工具回调成对出现且按「开始 → 执行 → 结束」排列，实参是工具名
+    /// `StreamCallbacks` 只有 `on_tool_call_start` 一个工具回调槽（没有配套的结束回调），
+    /// 因此只断言「开始 → 执行」的先后；实参是工具名
     #[tokio::test]
     async fn tool_callbacks_wrap_tool_execution_in_order() {
         struct RecordingExecutor {
