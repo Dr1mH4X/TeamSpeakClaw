@@ -37,11 +37,11 @@ language = "zh"  # 语言代码：zh(中文), en(英语), ja(日语), ko(韩语)
 [headless.wakeword]
 enabled = false
 model = "wakeword.onnx"  # models/ 目录下的完整文件名（含 .onnx）
-window_secs = 10              # 唤醒后开门时长（秒），窗口内连续对话无需重复唤醒
+window_secs = 10              # 唤醒后开门时长（秒），默认 10s；窗口内连续对话无需重复唤醒
 
 [headless.tts]
 enabled = false
-provider = "openai-compatibility"
+provider = "mimo"   # mimo 或 openai-compatibility
 base_url = "https://api.xiaomimimo.com/v1"
 api_key = ""
 model = "mimo-v2.5-tts"

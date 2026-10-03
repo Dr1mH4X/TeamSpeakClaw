@@ -196,7 +196,7 @@ max_context_turns = 3
         assert_eq!(config.bot.default_reply_mode, "private");
         assert!(!config.napcat.enabled);
         assert_eq!(config.logging.max_log_days, 7);
-        assert!(!config.voice_replay.enabled);
+        assert!(config.voice_replay.enabled);
         assert_eq!(config.voice_replay.window_secs, 30);
         config.validate().unwrap();
     }

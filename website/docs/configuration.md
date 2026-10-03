@@ -83,11 +83,11 @@ sidebar_position: 3
 
 ### 语音回放
 
-配置区段 `[voice_replay]` 控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效（无热重载）。
+配置区段 `[voice_replay]` 控制 TeamSpeak 录音窗回放。默认开启，访问受 `acl.toml` 的 `voice_replay` 权限控制；**修改配置后需重启进程**生效（无热重载）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `enabled` | bool | `false` | 是否启用录制回放与语音回放技能/直呼 |
+| `enabled` | bool | `true` | 是否启用录制回放与语音回放技能/直呼 |
 | `window_secs` | integer | `30` | 录音窗秒数，合法范围 **1–120**；`seconds` 超窗时 clamp |
 | `direct_commands` | 数组 | `["!replay", "!回放"]` | 频道直呼前缀 |
 

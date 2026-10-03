@@ -91,7 +91,7 @@ impl Default for HeadlessWakewordConfig {
         Self {
             enabled: false,
             model: String::new(),
-            window_secs: 15,
+            window_secs: 10,
         }
     }
 }

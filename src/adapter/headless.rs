@@ -686,7 +686,13 @@ mod tests {
 
     #[test]
     fn voice_mute_flags_follow_voice_features() {
+        // 语音回放默认开启，这里显式关掉全部语音功能，先断言「无语音功能」一档
         let mut config = AppConfig::default();
+        config.headless.stt.enabled = false;
+        config.headless.tts.enabled = false;
+        config.llm.omni_model = false;
+        config.voice_replay.enabled = false;
+
         let flags = voice_mute_flags(&config);
         assert!(flags.input_muted);
         assert!(!flags.input_hardware_on);
@@ -708,7 +714,13 @@ mod tests {
 
     #[test]
     fn voice_features_include_voice_replay_flag() {
+        // 语音回放默认开启，显式构造「全关」配置后再打开本开关
         let mut config = AppConfig::default();
+        config.headless.stt.enabled = false;
+        config.headless.tts.enabled = false;
+        config.llm.omni_model = false;
+        config.voice_replay.enabled = false;
+
         assert!(!voice_features_enabled(&config));
         config.voice_replay.enabled = true;
         assert!(voice_features_enabled(&config));

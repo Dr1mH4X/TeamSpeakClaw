@@ -39,12 +39,12 @@ INFO Bot ready. Listening for TS + NapCat events.
 
 3.  **Headless 语音模式**（可选）：启用 Headless 服务后，可直接通过语音与机器人交互。
     -   配置 `settings.toml` 中的 `[headless]` 区段
-    -   语音唤醒（可选）：启用 `[headless.wakeword]`，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型到 `models/` 目录，再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并在 `model` 填其文件名，先说唤醒词再下指令；唤醒后 `window_secs`（默认 15s）内可连续对话，机器人在播报时再说一次唤醒词会打断当前回复并接着处理这一句；播报期间不含唤醒词的补充语音会被丢弃；只说唤醒词、没有接着说指令时，机器人回一句预生成的确认音（「嗯哼」「在呢」轮换）表示已唤醒（需配置 TTS），随后的指令在 `window_secs` 内正常处理
+    -   语音唤醒（可选）：启用 `[headless.wakeword]`，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型到 `models/` 目录，再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并在 `model` 填其文件名，先说唤醒词再下指令；唤醒后 `window_secs`（默认 10s）内可连续对话，机器人在播报时再说一次唤醒词会打断当前回复并接着处理这一句；播报期间不含唤醒词的补充语音会被丢弃；只说唤醒词、没有接着说指令时，机器人回一句预生成的确认音（「嗯哼」「在呢」轮换）表示已唤醒（需配置 TTS），随后的指令在 `window_secs` 内正常处理
     -   机器人会通过语音回复（需配置 TTS）；模型在一轮对话里第一次调用工具时先播一句提示音（`web_search` 为「我来看看」或「我来搜索下」，其余工具为「我来研究下」），同一轮后续工具不重复播，工具返回后再播正式回复
     -   例如: （说）`唤醒词 播放周杰伦的夜曲`
     -   **未开 STT 且未启用 omni 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
 
-4.  **语音回放**（可选：在配置里启用录音窗回放，改配置后**重启**生效）：
+4.  **语音回放**（默认开启；如需关闭，在配置里设 `enabled = false`，改配置后**重启**生效）：
 
     **前置**
     - 在 `acl.toml` 为需要的组授予语音回放权限（与直呼同一 ACL）。

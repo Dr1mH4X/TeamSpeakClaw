@@ -25,7 +25,7 @@ The `[llm]` section configures an OpenAI-compatible Chat Completions endpoint:
 | `api_key` | string | `""` | API key; may be empty for unauthenticated local services |
 | `base_url` | string | `https://api.openai.com/v1` | API base URL; only HTTP and HTTPS are supported |
 | `model` | string | `gpt-4o` | Model name |
-| `omni_model` | bool | `false` | Send speech straight to a multimodal model (audio as `input_audio`, no STT; `model` must accept audio input). Replies are still text; `[headless.tts]` provides spoken replies. Audio turns stay in context within `max_context_turns` |
+| `omni_model` | bool | `false` | Send speech straight to a multimodal model (audio as `input_audio`, no STT; `model` must accept audio input). Replies are still text; `[headless.tts]` provides spoken replies |
 | `max_context_turns` | integer | `0` | Maximum conversation turns retained per session; `0` disables context |
 
 ### NapCat Configuration Details
@@ -83,11 +83,11 @@ Replies triggered from voice STT follow this mode as well.
 
 ### Voice Replay
 
-The `[voice_replay]` config section controls TeamSpeak recording-window replay. Defaults to off; **restart the process** after changing config (no hot reload).
+The `[voice_replay]` config section controls TeamSpeak recording-window replay. Enabled by default, with access controlled by the `voice_replay` permission in `acl.toml`; **restart the process** after changing config (no hot reload).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `false` | Enable recording replay, skill, and direct commands |
+| `enabled` | bool | `true` | Enable recording replay, skill, and direct commands |
 | `window_secs` | integer | `30` | Recording window in seconds; valid range **1–120**; `seconds` above the window is clamped |
 | `direct_commands` | array | `["!replay", "!回放"]` | Channel direct-command prefixes |
 
