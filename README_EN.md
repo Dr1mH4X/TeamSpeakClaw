@@ -34,7 +34,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 - **🧠 Natural Language Interaction**: No more memorizing complicated commands. Just say "play Jay Chou's song" or "kick that guy who just joined the channel".
 - **🛡️ Fine-grained Permission Control**: Built-in powerful permission system. Configure specific skill permissions for different TeamSpeak server groups/user groups.
 - **🔌 Flexible Skill System**:
-  - **Music Control**: Supports three external music bot backends:[TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin),[TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) or [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot).
+  - **Music Control**: Supports three external music bot backends: [TS3AudioBot](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin), [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) or [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot).
   - **Server Administration**: Support for kick, poke, move user, etc.
   - **Information Query**: Get online user list/info, server status, etc.
   - **Voice Replay**: Replay the voice of a specified speaker or all channel members within the last 120 seconds.
@@ -54,9 +54,9 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 - [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)
 - [NapCatQQ](https://github.com/NapNeko/NapCatQQ)
 
-## LICENSE
+## Statement
 
-[TeamSpeakClaw License](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE)
+This software is released under the [GNU Affero General Public License v3.0 only](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE).
 
 openWakeWord pretrained models are licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); models from the community model library are distributed under its site [commercial license](https://openwakeword.com/license). See [models/README.md](models/README.md).
 
