@@ -15,7 +15,9 @@ use crate::adapter::headless::speech::{
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk, SttFrameOutcome,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
-use crate::adapter::headless::wakeword::{WakewordGate, WakewordModels};
+use crate::adapter::headless::wakeword::{
+    WakewordGate, WakewordModels, CHUNK_SIZE as WAKE_BLOCK_SAMPLES,
+};
 use crate::adapter::headless::{
     parse_server_groups, TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR,
 };
@@ -30,7 +32,9 @@ use crate::router::voice_feedback::{
 use crate::router::voice_turns::{
     decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
 };
-use crate::router::{resolve_ts_inbound, run_llm_turn, LLM_ERROR_REPLY};
+use crate::router::{
+    resolve_ts_inbound, run_llm_turn_with_audio_recovery, TurnLoopSpec, LLM_ERROR_REPLY,
+};
 
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
@@ -140,7 +144,9 @@ impl TtsStreamState {
         *self.tx.lock().expect("tts tx poisoned") = Some(tx);
         let state = self.clone();
         // 会话交给该流的任务独占：任务被中止时会话随 future drop，job 的段通道随之关闭。
-        // 任务另持一份回合句柄，直到本流音频播完才放掉「正在产出」
+        // 任务另持一份回合句柄，直到本流音频播完才放掉「正在产出」。
+        // 这些 synth 任务不在 router 的 JoinSet 里：它们各自持一份回合句柄，靠会话释放在
+        // `finish_drained` 返回后自行收敛，插话时由 `TtsTurnRuntime::abort` 逐个中止
         let keepalive = self.keepalive.clone();
         let task = tokio::spawn(async move { state.run_synth(session, rx, keepalive).await });
         self.tasks.lock().expect("tts tasks poisoned").push(task);
@@ -313,8 +319,15 @@ struct WakeVerdict {
     open: bool,
     /// 本条 utterance 是否命中唤醒词
     detected: bool,
-    /// 命中点之后没有成段活跃语音：本条只有唤醒词
+    /// 命中块锚点之后没有成段活跃语音：本条只有唤醒词
     wakeword_only: bool,
+    /// 命中块绝对起始采样位置（16k）；未命中为 None。确认音日志用它换算块序号，
+    /// 与命中时的 `voice.wakeword.calibration` 互校
+    anchor_sample: Option<usize>,
+    /// 锚点之后的 VAD 活跃毫秒：判据实际用到的量，确认音日志据此回看阈值取舍
+    anchor_active_ms: u64,
+    /// 本条 utterance 首个 VAD 活跃帧的绝对采样位置（16k）：给出命令开头相对 utterance 起点的位置
+    utterance_start_sample: Option<usize>,
 }
 
 impl Default for WakeVerdict {
@@ -324,18 +337,80 @@ impl Default for WakeVerdict {
             open: true,
             detected: false,
             wakeword_only: false,
+            anchor_sample: None,
+            anchor_active_ms: 0,
+            utterance_start_sample: None,
         }
     }
 }
 
 /// 合成一条 utterance 的准入裁决：命中即开门（命中状态来自收帧路径的在飞记录），
-/// 未命中时沿用门窗口（窗口内续说算正常对话）；命中点之后没有成段活跃语音的判为
-/// 「只有唤醒词」，准入据此播确认音而不进 STT/LLM
+/// 未命中时沿用门窗口（窗口内续说算正常对话）；命中块锚点之后没有成段活跃语音的判为
+/// 「只有唤醒词」，准入据此播确认音而不进 STT/LLM。锚点与活跃毫秒一并带出，供日志实测滞后
 fn combine_wake_verdict(wake: WakeUtterance, window_open: bool) -> WakeVerdict {
     WakeVerdict {
         open: wake.detected() || window_open,
         detected: wake.detected(),
         wakeword_only: wake.detected() && !wake.has_command_tail(),
+        anchor_sample: wake.anchor_sample(),
+        anchor_active_ms: wake.active_ms_after(),
+        utterance_start_sample: wake.first_voiced_sample(),
+    }
+}
+
+/// 取消一条回合并按身份从注册表摘除：置 LLM 取消令牌与 TTS 播放取消位，再把这一条摘出集合。
+/// 取消幂等，摘除只匹配 `Arc::ptr_eq` 的条目，同 clid 的其他回合不动。
+/// 三处取消（插话、准入顶替、确认音顶替）共用它，避免有一处漏摘让取消句柄不可达
+fn cancel_turn(turns: &TurnRegistry, turn: &Arc<ActiveTurn>) {
+    turn.cancel.cancel();
+    turn.playback_cancel().store(true, Ordering::SeqCst);
+    turns.remove_turn(turn);
+}
+
+/// 新回合顶替同 clid 旧回合时的取消分工（`begin_turn` 返回旧条目后调用）。
+///
+/// 尚未产出的旧回合两种配置下都取消并摘除：它不在「忙」的视野里，不取消就会变成两条并发
+/// LLM 回合，其中一条的播放取消句柄再也不可达。
+///
+/// 正在产出的旧回合看插话是否可用：`barge_in_available`（唤醒门开启）为真时保留在集合里，
+/// 夺回话语权由用户喊唤醒词决定——出站只有一路音频，准入不替用户静音，留得住才找得到它、
+/// 才取消得掉；为假时没有任何路径能取消它（既无命中插话，也无第一道 busy 闸），就地取消并
+/// 摘除，否则它的播放取消句柄无人可达，回复会一直播到自然结束。
+fn cancel_displaced_turns(
+    turns: &TurnRegistry,
+    displaced: Vec<Arc<ActiveTurn>>,
+    barge_in_available: bool,
+) {
+    for displaced in displaced {
+        if barge_in_available && displaced.is_producing() {
+            continue;
+        }
+        cancel_turn(turns, &displaced);
+    }
+}
+
+/// 插话：取消全部正在产出的回合（不分归属）。出站音频只有一路，但产出回合可以不止一条，
+/// 只停最早准入的那条会留下仍在出声的回合；逐条留下 clid/age 日志便于定位谁被打断。
+/// 摘除即时生效，条目失效让后续语音立刻回到空闲准入，不必等旧回合任务收敛；
+/// 若某条已被顶替或自行收敛，`remove_turn` 按身份匹配不动别的条目。
+///
+/// 抽成自由函数：它只依赖注册表，单测可直接驱动插话的取消展开，无需装配整个 `VoiceRouter`。
+fn apply_barge_in(
+    turns: &TurnRegistry,
+    barge_in_by: u32,
+    targets: Vec<(u32, Arc<ActiveTurn>)>,
+    speaker: &str,
+) {
+    for (owner_clid, target) in targets {
+        info!(
+            event = "voice.wakeword.barge_in",
+            barge_in_by,
+            cancelled_owner = owner_clid,
+            speaker,
+            turn_age_ms = target.age_ms(),
+            "wakeword barge-in; cancelling a turn that owns the output"
+        );
+        cancel_turn(turns, &target);
     }
 }
 
@@ -411,7 +486,7 @@ impl VoiceRouter {
         let router = Arc::new(self);
         let mut tasks = JoinSet::new();
 
-        // 预热短反馈短语（去重后共三条）：把 TTS 首包冷启动挪到启动期，
+        // 预热短反馈短语（三个池共五条）：把 TTS 首包冷启动挪到启动期，
         // 触发时只剩进程内 opus 编码。失败不影响路由，首次触发会按需重试
         if router.is_tts_effectively_enabled() {
             if let Some(player) = router.feedback.clone() {
@@ -732,8 +807,8 @@ impl VoiceRouter {
             return Ok(());
         }
         // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
-        // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完，被替换的旧条目
-        // 由它自己的任务收敛，不在这里取消
+        // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
+        // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消
         let active = Arc::new(ActiveTurn::new());
         self.turns.begin_turn(ctx.caller_id, &active);
         // 桥接文本不是 STT 路径：不挂工具调用提示音
@@ -841,25 +916,31 @@ impl VoiceRouter {
             let mut gate = gate.lock().await;
             gate.feed(clid, &frame.mono_16k, Instant::now())
         };
-        {
+        // 本帧在门时间轴上的绝对起点：与 `fire_sample`（命中块绝对起点）同一坐标系
+        let frame_sample = event.fed_samples_before;
+        let frame_ms = frame.mono_16k.len() as u64 * 1000 / 16_000;
+        let (anchor_active_ms, utterance_start_sample) = {
             let mut pending = self.pending_wake.lock().expect("wake pending poisoned");
             let wake = pending.entry(clid).or_default();
-            if event.verdict.detected {
-                wake.note_detection();
-            } else {
-                wake.note_frame(frame.voiced, frame.mono_16k.len() as u64 * 1000 / 16_000);
+            // 命中时 `feed` 必给出命中块起点（`fire_sample` 与 `detected` 同源置位），
+            // 用绝对锚点而不是本帧位置：命中块的起点在这之前最多 carry 采样处
+            if let Some(fire_sample) = event.fire_sample {
+                wake.note_detection(fire_sample);
             }
-        }
-        if !event.verdict.detected {
+            wake.note_frame(frame_sample, frame.voiced, frame_ms);
+            (wake.active_ms_after(), wake.first_voiced_sample())
+        };
+        let Some(fire_sample) = event.fire_sample else {
+            // 未命中：本帧只进在飞状态，不触发插话与打点
             return;
-        }
-        let fire_sample = event.fed_samples_before + event.fire_offset.unwrap_or(0);
+        };
         info!(
             event = "voice.wakeword",
             clid,
             speaker,
             probability = event.verdict.probability,
             fire_sample,
+            detection_block_index = fire_sample / WAKE_BLOCK_SAMPLES,
             input_samples = event.fed_samples_before + frame.mono_16k.len(),
             window_open_before_feed = event.window_open_before_feed,
             "wakeword detected; opening gate"
@@ -868,6 +949,12 @@ impl VoiceRouter {
             event = "voice.wakeword.calibration",
             clid,
             fire_sample,
+            // 命中块序号：可与 fire_sample / 块长 互校，也可与 raw_scores 的 chunk_index 对齐
+            detection_block_index = fire_sample / WAKE_BLOCK_SAMPLES,
+            // utterance 起点与锚点后活跃毫秒：把命中位置换算成「utterance 内命令开头在哪」，
+            // 用于实测 T_rep − T_end 这条判据滞后（旧打点只有命中时刻，无法对齐 VAD 时间轴）
+            utterance_start_sample = ?utterance_start_sample,
+            anchor_active_ms,
             input_samples = event.fed_samples_before + frame.mono_16k.len(),
             first_chunk_index = event.calibration.first_chunk_index,
             peak_chunk_index = event.calibration.peak_chunk_index().unwrap_or(0),
@@ -876,9 +963,11 @@ impl VoiceRouter {
             "wakeword raw score history for boundary calibration"
         );
         // 命中即抢占：出站音频只有一路，产出中的回合就是通道持有者。
-        // 取「忙」与取取消目标必须来自同一次快照，否则会在两次加锁之间漂移
-        if let Some((owner_clid, target)) = self.turns.producing_turn() {
-            self.apply_barge_in(clid, owner_clid, &target, speaker);
+        // 取「忙」与取取消目标必须来自同一次快照，否则会在两次加锁之间漂移。
+        // 产出回合可以不止一条（后准入但先入队的回合已经出声），全部取消
+        let targets = self.turns.producing_turns();
+        if !targets.is_empty() {
+            apply_barge_in(&self.turns, clid, targets, speaker);
         }
     }
 
@@ -901,29 +990,6 @@ impl VoiceRouter {
         combine_wake_verdict(wake, window_open)
     }
 
-    /// 插话：取消占用出站音频的回合（不分归属）。取消幂等——令牌与播放取消位各自可重复置位；
-    /// 摘除只做一次，条目即时失效让后续语音立刻回到空闲准入，不必等旧回合任务收敛；
-    /// 若条目已被新回合顶替，`remove_turn` 按身份匹配不动新条目
-    fn apply_barge_in(
-        &self,
-        barge_in_by: u32,
-        owner_clid: u32,
-        target: &Arc<ActiveTurn>,
-        speaker: &str,
-    ) {
-        info!(
-            event = "voice.wakeword.barge_in",
-            barge_in_by,
-            cancelled_owner = owner_clid,
-            speaker,
-            turn_age_ms = target.age_ms(),
-            "wakeword barge-in; cancelling the turn that owns the output"
-        );
-        target.cancel.cancel();
-        target.playback_cancel().store(true, Ordering::SeqCst);
-        self.turns.remove_turn(target);
-    }
-
     /// 准入：按唤醒裁决表调度 → 丢弃 / 插话 / 注册并派发回合任务。
     /// 这里不做 gRPC 解析与 STT，保证机器人播报期间仍能即时裁决后续语音。
     async fn admit_audio_chunk(
@@ -935,13 +1001,16 @@ impl VoiceRouter {
         turn_tasks: &mut JoinSet<()>,
     ) -> Result<()> {
         let clid = chunk.speaker_client_id;
+        // 唤醒门开启 = 存在插话机制：收帧路径的命中插话与第一道 busy 闸都由它提供。
+        // 第二道闸据此决定产出中的旧回合交给谁取消，所以求值一次、两处共用
+        let barge_in_available = self.wakeword.is_some();
         // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销
-        if self.wakeword.is_some() {
+        if barge_in_available {
             // 「忙」与插话取消目标取自同一次快照：出站音频只有一路，产出中的回合就是通道持有者。
             // 分两次查询（先判忙再取目标）会在两次加锁之间漂移，出现「判定为忙却取不到目标」
             // 或反过来该插话却判成空闲
-            let producing = self.turns.producing_turn();
-            let busy = producing.is_some();
+            let producing = self.turns.producing_turns();
+            let busy = !producing.is_empty();
             match decide_wakeword_action(verdict.open, verdict.detected, busy) {
                 WakewordAction::Talk => {}
                 WakewordAction::Drop => {
@@ -958,13 +1027,23 @@ impl VoiceRouter {
                 }
                 // 收帧路径命中时已经插话停声；这里兜住「命中之后又有新回合开始产出」的竞态
                 WakewordAction::BargeIn => {
-                    let (owner_clid, target) =
-                        producing.expect("barge-in implies a producing turn");
-                    self.apply_barge_in(clid, owner_clid, &target, &chunk.speaker_name);
+                    if producing.is_empty() {
+                        // 防御分支：音频路径上不 panic。busy 与目标取自同一次快照，
+                        // BargeIn 理论上不会配空集合；真取不到目标就按 Talk 处理，
+                        // 本条语音照常走回合，不因为取不到取消目标而丢话
+                        debug!(
+                            event = "voice.wakeword.barge_in.empty",
+                            clid,
+                            speaker = %chunk.speaker_name,
+                            "wakeword barge-in without a producing target; treating as talk"
+                        );
+                    } else {
+                        apply_barge_in(&self.turns, clid, producing, &chunk.speaker_name);
+                    }
                 }
             }
 
-            // 命中点之后没有成段活跃语音 = 这条 utterance 只有唤醒词：播确认音代替 STT/LLM，
+            // 命中块锚点之后没有成段活跃语音 = 这条 utterance 只有唤醒词：播确认音代替 STT/LLM，
             // 让用户立刻知道唤醒了；真正的指令在窗口内随后到达，走正常回合
             if verdict.detected && verdict.wakeword_only {
                 info!(
@@ -972,6 +1051,12 @@ impl VoiceRouter {
                     clid,
                     speaker = %chunk.speaker_name,
                     input_samples = chunk.pcm16_mono_16k.len(),
+                    // 与命中时的 `voice.wakeword.calibration` 同一组锚点字段，
+                    // 便于事后核对「判成独占的这段为什么没够到阈值」
+                    anchor_sample = ?verdict.anchor_sample,
+                    detection_block_index = ?verdict.anchor_sample.map(|sample| sample / WAKE_BLOCK_SAMPLES),
+                    utterance_start_sample = ?verdict.utterance_start_sample,
+                    anchor_active_ms = verdict.anchor_active_ms,
                     "wakeword-only utterance; playing the confirmation phrase"
                 );
                 if let Err(error) = self.play_wake_confirmation(clid, &chunk.speaker_name).await {
@@ -986,13 +1071,14 @@ impl VoiceRouter {
         }
 
         let active = Arc::new(ActiveTurn::new());
-        // 第二道闸：同说话人可能还有一条尚未进入产出（正在解析/STT）的旧回合。它不在「忙」的
-        // 视野里，第一道闸看不到它，却已持有回合状态与播放取消句柄；begin_turn 把它挤下槽位，
-        // 这里顺手取消——否则两条并发回合里会有一条的取消句柄再也不可达
-        if let Some(displaced) = self.turns.begin_turn(clid, &active) {
-            displaced.cancel.cancel();
-            displaced.playback_cancel().store(true, Ordering::SeqCst);
-        }
+        // 第二道闸：同说话人可能还有尚未进入产出的旧回合（正在解析/STT）。它不在「忙」的视野里，
+        // 第一道闸看不到它，却已持有回合状态与播放取消句柄；取消与保留的分工见
+        // `cancel_displaced_turns`
+        cancel_displaced_turns(
+            &self.turns,
+            self.turns.begin_turn(clid, &active),
+            barge_in_available,
+        );
         let router = self.clone();
         let channel = channel.clone();
         turn_tasks.spawn(async move {
@@ -1032,10 +1118,10 @@ impl VoiceRouter {
         let (phrase, handle) = player
             .play(FeedbackGroup::WakeConfirm, playback_cancel)
             .await?;
-        if let Some(displaced) = self.turns.begin_turn(clid, &announcement) {
-            // 同 clid 的旧条目被顶替：按既有不变式取消它，不留下不可达的取消句柄
-            displaced.cancel.cancel();
-            displaced.playback_cancel().store(true, Ordering::SeqCst);
+        for displaced in self.turns.begin_turn(clid, &announcement) {
+            // 同 clid 的旧条目被顶替：确认音本身就是唤醒词夺回话语权的可听结果，
+            // 全部取消并摘除，不留下不可达的取消句柄
+            cancel_turn(&self.turns, &displaced);
         }
         announcement.mark_producing();
         debug!(
@@ -1120,13 +1206,16 @@ impl VoiceRouter {
         };
         active.mark_producing();
 
-        match run_llm_turn(
+        match run_llm_turn_with_audio_recovery(
             &self.llm,
             &self.registry,
+            &session_source,
             |llm| llm.build_omni_messages(&session_source, &system_prompt, &user_ctx, &request_wav),
-            &allowed_skills,
-            tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-            &active.cancel,
+            TurnLoopSpec {
+                allowed_skills: &allowed_skills,
+                callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+                cancel: &active.cancel,
+            },
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {
@@ -1221,13 +1310,16 @@ impl VoiceRouter {
         };
         active.mark_producing();
 
-        let result = match run_llm_turn(
+        let result = match run_llm_turn_with_audio_recovery(
             &self.llm,
             &self.registry,
+            &session_source,
             |llm| llm.build_messages(&session_source, &system_prompt, &user_ctx, &user_msg),
-            &allowed_skills,
-            tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
-            &active.cancel,
+            TurnLoopSpec {
+                allowed_skills: &allowed_skills,
+                callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
+                cancel: &active.cancel,
+            },
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {
@@ -1612,32 +1704,231 @@ mod tests {
         assert_eq!(first.speaker_client_id, 1);
     }
 
-    /// 准入裁决的合成：命中即放行且独占与否由「命中点之后的活跃语音」决定，
+    /// 准入裁决的合成：命中即放行且独占与否由「命中块锚点之后的活跃语音」决定，
     /// 未命中时只由门窗口决定放行——这条语义决定「唤醒词+指令」是否立刻进 STT/LLM
     #[test]
     fn wake_verdict_combines_detection_and_window_state() {
-        // 命中、之后无活跃语音：播确认音，不进 STT/LLM
+        // 命中、锚点之后无活跃语音：播确认音，不进 STT/LLM
         let mut only_wake = WakeUtterance::default();
-        only_wake.note_detection();
+        only_wake.note_detection(1_280);
         let verdict = combine_wake_verdict(only_wake, false);
         assert!(verdict.open && verdict.detected && verdict.wakeword_only);
+        // 锚点与活跃毫秒随裁决带出，供确认音日志
+        assert_eq!(verdict.anchor_sample, Some(1_280));
+        assert_eq!(verdict.anchor_active_ms, 0);
 
         // 命中且随后有成段指令：正常对话（窗口查询结果不影响命中即放行）
         let mut command = WakeUtterance::default();
-        command.note_detection();
-        for _ in 0..10 {
-            command.note_frame(true, 20);
+        command.note_detection(0);
+        for index in 0..10 {
+            command.note_frame(index * 320, true, 20);
         }
         let verdict = combine_wake_verdict(command, false);
         assert!(verdict.open && verdict.detected && !verdict.wakeword_only);
+        // 10 帧 × 20ms = 200ms，恰好等于 `WAKE_ONLY_TAIL_MS`
+        assert_eq!(verdict.anchor_active_ms, 200);
 
         // 未命中但在窗口内：续说，正常对话
         let verdict = combine_wake_verdict(WakeUtterance::default(), true);
         assert!(verdict.open && !verdict.detected && !verdict.wakeword_only);
+        assert_eq!(verdict.anchor_sample, None);
 
         // 未命中且窗口已关：丢弃
         let verdict = combine_wake_verdict(WakeUtterance::default(), false);
         assert!(!verdict.open && !verdict.detected);
+    }
+
+    /// 锚点口径的端到端合成：命中块内、报告之前喂入的活跃帧被回补计入，
+    /// 「唤醒词 停」因此不再被判成唤醒词独占；命中块之后的静音帧不推高计数
+    #[test]
+    fn wake_verdict_backfills_the_hit_block_at_the_threshold_boundary() {
+        // 命中块 4 帧 = 80ms，报告帧是块的最后一帧（前 3 帧在报告之前已喂入）
+        let mut wake = WakeUtterance::default();
+        for index in 0..3 {
+            wake.note_frame(index * 320, true, 20);
+        }
+        wake.note_detection(0);
+        wake.note_frame(960, true, 20);
+        let verdict = combine_wake_verdict(wake.clone(), false);
+        assert!(verdict.detected && verdict.wakeword_only);
+        assert_eq!(verdict.anchor_active_ms, 80);
+        assert_eq!(verdict.utterance_start_sample, Some(0));
+
+        // 「停」再攒 6 帧 = 120ms，合计恰好 200ms：判为有命令，进 STT/LLM
+        let mut command = wake;
+        for index in 4..10 {
+            command.note_frame(index * 320, true, 20);
+        }
+        let verdict = combine_wake_verdict(command, false);
+        assert!(verdict.detected && !verdict.wakeword_only);
+        assert_eq!(verdict.anchor_active_ms, 200);
+
+        // 命中块结束后的 VAD 静音不把计数推过阈值；锚点仍可换算命中块序号
+        let mut silent = WakeUtterance::default();
+        silent.note_frame(0, true, 20);
+        silent.note_detection(1_280);
+        silent.note_frame(1_280, false, 20);
+        silent.note_frame(1_600, false, 20);
+        let verdict = combine_wake_verdict(silent, false);
+        assert!(verdict.wakeword_only);
+        assert_eq!(verdict.anchor_active_ms, 0);
+        assert_eq!(
+            verdict
+                .anchor_sample
+                .map(|sample| sample / WAKE_BLOCK_SAMPLES),
+            Some(1)
+        );
+    }
+
+    /// 同一 clid 两条产出回合：插话一次把两条都取消——LLM 取消令牌与 TTS 播放取消位都置位，
+    /// 且两条都从集合摘除。出站 FIFO 的先后由入队时刻决定，只挑最早准入的那条会留下
+    /// 仍在出声的回合，用户听到的回复继续播
+    #[test]
+    fn barge_in_cancels_every_producing_turn_of_one_clid() {
+        let turns = TurnRegistry::default();
+        let first = Arc::new(ActiveTurn::new());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = Arc::new(ActiveTurn::new());
+        let first_playback = first.playback_cancel();
+        let second_playback = second.playback_cancel();
+        turns.begin_turn(4, &first);
+        turns.begin_turn(4, &second);
+        first.mark_producing();
+        second.mark_producing();
+        assert_eq!(turns.producing_turns().len(), 2);
+
+        apply_barge_in(&turns, 9, turns.producing_turns(), "bob");
+
+        assert!(first.cancel.is_cancelled());
+        assert!(second.cancel.is_cancelled());
+        assert!(first_playback.load(Ordering::SeqCst));
+        assert!(second_playback.load(Ordering::SeqCst));
+        assert!(turns.producing_turns().is_empty());
+        assert!(turns.active(4).is_none());
+    }
+
+    /// 不同 clid 两条产出回合：一次插话全部取消；未产出的回合不受影响，
+    /// 仍在集合里等它自己进入产出（并被后续插话取消）
+    #[test]
+    fn barge_in_cancels_producing_turns_across_clids() {
+        let turns = TurnRegistry::default();
+        let speaker = Arc::new(ActiveTurn::new());
+        let other = Arc::new(ActiveTurn::new());
+        let idle = Arc::new(ActiveTurn::new());
+        let speaker_playback = speaker.playback_cancel();
+        let other_playback = other.playback_cancel();
+        turns.begin_turn(1, &speaker);
+        turns.begin_turn(2, &other);
+        turns.begin_turn(3, &idle);
+        speaker.mark_producing();
+        other.mark_producing();
+
+        apply_barge_in(&turns, 2, turns.producing_turns(), "carol");
+
+        assert!(speaker.cancel.is_cancelled());
+        assert!(other.cancel.is_cancelled());
+        assert!(speaker_playback.load(Ordering::SeqCst));
+        assert!(other_playback.load(Ordering::SeqCst));
+        assert!(turns.producing_turns().is_empty());
+        assert!(!idle.cancel.is_cancelled());
+        assert!(turns.active(3).is_some());
+    }
+
+    /// 插话后同 clid 的新回合仍可被取消，且不被上一条的陈旧摘除误删：
+    /// 取消按身份精确匹配，新条目接管该 clid 后照常进入产出
+    #[test]
+    fn barge_in_leaves_a_later_turn_of_the_same_clid_cancellable() {
+        let turns = TurnRegistry::default();
+        let first = Arc::new(ActiveTurn::new());
+        turns.begin_turn(7, &first);
+        first.mark_producing();
+        let stale = turns.producing_turns();
+        apply_barge_in(&turns, 8, stale, "dave");
+
+        let successor = Arc::new(ActiveTurn::new());
+        turns.begin_turn(7, &successor);
+        successor.mark_producing();
+        apply_barge_in(&turns, 8, turns.producing_turns(), "dave");
+
+        assert!(successor.cancel.is_cancelled());
+        assert!(successor.playback_cancel().load(Ordering::SeqCst));
+        assert!(turns.active(7).is_none());
+    }
+
+    /// 插话可用（唤醒门开启）时，新语音顶替同 clid 正在产出的旧回合：不取消也不摘除，
+    /// 留给用户喊唤醒词决定何时夺回话语权；旧回合仍留在集合里，后续插话找得到、取消得掉
+    #[test]
+    fn displaced_producing_turn_survives_while_barge_in_is_available() {
+        let turns = TurnRegistry::default();
+        let voice = Arc::new(ActiveTurn::new());
+        turns.begin_turn(5, &voice);
+        voice.mark_producing();
+        let playback = voice.playback_cancel();
+
+        let successor = Arc::new(ActiveTurn::new());
+        let displaced = turns.begin_turn(5, &successor);
+        cancel_displaced_turns(&turns, displaced, true);
+
+        assert!(!voice.cancel.is_cancelled());
+        assert!(!playback.load(Ordering::SeqCst));
+        let producing = turns.producing_turns();
+        assert_eq!(producing.len(), 1);
+        assert!(Arc::ptr_eq(&producing[0].1, &voice));
+        let latest = turns.active(5).expect("new turn is registered");
+        assert!(Arc::ptr_eq(&latest, &successor));
+
+        // 留下的旧回合确实还能被插话取消
+        apply_barge_in(&turns, 6, turns.producing_turns(), "erin");
+        assert!(voice.cancel.is_cancelled());
+        assert!(playback.load(Ordering::SeqCst));
+        assert!(turns.producing_turns().is_empty());
+        assert!(turns.active(5).is_some(), "successor stays registered");
+    }
+
+    /// 插话不可用（无唤醒词）时没有任何路径能取消产出中的回合：顶替它的语音准入就地取消
+    /// 并摘除，cancel 令牌与播放取消位都置位，不留无人可达的播放取消句柄；后继回合照常留下
+    #[test]
+    fn displaced_producing_turn_is_cancelled_without_a_barge_in_path() {
+        let turns = TurnRegistry::default();
+        let voice = Arc::new(ActiveTurn::new());
+        turns.begin_turn(5, &voice);
+        voice.mark_producing();
+        let playback = voice.playback_cancel();
+
+        let successor = Arc::new(ActiveTurn::new());
+        let displaced = turns.begin_turn(5, &successor);
+        cancel_displaced_turns(&turns, displaced, false);
+
+        assert!(voice.cancel.is_cancelled());
+        assert!(playback.load(Ordering::SeqCst));
+        assert!(turns.producing_turns().is_empty());
+        assert!(!turns.remove_turn(&voice), "cancelled turn was removed");
+        let registered = turns.active(5).expect("successor stays registered");
+        assert!(Arc::ptr_eq(&registered, &successor));
+        assert!(!successor.cancel.is_cancelled());
+    }
+
+    /// 尚未产出的旧回合两种配置下都取消并摘除：它不在「忙」的视野里，不取消会成为两条并发
+    /// LLM 回合；插话可用与否都不改变这条分工
+    #[test]
+    fn pending_displaced_turns_are_cancelled_with_or_without_barge_in() {
+        for barge_in_available in [true, false] {
+            let turns = TurnRegistry::default();
+            let pending = Arc::new(ActiveTurn::new());
+            turns.begin_turn(9, &pending);
+            let playback = pending.playback_cancel();
+            let successor = Arc::new(ActiveTurn::new());
+
+            let displaced = turns.begin_turn(9, &successor);
+            cancel_displaced_turns(&turns, displaced, barge_in_available);
+
+            assert!(!pending.is_producing());
+            assert!(pending.cancel.is_cancelled());
+            assert!(playback.load(Ordering::SeqCst));
+            assert!(!turns.remove_turn(&pending), "pending was removed");
+            let registered = turns.active(9).expect("successor stays registered");
+            assert!(Arc::ptr_eq(&registered, &successor));
+        }
     }
 
     #[tokio::test]

@@ -17,8 +17,9 @@ use crate::config::headless::HeadlessWakewordConfig;
 use crate::config::models_dir;
 
 pub use calibration::{calibration_stats, CalibrationStats, ScorePoint};
-pub use model::WakewordModels;
-use model::{Detection, WakewordModel, CHUNK_SIZE, DETECTION_THRESHOLD};
+use model::{Detection, WakewordModel, DETECTION_THRESHOLD};
+/// 对外暴露块长：下游（唤醒判据的回补窗口、命中块序号打点）必须与门内推理的块边界同源
+pub use model::{WakewordModels, CHUNK_SIZE};
 
 /// 唤醒门推理实现：生产为 OWW 推理，测试注入桩
 trait Detector: Send {
@@ -63,20 +64,25 @@ pub struct GateVerdict {
 
 /// 唤醒门单次裁决 + 打点数据。
 ///
-/// `fire_offset` 是命中块在本段输入 PCM 里的**起始采样偏移**——检测存在固有滞后
-/// （16 帧 embedding + 约 1s 平滑均值），命中位置落在唤醒词结束之后，所以它只作参考，
-/// 不是唤醒词末端；真正的边界由 `calibration` 的峰值标定或能量 gap 搜索决定。
+/// `fire_sample` 是命中块在该说话人喂入门的时间轴上的**绝对起始采样位置**（16k 单声道）。
+/// 检测滞后不是「约 1s 平滑均值」：`model::calculate_average` 只对已越阈的块求平均，
+/// 且需 ≥`MIN_POSITIVE_DETECTIONS` 个越阈块才返回非零，12 块缓冲只是约 0.96s 的回看环
+/// 且命中即清空，`NO_DETECTION_MS` 是不应期——三者都不产生秒级平滑滞后。
+/// 真正无法从门内几何推出的是原始分数相对唤醒词声学末端（`T_end`）的越阈位置与报告时刻
+/// （`T_rep`）之差，它由分类器与短语决定，可能落在词中段；因此 `WAKE_ONLY_TAIL_MS`
+/// 所依赖的滞后量必须实测，本字段只消掉**可论证的几何部分**：报告帧永远晚于命中块起点，
+/// 生产 320 采样帧下固定偏晚 `CHUNK_SIZE − 帧长 = 960` 采样（60ms）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct WakeEvent {
     pub verdict: GateVerdict,
-    /// 本次输入里命中块起点；`detected` 为真时恒为 Some
-    pub fire_offset: Option<usize>,
-    /// 最近 3s 分类器原始分数序列（绝对块序号 + 原始分数）
+    /// 命中块的绝对起始采样位置（该说话人累计喂入采样数）；`detected` 为真时恒为 Some
+    pub fire_sample: Option<usize>,
+    /// 最近 3.2s 分类器原始分数序列（`model::SCORE_HISTORY_SIZE` 块 × 80ms；绝对块序号 + 原始分数）
     pub calibration: CalibrationStats,
     /// 本段输入是否在既有开门窗口内（区分「窗口内续说」与「关门外新命中」）
     pub window_open_before_feed: bool,
-    /// 本次输入之前该说话人累计喂入的采样数：流式逐帧喂入时，
-    /// `fire_offset` 只在一帧内有意义，加它才是绝对命中位置
+    /// 本次输入之前该说话人累计喂入的采样数：也是本帧在门时间轴上的绝对起点，
+    /// 逐帧喂入时下游据此把每帧的 VAD 状态对齐到 `fire_sample` 的同一时间轴
     pub fed_samples_before: usize,
 }
 
@@ -134,7 +140,8 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 }
 
 /// 唤醒门：per-clid 实例池。命中即开门并刷新 `window` 窗口，窗口内持续喂模型允许续命中；
-/// 只有语音到达会创建/刷新会话状态，gRPC 解析在开门后才发生
+/// `feed`（语音到达）创建缺失的会话并刷新窗口，`refresh_window`（确认音）只刷新已存在会话的
+/// 窗口、不做推理也不新建，`window_state` 只读窗口状态（含空闲驱逐）；gRPC 解析在开门后才发生
 pub struct WakewordGate {
     window: Duration,
     /// 空闲驱逐阈值：`MIN_IDLE_EVICT_AFTER` 与 `window + IDLE_EVICT_MARGIN` 取大
@@ -185,9 +192,9 @@ impl WakewordGate {
         let window_open_before_feed = session
             .last_wake
             .is_some_and(|wake| now.duration_since(wake) < window);
-        // 本次输入开始前累积的余量：acc 里前 carry 个采样来自上一次 feed，
-        // 所以「已消耗采样数 − carry」才是本段输入里的偏移（可为负 → 钳到 0）。
-        // 必须在 extend 之前取，否则 carry 含进本次输入，偏移恒被钳成 0
+        // 本次输入开始前累积的余量：acc 前 carry 个采样来自上一次 feed，在本帧之前就已喂入，
+        // 所以块的绝对起点要从 fed_samples_before 往回退 carry 个采样。
+        // 必须在 extend 之前取，否则 carry 含进本次输入，回退量算错
         let carry = session.acc.len();
         let fed_samples_before = session.fed_samples;
         session
@@ -197,9 +204,13 @@ impl WakewordGate {
         let mut consumed = 0usize;
         let mut detected = false;
         let mut probability = 0.0f32;
-        let mut fire_offset = None;
+        let mut fire_sample = None;
         while session.acc.len() >= CHUNK_SIZE {
-            let chunk_start = consumed.saturating_sub(carry);
+            // 命中块的绝对起点 = acc[0] 的绝对位置（上次喂入后剩下的 carry 个采样起于
+            // fed_samples_before − carry；acc 只装已喂采样，故该差值恒不为负）+ 本次已排空的采样数。
+            // 旧实现只报「本帧内偏移」，命中块起点落在上一帧余量里时被钳成 0；
+            // 下游再加报告帧起点，绝对位置就系统性偏晚 carry（生产 320 采样帧下 960 采样 = 60ms）
+            let chunk_abs_start = fed_samples_before - carry + consumed;
             let chunk: Vec<f32> = session.acc.drain(..CHUNK_SIZE).collect();
             consumed += CHUNK_SIZE;
             let detection = session.detector.detect(chunk);
@@ -207,9 +218,9 @@ impl WakewordGate {
                 detected = true;
                 probability = detection.probability;
                 // 取本次输入里**最早**命中块的起点：后续块可能同样越阈，
-                // 若被覆盖，打点偏移会与真正触发的那一块错位
-                if fire_offset.is_none() {
-                    fire_offset = Some(chunk_start.min(pcm16.len()));
+                // 若被覆盖，锚点会与真正触发的那一块错位
+                if fire_sample.is_none() {
+                    fire_sample = Some(chunk_abs_start);
                 }
             }
         }
@@ -229,7 +240,7 @@ impl WakewordGate {
                 detected,
                 probability,
             },
-            fire_offset,
+            fire_sample,
             calibration,
             window_open_before_feed,
             fed_samples_before,
@@ -563,7 +574,8 @@ mod tests {
         );
     }
 
-    /// 逐帧喂入：`fire_offset` 只在一帧内有意义，`fed_samples_before` 提供绝对位置基准
+    /// 逐帧喂入：`fed_samples_before` 是本次输入的绝对起点，逐帧累计，
+    /// 下游用它把每帧的 VAD 状态对齐到 `fire_sample` 的时间轴
     #[test]
     fn fed_samples_before_accumulates_across_frames() {
         let mut gate = WakewordGate::with_factory(15, |_| {
@@ -583,12 +595,12 @@ mod tests {
         assert_eq!(third.fed_samples_before, 2_000);
         assert!(!third.verdict.detected);
 
-        // 第 3 块（绝对 2560..3840）在第四次喂入才凑齐：命中块的起点落在
-        // 上一次 feed 的余量里，偏移被钳到 0，绝对位置由 fed_samples_before 给出
+        // 第 3 块（绝对 2560..3840）在第四次喂入才凑齐，起点落在上一次 feed 的余量里：
+        // 本帧的绝对起点是 3_000，而命中块的绝对起点是 2_560
         let hit = gate.feed(1, &vec![0i16; 1_000], now);
         assert_eq!(hit.fed_samples_before, 3_000);
         assert!(hit.verdict.detected);
-        assert_eq!(hit.fire_offset, Some(0));
+        assert_eq!(hit.fire_sample, Some(2_560));
     }
 
     #[test]
@@ -611,13 +623,44 @@ mod tests {
         assert_eq!(*chunk_sizes.lock().expect("stub lock"), vec![CHUNK_SIZE]);
     }
 
-    /// 命中块偏移必须落在本次输入内，且等于真实位置。
-    /// 用 1700/2320/2437 三种非整块宽度交叉喂入（余量每轮落点不同），
-    /// 命中块 N 的真实起点 = (N−1)×CHUNK_SIZE，减去「命中前已喂入」再钳到本次输入内。
+    /// 生产帧长 320 采样（20ms）时，一块只在 `carry = 960` 的那一帧凑满：
+    /// 命中块的绝对起点必须回到块首，而不是报告帧起点。旧口径只报帧内偏移（恒被钳成 0），
+    /// 下游再加报告帧起点，绝对位置就固定偏晚 960 采样（60ms）
     #[test]
-    fn fire_offset_is_relative_to_the_current_input() {
+    fn fire_sample_is_the_absolute_hit_block_start_for_320_sample_frames() {
+        for fire_block in [1usize, 2, 5] {
+            let mut gate = WakewordGate::with_factory(15, move |_| {
+                Box::new(NthBlockStub {
+                    seen: 0,
+                    fire_after_blocks: fire_block,
+                })
+            });
+            let now = Instant::now();
+            let hit = (0..4 * fire_block)
+                .map(|_| gate.feed(1, &[0i16; 320], now))
+                .find(|event| event.verdict.detected)
+                .expect("320 采样帧下第 N 块恰在第 4N 帧凑满");
+
+            let block_start = (fire_block - 1) * CHUNK_SIZE;
+            assert_eq!(hit.fire_sample, Some(block_start));
+            // 报告帧起点比命中块首晚 carry = CHUNK_SIZE − 320 = 960 采样；
+            // 旧口径（报告帧起点 + 帧内偏移）正是差在这一段
+            assert_eq!(hit.fed_samples_before, fire_block * CHUNK_SIZE - 320);
+            assert_eq!(
+                hit.fed_samples_before - hit.fire_sample.expect("fire sample"),
+                960,
+                "固定误差就是这一帧携带的余量"
+            );
+            assert!(!hit.window_open_before_feed);
+        }
+    }
+
+    /// 换任意帧长喂入，命中块绝对起点恒为 (N−1)×CHUNK_SIZE：块边界只由喂入的采样总数决定，
+    /// 与切帧方式无关（旧口径只能报帧内偏移，跨帧时无法还原这个位置）
+    #[test]
+    fn fire_sample_is_absolute_regardless_of_frame_length() {
         for fire_block in [3usize, 5, 8] {
-            for feed_len in [1700usize, 2320, 2437] {
+            for feed_len in [320usize, 1700, 2320, 2437] {
                 let mut gate = WakewordGate::with_factory(15, move |_| {
                     Box::new(NthBlockStub {
                         seen: 0,
@@ -625,30 +668,22 @@ mod tests {
                     })
                 });
                 let now = Instant::now();
-                let mut fed_before_call = 0usize;
 
-                let event = (0..16)
+                let hit = (0..64)
                     .find_map(|_| {
                         let event = gate.feed(1, &vec![0i16; feed_len], now);
-                        let fed = fed_before_call;
-                        fed_before_call += feed_len;
-                        event.verdict.detected.then_some((event, fed))
+                        event.verdict.detected.then_some(event)
                     })
                     .unwrap_or_else(|| {
                         panic!("block {fire_block} must fire with feed_len {feed_len}")
                     });
 
-                let (event, fed) = event;
-                let block_start = (fire_block - 1) * CHUNK_SIZE;
-                let expected = block_start.saturating_sub(fed).min(feed_len);
                 assert_eq!(
-                    event.fire_offset,
-                    Some(expected),
-                    "fire_block={fire_block} feed_len={feed_len} fed={fed}"
+                    hit.fire_sample,
+                    Some((fire_block - 1) * CHUNK_SIZE),
+                    "fire_block={fire_block} feed_len={feed_len}"
                 );
-                // 偏移不可能落在尚未喂入的数据上
-                assert!(event.fire_offset.expect("fire offset") < feed_len);
-                assert!(!event.window_open_before_feed);
+                assert!(!hit.window_open_before_feed);
             }
         }
     }

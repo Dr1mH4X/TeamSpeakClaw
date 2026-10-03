@@ -16,9 +16,9 @@ use super::calibration::ScorePoint;
 
 /// 上游 OWW 音频块：1280 采样 = 80ms @ 16kHz
 pub const CHUNK_SIZE: usize = 1280;
-/// 检测平滑窗：12 次检测约 1 秒
+/// 越阈块的回看环：约 0.96s，只供 `calculate_average` 统计越阈块数；命中即清空，不做平滑
 const DETECTION_BUFFER_SIZE: usize = 12;
-/// 平滑均值触发所需的最小正检次数
+/// `calculate_average` 返回非零所需的最小越阈块数（达到后均值恒大于阈值）
 const MIN_POSITIVE_DETECTIONS: f32 = 2.0;
 /// 分类器命中阈值：固定值，不随配置变化
 pub const DETECTION_THRESHOLD: f32 = 0.3;
@@ -219,6 +219,8 @@ impl WakewordModel {
             return 0.0;
         }
         let avg = cumulative / positive_count;
+        // 参与平均的都是 > DETECTION_THRESHOLD 的块，avg 恒大于阈值；
+        // else 分支不可达（沿上游实现保留）。所以触发只取决于「越阈块数 ≥ 2」这一几何条件
         if avg > DETECTION_THRESHOLD {
             avg
         } else {
