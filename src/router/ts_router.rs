@@ -9,8 +9,8 @@ use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{
-    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink,
-    UnifiedInboundEvent,
+    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession,
+    TurnSink, UnifiedInboundEvent,
 };
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
@@ -85,6 +85,19 @@ impl EventRouter {
             {
                 TsEvent::TextMessage(msg) => {
                     let this = self.clone();
+                    // 同步门先过：不需要 LLM 回合的事件不占容量、不排队等会话锁
+                    let Some(unified_event) = precheck_text_turn(
+                        &this.config,
+                        &this.llm,
+                        this.adapter.get_bot_clid(),
+                        this.voice_bridge_state.is_ready(),
+                        &msg,
+                    ) else {
+                        continue;
+                    };
+                    let source = SessionSource::TeamSpeak {
+                        uid: msg.invoker_uid.clone(),
+                    };
                     let Ok(permit) = TurnPermit::reserve(&this.llm) else {
                         warn!(
                             invoker = %msg.invoker_name,
@@ -92,8 +105,10 @@ impl EventRouter {
                         );
                         continue;
                     };
+                    let ticket = this.llm.enqueue_turn_ticket(&source);
                     tasks.spawn(async move {
-                        this.handle_message(msg, permit).await;
+                        let session = permit.acquire_session(&this.llm, &source, ticket).await;
+                        this.handle_message(msg, unified_event, session).await;
                     });
                 }
                 TsEvent::Disconnected => {
@@ -144,29 +159,12 @@ impl EventRouter {
         }
     }
 
-    async fn handle_message(&self, event: TextMessageEvent, permit: TurnPermit) {
-        if event.invoker_id == self.adapter.get_bot_clid() {
-            return;
-        }
-        if self.config.is_music_bot_name(&event.invoker_name) {
-            return;
-        }
-
-        // 订阅流健康时才由 voice_router 接管文本。
-        if should_route_text_through_bridge(
-            voice_features_enabled(&self.config),
-            self.voice_bridge_state.is_ready(),
-        ) {
-            return;
-        }
-
-        let Some(unified_event) = UnifiedInboundEvent::from_ts(&event, &self.config) else {
-            return;
-        };
-        if !unified_event.should_trigger_llm {
-            return;
-        }
-
+    async fn handle_message(
+        &self,
+        event: TextMessageEvent,
+        unified_event: UnifiedInboundEvent,
+        session: TurnSession,
+    ) {
         let ReplyPolicy::TeamSpeak {
             target_mode: reply_mode,
             target: reply_target,
@@ -200,10 +198,6 @@ impl EventRouter {
         let source = SessionSource::TeamSpeak {
             uid: event.invoker_uid.clone(),
         };
-        if let Err(error) = self.llm.check_user_text_bounds(msg_content) {
-            warn!(error = %error, "TS message dropped for exceeding size limit");
-            return;
-        }
         let system_prompt = self.prompts.system.content.as_str();
 
         let (online_clients, invoker_channel) =
@@ -252,7 +246,7 @@ Online: {}"#,
         };
         match request
             .run(
-                permit,
+                session,
                 || {
                     UnifiedExecutionContext::for_ts(
                         TsCaller {
@@ -278,6 +272,44 @@ Online: {}"#,
             _ => {}
         }
     }
+}
+
+/// 回合准入前的同步门：bot 自身与音乐 bot 的消息、交给语音桥的文本、
+/// 不触发 LLM 的文本、超限文本都在这里返回 `None`。
+///
+/// 必须在容量占位与会话排队之前调用：这些消息不需要回合，若先进队列，
+/// 会在等同会话锁期间占着全局容量（容量 4，含等待中的回合），
+/// 把别处会话的有效消息挤成「queue full」。
+///
+/// 返回的 `UnifiedInboundEvent` 直接交给回合使用，触发判定与文本剥离只算一次。
+fn precheck_text_turn(
+    config: &AppConfig,
+    llm: &LlmEngine,
+    bot_clid: u32,
+    bridge_ready: bool,
+    event: &TextMessageEvent,
+) -> Option<UnifiedInboundEvent> {
+    if event.invoker_id == bot_clid {
+        return None;
+    }
+    if config.is_music_bot_name(&event.invoker_name) {
+        return None;
+    }
+
+    // 订阅流健康时才由 voice_router 接管文本。
+    if should_route_text_through_bridge(voice_features_enabled(config), bridge_ready) {
+        return None;
+    }
+
+    let unified_event = UnifiedInboundEvent::from_ts(event, config)?;
+    if !unified_event.should_trigger_llm {
+        return None;
+    }
+    if let Err(error) = llm.check_user_text_bounds(&unified_event.text) {
+        warn!(error = %error, "TS message dropped for exceeding size limit");
+        return None;
+    }
+    Some(unified_event)
 }
 
 /// TS 文本回复落点：回复目标由事件触发策略解析后固定
@@ -330,8 +362,11 @@ async fn receive_ts_event(
 
 #[cfg(test)]
 mod tests {
-    use super::receive_ts_event;
+    use super::{precheck_text_turn, receive_ts_event};
     use crate::adapter::headless::{TextMessageEvent, TextMessageTarget, TsEvent};
+    use crate::config::AppConfig;
+    use crate::llm::LlmEngine;
+    use std::sync::Arc;
     use tokio::sync::{broadcast, watch};
 
     fn text_event(sequence: u32) -> TsEvent {
@@ -343,6 +378,104 @@ mod tests {
             invoker_groups: Vec::new(),
             message: "test".to_string(),
         })
+    }
+
+    /// 私聊触发、频道必须命中前缀的配置，便于构造「不需要回合」的输入
+    fn review_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.bot.trigger_prefixes = vec!["!bot".to_string()];
+        config.bot.respond_to_private = true;
+        // 语音特性显式关掉：`voice_replay.enabled` 默认是开的，否则 bridge 就绪就会接管文本
+        config.voice_replay.enabled = false;
+        config
+    }
+
+    fn channel_event(message: &str) -> TextMessageEvent {
+        TextMessageEvent {
+            target_mode: TextMessageTarget::Channel,
+            invoker_name: "someone".to_string(),
+            invoker_uid: "uid-someone".to_string(),
+            invoker_id: 7,
+            invoker_groups: Vec::new(),
+            message: message.to_string(),
+        }
+    }
+
+    fn engine() -> LlmEngine {
+        LlmEngine::new(Arc::new(AppConfig::default()))
+            .expect("engine builds without a network call")
+    }
+
+    /// 触发文本：预检把剥离后的文本交出去，回合不必再算一遍
+    #[test]
+    fn precheck_returns_the_stripped_text_for_a_triggering_message() {
+        let config = review_config();
+        let llm = engine();
+        let event = channel_event("!bot  hello");
+
+        let unified = precheck_text_turn(&config, &llm, 1, false, &event)
+            .expect("a triggering message must be admitted");
+
+        assert_eq!(unified.text, "hello");
+        assert!(unified.should_trigger_llm);
+    }
+
+    /// 不需要回合的四类消息都在排队之前被丢掉
+    #[test]
+    fn precheck_rejects_messages_that_need_no_turn() {
+        let config = review_config();
+        let llm = engine();
+
+        assert!(
+            precheck_text_turn(&config, &llm, 7, false, &channel_event("!bot hello")).is_none(),
+            "the bot's own client id must be ignored"
+        );
+
+        let mut music_config = review_config();
+        music_config.music_backend = Some(crate::config::MusicBackendConfig {
+            backend: "ts3audiobot".to_string(),
+            base_url: String::new(),
+            musicbot_name: "MusicBot".to_string(),
+        });
+        let music_event = TextMessageEvent {
+            invoker_name: "MusicBot".to_string(),
+            ..channel_event("!bot hello")
+        };
+        assert!(
+            precheck_text_turn(&music_config, &llm, 1, false, &music_event).is_none(),
+            "the music bot must be ignored"
+        );
+
+        let mut voice_config = review_config();
+        voice_config.headless.stt.enabled = true;
+        assert!(
+            precheck_text_turn(&voice_config, &llm, 1, true, &channel_event("!bot hello"))
+                .is_none(),
+            "text must go to the voice bridge once it is ready"
+        );
+
+        assert!(
+            precheck_text_turn(&config, &llm, 1, false, &channel_event("no prefix")).is_none(),
+            "a channel message without the trigger prefix must not queue"
+        );
+
+        let oversized = channel_event(&format!(
+            "!bot {}",
+            "x".repeat(crate::llm::engine::MAX_USER_TEXT_BYTES + 1)
+        ));
+        assert!(
+            precheck_text_turn(&config, &llm, 1, false, &oversized).is_none(),
+            "an oversized message must be dropped before queueing"
+        );
+    }
+
+    /// 语音特性未开启时 bridge 就绪也仍由 EventRouter 处理
+    #[test]
+    fn precheck_keeps_text_when_voice_features_are_off() {
+        let config = review_config();
+        let llm = engine();
+
+        assert!(precheck_text_turn(&config, &llm, 1, true, &channel_event("!bot hello")).is_some());
     }
 
     #[tokio::test]

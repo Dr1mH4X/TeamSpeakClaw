@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{oneshot, Mutex as AsyncMutex, OwnedMutexGuard};
 
 /// 会话来源
 #[derive(Debug, Clone)]
@@ -58,9 +58,58 @@ impl std::fmt::Debug for TurnSessionGuard {
     }
 }
 
-/// 为每个规范会话键提供独立的串行锁，并限制总排队/执行容量
+/// 每会话「到达顺序链」的清扫阈值。
+///
+/// 链上每个会话留一个条目（最后一条回合的完成信号接收端），会话数没有上限
+/// （NapCat 用户 id 可以一直新增），超过阈值时扫掉已经完成的条目。
+const SESSION_CHAIN_SWEEP_THRESHOLD: usize = 1024;
+
+/// 同会话到达顺序票据：在单一到达点（事件循环）同步登记，任务里先等前一条回合结束再取会话锁。
+///
+/// 为什么需要它：会话锁的先后由「任务被调度执行的顺序」决定，而不是消息到达顺序。
+/// 两条消息在同一批事件里被连续 spawn 时，后一条可能先被 poll、先拿到锁，
+/// 回复与历史随之反序。票据在到达点同步生成，链的顺序就是到达顺序，
+/// 取锁顺序不再依赖调度器。
+pub(crate) struct TurnTicket {
+    /// 前一条同会话回合的完成信号
+    wait: Option<oneshot::Receiver<()>>,
+    /// 本条回合结束时用来放行后继者，随票据一起释放
+    notify: Option<oneshot::Sender<()>>,
+}
+
+impl TurnTicket {
+    /// 等前一条同会话回合结束；链上无人、或前一条的回合任务已被丢弃时立即返回。
+    /// 消费并归还票据：调用点拿到的是「已经轮到我」的同一张票据，仍要持有到回合结束。
+    pub(crate) async fn wait_for_predecessor(mut self) -> Self {
+        if let Some(wait) = self.wait.take() {
+            // 前一条任务被丢弃时发送端随之消失，返回 Err 同样表示「前面没人挡着」
+            let _ = wait.await;
+        }
+        self
+    }
+}
+
+impl Drop for TurnTicket {
+    /// 回合结束（回复落库之后）放行后继者：持有者是 `TurnSession`，释放顺序即回合结束顺序。
+    fn drop(&mut self) {
+        if let Some(notify) = self.notify.take() {
+            let _ = notify.send(());
+        }
+    }
+}
+
+impl std::fmt::Debug for TurnTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnTicket")
+    }
+}
+
+/// 为每个规范会话键提供独立的串行锁与到达顺序链，并限制总排队/执行容量
 pub(crate) struct TurnCoordinator {
     locks: AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    /// 每会话链的尾端：存最后一条票据的完成信号接收端，下一条到达时取走它去等。
+    /// 同步锁只在这一个方法里短暂持有，不跨 await。
+    chain: Mutex<HashMap<String, oneshot::Receiver<()>>>,
     capacity: Arc<tokio::sync::Semaphore>,
 }
 
@@ -69,7 +118,27 @@ impl TurnCoordinator {
     pub(crate) fn new(total_capacity: usize) -> Self {
         Self {
             locks: AsyncMutex::new(HashMap::new()),
+            chain: Mutex::new(HashMap::new()),
             capacity: Arc::new(tokio::sync::Semaphore::new(total_capacity)),
+        }
+    }
+
+    /// 同步登记到达顺序，返回的票据要持有到回合结束（放在 `TurnSession` 里）。
+    /// 供事件循环调用：不加 await，循环不会被回合阻塞。
+    pub(crate) fn enqueue_ticket(&self, source: &SessionSource) -> TurnTicket {
+        let (notify, wait) = oneshot::channel();
+        let mut chain = self.chain.lock().expect("session chain poisoned");
+        if chain.len() >= SESSION_CHAIN_SWEEP_THRESHOLD {
+            // 已完成的条目没有后继者来取走，只能在这里扫；仍在等的条目保留
+            // （Empty = 前一条回合还没结束）
+            chain.retain(|_, wait| {
+                matches!(wait.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+            });
+        }
+        let previous = chain.insert(source.canonical_key(), wait);
+        TurnTicket {
+            wait: previous,
+            notify: Some(notify),
         }
     }
 
@@ -470,6 +539,7 @@ fn drop_global_excess_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Poll;
     use std::time::Duration;
 
     fn turn(value: usize) -> ContextTurn {
@@ -831,6 +901,95 @@ mod tests {
             .expect("same-session waiter must continue after the first turn")
             .expect("same-session waiter task must succeed");
         drop(second_guard);
+    }
+
+    /// 到达顺序链：票据按登记顺序逐个放行，与「哪个任务先被调度」无关
+    #[tokio::test]
+    async fn tickets_admit_same_session_turns_in_arrival_order() {
+        let coordinator = TurnCoordinator::new(8);
+        let source = SessionSource::TeamSpeak {
+            uid: "ordered".to_string(),
+        };
+        let first = coordinator.enqueue_ticket(&source);
+        let second = coordinator.enqueue_ticket(&source);
+        let third = coordinator.enqueue_ticket(&source);
+
+        let mut second_wait = Box::pin(second.wait_for_predecessor());
+        let mut third_wait = Box::pin(third.wait_for_predecessor());
+        assert!(futures_util::poll!(&mut second_wait).is_pending());
+        assert!(futures_util::poll!(&mut third_wait).is_pending());
+
+        drop(first);
+        let Poll::Ready(second) = futures_util::poll!(&mut second_wait) else {
+            panic!("first ticket released; the second must be admitted");
+        };
+        assert!(
+            futures_util::poll!(&mut third_wait).is_pending(),
+            "the third must still wait for the second"
+        );
+
+        drop(second);
+        let Poll::Ready(third) = futures_util::poll!(&mut third_wait) else {
+            panic!("second ticket released; the third must be admitted");
+        };
+        drop(third);
+    }
+
+    /// 只有同会话的票据互相排队；别的会话不用等
+    #[tokio::test]
+    async fn tickets_of_other_sessions_do_not_wait() {
+        let coordinator = TurnCoordinator::new(8);
+        let _first = coordinator.enqueue_ticket(&SessionSource::TeamSpeak {
+            uid: "owner".to_string(),
+        });
+        let other = coordinator.enqueue_ticket(&SessionSource::TeamSpeak {
+            uid: "other".to_string(),
+        });
+
+        assert!(futures_util::poll!(Box::pin(other.wait_for_predecessor())).is_ready());
+    }
+
+    /// 前一条已经结束（票据已释放）：新到的票据立即放行
+    #[tokio::test]
+    async fn a_ticket_whose_predecessor_already_finished_does_not_wait() {
+        let coordinator = TurnCoordinator::new(8);
+        let source = SessionSource::NapCatPrivate { user_id: 7 };
+        drop(coordinator.enqueue_ticket(&source));
+
+        let next = coordinator.enqueue_ticket(&source);
+        assert!(futures_util::poll!(Box::pin(next.wait_for_predecessor())).is_ready());
+    }
+
+    /// 链上留着每个会话的尾端条目；达到阈值时扫掉已完成的，仍在等的保留
+    #[test]
+    fn finished_chain_entries_are_swept_once_the_threshold_is_crossed() {
+        let coordinator = TurnCoordinator::new(8);
+        let live_source = SessionSource::TeamSpeak {
+            uid: "still-running".to_string(),
+        };
+        let _live = coordinator.enqueue_ticket(&live_source);
+
+        for index in 0..(SESSION_CHAIN_SWEEP_THRESHOLD - 1) {
+            let source = SessionSource::NapCatPrivate {
+                user_id: index as i64,
+            };
+            drop(coordinator.enqueue_ticket(&source));
+        }
+        assert_eq!(
+            coordinator.chain.lock().unwrap().len(),
+            SESSION_CHAIN_SWEEP_THRESHOLD
+        );
+
+        let next = coordinator.enqueue_ticket(&SessionSource::NapCatPrivate { user_id: -1 });
+        let chain = coordinator.chain.lock().unwrap();
+        assert_eq!(
+            chain.len(),
+            2,
+            "only the running entry and the new one remain"
+        );
+        assert!(chain.contains_key(&live_source.canonical_key()));
+        drop(chain);
+        drop(next);
     }
 
     #[tokio::test]
