@@ -254,7 +254,7 @@ fn spawn_directory_refresher(
                         break;
                     }
                 }
-                Err(e) => warn!("刷新 TeamSpeak 客户端目录失败: {e}"),
+                Err(e) => warn!("refresh client directory failed: {e}"),
             }
         }
     });
@@ -279,14 +279,14 @@ pub async fn ts3_actor(
             let target_mode = match msg.target_mode {
                 1..=3 => msg.target_mode,
                 mode => {
-                    warn!(mode, "忽略未知类型的 TeamSpeak 文本消息");
+                    warn!(mode, "ignoring text message with unknown target mode");
                     return;
                 }
             };
             let Ok(invoker_client_id) = u32::try_from(msg.invoker_id) else {
                 warn!(
                     invoker_client_id = msg.invoker_id,
-                    "忽略调用者 ID 无效的 TeamSpeak 文本消息"
+                    "ignoring text message with invalid invoker id"
                 );
                 return;
             };
@@ -321,7 +321,7 @@ pub async fn ts3_actor(
                 &dir_seq,
             );
         }
-        Err(e) => warn!("初始化 TeamSpeak 客户端目录失败: {e}"),
+        Err(e) => warn!("init client directory failed: {e}"),
     }
     spawn_directory_refresher(
         client.clone(),
@@ -366,7 +366,7 @@ pub async fn ts3_actor(
             let Ok(from_client_id) = u32::try_from(vd.client_id) else {
                 warn!(
                     client_id = vd.client_id,
-                    "忽略调用者 ID 无效的 TeamSpeak 音频帧"
+                    "ignoring audio frame with invalid client id"
                 );
                 return;
             };

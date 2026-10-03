@@ -1,11 +1,11 @@
 # 贡献指南
 
-欢迎贡献。本文件不重复项目约定：贡献前请阅读本仓库指导文件，动手前读完与本次改动相关的那几篇。文档索引见 [docs/README.md](docs/README.md)，分层归属与写作规则见 [docs/AGENTS.md](docs/AGENTS.md)。
+欢迎贡献。本文件不重复项目约定：贡献前请阅读本仓库指导文件，动手前读完与本次改动相关的那几篇。文档索引、分层归属与写作规则见 [docs/AGENTS.md](docs/AGENTS.md)。
 
 ## 起步
 
 - 全局 standing orders：[AGENTS.md](AGENTS.md)
-- 开发者文档索引：[docs/README.md](docs/README.md)
+- 开发者文档索引：[docs/AGENTS.md](docs/AGENTS.md)
 - 文档写法与归属：[docs/AGENTS.md](docs/AGENTS.md)
 
 ## 改什么先读什么
@@ -17,7 +17,7 @@
 | 测试与提交前质量门 | [docs/testing.md](docs/testing.md)、[docs/ci-cd.md](docs/ci-cd.md) |
 | 架构、生命周期、并发、音频/语音桥、重连等非平凡变更 | [docs/defensive-patterns.md](docs/defensive-patterns.md)、[docs/agent-notes.md](docs/agent-notes.md) |
 | 新增或修改 `docs/` | [docs/AGENTS.md](docs/AGENTS.md) |
-| 源码模块内规则 | 对应模块的 `.instructions.md` |
+| 模块内规则 | 对应目录的 `AGENTS.md`，如 `src/config/AGENTS.md`、`website/AGENTS.md` |
 | 面向最终用户的文档 | `website/` |
 
 ## 提交

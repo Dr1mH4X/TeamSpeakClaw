@@ -14,6 +14,7 @@ use crate::skills::{NcCaller, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 struct NcInboundText {
@@ -369,6 +370,7 @@ impl NcRouter {
             |llm| llm.build_messages(&source, system_prompt, &user_ctx, user_msg),
             &allowed_skills,
             None,
+            &CancellationToken::new(),
             || {
                 UnifiedExecutionContext::for_nc(
                     NcCaller {

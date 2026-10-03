@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
     let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
+    cfg.log_voice_input_conflicts();
 
     let config = Arc::new(cfg);
     let gate = Arc::new(PermissionGate::new(acl_config));

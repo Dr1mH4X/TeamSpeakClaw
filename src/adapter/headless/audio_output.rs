@@ -1,6 +1,6 @@
 //! 统一音频出站：FIFO 队列 + 消费者任务，唯一持有 `ts3_audio_tx` 写端。
 //! 所有 job 的 deadline 自消费者 dequeue 时起算，不从 enqueue 起算。
-//! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完。
+//! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完；`finish_drained` 额外等待本会话 job 收尾。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -220,6 +220,20 @@ impl TtsSession {
         self.done_rx = None;
         Ok(())
     }
+
+    /// 关闭段通道并等待消费者播完已入队内容：本会话 job 结束时返回，取消/失败同样收尾
+    pub async fn finish_drained(mut self) -> Result<()> {
+        self.finished = true;
+        self.segment_tx = None;
+        match self.done_rx.take() {
+            Some(done_rx) => match done_rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(anyhow!(error)),
+                Err(_) => Err(anyhow!("tts session job dropped")),
+            },
+            None => Ok(()),
+        }
+    }
 }
 
 impl Drop for TtsSession {
@@ -281,15 +295,44 @@ impl AudioOutput {
     }
 
     pub fn enqueue_pcm_clip(&self, pcm: PcmClipPayload) -> Result<ClipHandle> {
-        pcm_payload_duration(&pcm)?;
         let cancel = Arc::new(AtomicBool::new(false));
+        self.enqueue_clip_job(pcm, cancel, true)
+    }
+
+    /// 用调用方提供的取消位入队 PCM 片段：回合持有的播放取消位（插话、中断）同时作用于该片段。
+    ///
+    /// 这类片段不登记进 `stop_clips` 的集合——那批取消位属于技能片段，
+    /// 把本片段的取消位登记进去等于让「停止播放」连带取消本回合的 TTS 播放。
+    pub fn enqueue_pcm_clip_with_cancel(
+        &self,
+        pcm: PcmClipPayload,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<ClipHandle> {
+        self.enqueue_clip_job(pcm, cancel, false)
+    }
+
+    fn enqueue_clip_job(
+        &self,
+        pcm: PcmClipPayload,
+        cancel: Arc<AtomicBool>,
+        skill_scoped: bool,
+    ) -> Result<ClipHandle> {
+        pcm_payload_duration(&pcm)?;
         let cancel_for_job = cancel.clone();
         let (done_tx, done_rx) = oneshot::channel();
         let status = &self.inner.status;
         status.enqueue_job(&self.inner.job_tx, |cancel_id| {
-            status.register_clip_cancel(cancel_id, cancel_for_job.clone());
+            if skill_scoped {
+                status.register_clip_cancel(cancel_id, cancel_for_job.clone());
+            }
             AudioJob::PcmClip {
-                source: JobSource::SkillClip,
+                // 非 skill_scoped 的片段来自回合（反馈音等）而非技能：它不登记进
+                // `stop_clips` 的取消集合，`JobSource` 只影响状态展示与编码流超时，故沿用 `Tts`
+                source: if skill_scoped {
+                    JobSource::SkillClip
+                } else {
+                    JobSource::Tts
+                },
                 payload: pcm,
                 cancel: cancel_for_job,
                 done: done_tx,
@@ -304,13 +347,26 @@ impl AudioOutput {
 
     /// open 即占 FIFO 槽；占位等待不消耗该 job 的 deadline
     pub async fn open_tts_session(&self) -> Result<TtsSession> {
-        self.open_encoded_session(JobSource::Tts).await
+        self.open_encoded_session(JobSource::Tts, Arc::new(AtomicBool::new(false)))
+            .await
     }
 
-    async fn open_encoded_session(&self, source: JobSource) -> Result<TtsSession> {
+    /// 用调用方提供的取消位开 TTS 会话：一轮对话里可以有多条流（工具轮 + 最终回复），
+    /// 它们共用回合持有的同一个取消位，插话时一次全停
+    pub async fn open_tts_session_with_cancel(
+        &self,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<TtsSession> {
+        self.open_encoded_session(JobSource::Tts, cancel).await
+    }
+
+    async fn open_encoded_session(
+        &self,
+        source: JobSource,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<TtsSession> {
         let (segment_tx, segment_rx) = mpsc::channel(TTS_SEGMENT_CAPACITY);
         let (done_tx, done_rx) = oneshot::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_job = cancel.clone();
         self.inner
             .status
@@ -330,7 +386,9 @@ impl AudioOutput {
 
     /// 外部一次性媒体：段入队即返回，不等待播完
     pub async fn play_encoded_media(&self, payload: Vec<u8>, codec: &str) -> Result<()> {
-        let mut session = self.open_encoded_session(JobSource::External).await?;
+        let mut session = self
+            .open_encoded_session(JobSource::External, Arc::new(AtomicBool::new(false)))
+            .await?;
         let codec = if codec.is_empty() {
             detect_audio_format(&payload).to_string()
         } else {
@@ -340,34 +398,13 @@ impl AudioOutput {
         session.finish().await
     }
 
-    /// 外部一次性媒体同步确认：等待消费者 job 结束；仅供短音频/自检，长 TTS 勿用
+    /// 外部一次性媒体同步确认：等待消费者播完；仅供短音频/自检，长 TTS 勿用
     pub async fn play_encoded_media_wait(&self, payload: Vec<u8>, codec: &str) -> Result<()> {
-        let (segment_tx, segment_rx) = mpsc::channel(2);
-        let (done_tx, done_rx) = oneshot::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let codec = if codec.is_empty() {
-            detect_audio_format(&payload).to_string()
-        } else {
-            codec.to_string()
-        };
-        segment_tx
-            .send(EncodedSegment { payload, codec })
-            .await
-            .map_err(|_| anyhow!("encoded media segment channel closed"))?;
-        drop(segment_tx);
-        self.inner
-            .status
-            .enqueue_job(&self.inner.job_tx, |_| AudioJob::EncodedStream {
-                source: JobSource::External,
-                segment_rx,
-                cancel,
-                done: done_tx,
-            })?;
-        match done_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(anyhow!(error)),
-            Err(_) => Err(anyhow!("encoded media job dropped")),
-        }
+        let mut session = self
+            .open_encoded_session(JobSource::External, Arc::new(AtomicBool::new(false)))
+            .await?;
+        session.push_encoded(payload, codec).await?;
+        session.finish_drained().await
     }
 
     /// 级联取消全部仍在队列/播放中的 SkillClip
@@ -560,7 +597,11 @@ async fn play_encoded_stream(
                         ));
                     }
                     // 段处理期间也强制总截止时间，避免超大 payload 拖穿 MAX_JOB_SECS
-                    match timeout(remaining, process_encoded_segment(&segment, ts3_audio_tx)).await
+                    match timeout(
+                        remaining,
+                        process_encoded_segment(&segment, cancel, ts3_audio_tx),
+                    )
+                    .await
                     {
                         Ok(result) => result?,
                         Err(_) => {
@@ -570,7 +611,7 @@ async fn play_encoded_stream(
                         }
                     }
                 }
-                None => process_encoded_segment(&segment, ts3_audio_tx).await?,
+                None => process_encoded_segment(&segment, cancel, ts3_audio_tx).await?,
             }
         }
         let recv_timeout = match total_deadline {
@@ -615,26 +656,21 @@ impl Drop for ChildKillOnDrop {
     }
 }
 
-async fn process_encoded_segment(
-    segment: &EncodedSegment,
-    ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
-) -> Result<()> {
-    let input_format = if segment.codec.eq_ignore_ascii_case("wav") {
-        "wav"
-    } else if segment.codec.eq_ignore_ascii_case("mp3") || segment.codec.is_empty() {
-        detect_audio_format(&segment.payload)
-    } else if segment.codec.starts_with("warmup-probe") {
-        debug!(
-            codec = %segment.codec,
-            "audio output warmup probe skipped (expected)"
-        );
-        return Ok(());
+/// 解码输入格式：wav 直给，mp3/空 codec 按文件头探测；其余 codec 不受支持
+fn encoded_input_format(payload: &[u8], codec: &str) -> Option<&'static str> {
+    if codec.eq_ignore_ascii_case("wav") {
+        Some("wav")
+    } else if codec.eq_ignore_ascii_case("mp3") || codec.is_empty() {
+        Some(detect_audio_format(payload))
     } else {
-        warn!("unsupported encoded codec: {}, skipping", segment.codec);
-        return Ok(());
-    };
+        None
+    }
+}
 
-    let child = tokio::process::Command::new("ffmpeg")
+/// 统一的解码命令：任意输入 → 48k 立体声 s16le，走 stdin/stdout 管道
+fn ffmpeg_decode_to_s16le(input_format: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
         .arg("-nostdin")
         .arg("-loglevel")
         .arg("error")
@@ -651,12 +687,12 @@ async fn process_encoded_segment(
         .arg("pipe:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start ffmpeg")?;
+        .stderr(Stdio::piped());
+    command
+}
 
-    let mut child = ChildKillOnDrop { child: Some(child) };
-
+/// ffmpeg 的 stderr 逐行转日志；不读会让写满的管道阻塞解码
+fn drain_ffmpeg_stderr(child: &mut ChildKillOnDrop) {
     if let Some(stderr) = child.child.as_mut().and_then(|c| c.stderr.take()) {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
@@ -665,6 +701,31 @@ async fn process_encoded_segment(
             }
         });
     }
+}
+
+async fn process_encoded_segment(
+    segment: &EncodedSegment,
+    cancel: &AtomicBool,
+    ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
+) -> Result<()> {
+    if segment.codec.starts_with("warmup-probe") {
+        debug!(
+            codec = %segment.codec,
+            "audio output warmup probe skipped (expected)"
+        );
+        return Ok(());
+    }
+    let Some(input_format) = encoded_input_format(&segment.payload, &segment.codec) else {
+        warn!("unsupported encoded codec: {}, skipping", segment.codec);
+        return Ok(());
+    };
+
+    let child = ffmpeg_decode_to_s16le(input_format)
+        .spawn()
+        .context("failed to start ffmpeg")?;
+
+    let mut child = ChildKillOnDrop { child: Some(child) };
+    drain_ffmpeg_stderr(&mut child);
 
     let mut stdin = child
         .child
@@ -690,6 +751,10 @@ async fn process_encoded_segment(
     let mut opus_out = [0u8; 1275];
 
     loop {
+        // 逐帧检查取消：插话不必等当前段（整句）播完
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         match stdout.read_exact(&mut pcm).await {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
@@ -722,6 +787,66 @@ async fn process_encoded_segment(
         Err(e) => warn!("ffmpeg stdin task failed: {e}"),
     }
     Ok(())
+}
+
+/// 编码音频整段解码为 48k 立体声 PCM，供启动期预热短反馈音频用。
+///
+/// 播放热路径不经过这里：预热后的片段以 `PcmClipPayload` 入队，由进程内的 opus 编码器送出，
+/// 不再触发 ffmpeg 进程。整帧读取，尾部不足一帧的采样丢弃（与播放路径一致）。
+pub async fn decode_to_pcm_48k_stereo(payload: &[u8], codec: &str) -> Result<Vec<i16>> {
+    let input_format = encoded_input_format(payload, codec)
+        .ok_or_else(|| anyhow!("unsupported audio codec for pcm decode: {codec}"))?;
+    let child = ffmpeg_decode_to_s16le(input_format)
+        .spawn()
+        .context("failed to start ffmpeg")?;
+    let mut child = ChildKillOnDrop { child: Some(child) };
+    drain_ffmpeg_stderr(&mut child);
+
+    let mut stdin = child
+        .child
+        .as_mut()
+        .and_then(|c| c.stdin.take())
+        .ok_or_else(|| anyhow!("ffmpeg stdin missing"))?;
+    let mut stdout = child
+        .child
+        .as_mut()
+        .and_then(|c| c.stdout.take())
+        .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
+
+    let payload = payload.to_vec();
+    let stdin_task = tokio::spawn(async move {
+        let result = stdin.write_all(&payload).await;
+        drop(stdin);
+        result
+    });
+
+    let mut raw = Vec::new();
+    let mut frame = vec![0u8; PCM_FRAME_SAMPLES_STEREO * 2];
+    let read_result = loop {
+        match stdout.read(&mut frame).await {
+            Ok(0) => break Ok(()),
+            Ok(read) => raw.extend_from_slice(&frame[..read]),
+            Err(e) => break Err(anyhow!("read ffmpeg pcm failed: {e}")),
+        }
+    };
+
+    if let Some(mut c) = child.child.take() {
+        let _ = c.start_kill();
+        let _ = c.wait().await;
+    }
+    match stdin_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!("write ffmpeg stdin failed: {e}"),
+        Err(e) => warn!("ffmpeg stdin task failed: {e}"),
+    }
+    read_result?;
+
+    Ok(raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
+        .collect())
 }
 
 #[cfg(test)]
@@ -938,6 +1063,54 @@ mod tests {
         session.finish().await.expect("accepted finish");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn tts_session_finish_does_not_cancel_queued_segments() {
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let consumer = bus.consumer;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        tokio::spawn(consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        let mut session = output.open_tts_session().await.unwrap();
+        let cancel = session.cancel.clone();
+        session
+            .push_encoded(vec![0u8; 2], "warmup-probe")
+            .await
+            .unwrap();
+        session.finish().await.expect("accepted finish");
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "finish must not cancel queued segments"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tts_session_finish_drained_waits_for_queued_segments() {
+        let bus = AudioBus::new();
+        let output = bus.output.clone();
+        let consumer = bus.consumer;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        tokio::spawn(consumer.run(audio_tx));
+        tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+        let mut session = output.open_tts_session().await.unwrap();
+        let cancel = session.cancel.clone();
+        session
+            .push_encoded(vec![0u8; 2], "warmup-probe")
+            .await
+            .unwrap();
+        session
+            .finish_drained()
+            .await
+            .expect("drain wait must end when the job completes");
+
+        assert!(!cancel.load(Ordering::SeqCst));
+        assert_eq!(output.status().queued_jobs, 0);
+        assert!(output.status().current.is_none());
+        assert!(output.status().last_error.is_none());
+    }
+
     #[test]
     fn tts_source_has_no_total_deadline_but_external_does() {
         let dequeue = Instant::now();
@@ -1007,5 +1180,81 @@ mod tests {
             assert!(result.is_err());
             assert!(output.status().last_error.is_some());
         }
+    }
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    /// 预热路径：编码音频整段解码为 48k 立体声 PCM（16k 单声道 wav ×3 倍采样 ×2 声道）
+    #[tokio::test]
+    async fn decode_to_pcm_resamples_encoded_audio_to_48k_stereo() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let mono_16k = vec![0i16; 1_600]; // 100ms
+        let wav = crate::adapter::headless::speech::pcm16_mono_to_wav_bytes(&mono_16k, 16_000);
+
+        let pcm = decode_to_pcm_48k_stereo(&wav, "wav")
+            .await
+            .expect("wav decode must succeed");
+        // 4800 采样/声道（100ms @48k）× 2 声道 = 9600；重采样边界可能有少量出入
+        assert!(
+            pcm.len() >= 9_000 && pcm.len() <= 9_600,
+            "unexpected pcm length {}",
+            pcm.len()
+        );
+        assert_eq!(pcm.len() % 2, 0);
+    }
+
+    #[tokio::test]
+    async fn decode_to_pcm_rejects_unsupported_codec() {
+        let error = decode_to_pcm_48k_stereo(&[0u8; 4], "not-a-codec")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported audio codec"));
+    }
+
+    /// 调用方提供的取消位直接作用于该片段：回合插话即停声
+    #[tokio::test(start_paused = true)]
+    async fn injected_cancel_stops_a_turn_scoped_clip() {
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let consumer = bus.consumer;
+        let (audio_tx, _audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(4096);
+        tokio::spawn(consumer.run(audio_tx));
+
+        let playback_cancel = Arc::new(AtomicBool::new(false));
+        let handle = output
+            .enqueue_pcm_clip_with_cancel(silence_clip(20_000), playback_cancel.clone())
+            .expect("enqueue clip");
+        // 排队中即置位：消费者 dequeue 时直接收尾，不播一帧
+        playback_cancel.store(true, Ordering::SeqCst);
+        handle.wait().await.expect("cancelled clip finishes");
+
+        assert_eq!(output.stop_clips(), 0, "回合片段不进技能片段的取消集合");
+    }
+
+    /// 回合片段不登记到 stop_clips：停止技能片段不得连带取消本回合的 TTS 播放
+    #[tokio::test(start_paused = true)]
+    async fn turn_scoped_clip_is_not_registered_for_stop_clips() {
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let _consumer = bus.consumer;
+        let playback_cancel = Arc::new(AtomicBool::new(false));
+        let _queued = output
+            .enqueue_pcm_clip_with_cancel(silence_clip(100), playback_cancel.clone())
+            .expect("enqueue clip");
+
+        assert_eq!(output.stop_clips(), 0);
+        assert!(
+            !playback_cancel.load(Ordering::SeqCst),
+            "stop_clips must not cancel the turn playback flag"
+        );
     }
 }

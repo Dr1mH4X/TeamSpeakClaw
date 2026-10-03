@@ -10,9 +10,9 @@ src/
 ├── cli.rs                   # --log-level
 ├── log.rs                   # 按日轮转文件日志 + tracing 初始化
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
-├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）+ .instructions.md
+├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）
 ├── router.rs                # 事件路由；组合路由器循环入口
-├── router/                  # 子模块（ts_router, nc_router, voice_router, unified, trigger）
+├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
 ├── adapter/
 │   ├── reconnect.rs         # 重连退避常量与工具
@@ -70,17 +70,17 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 
 ## Conventions
 
-- [AGENTS.md](AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
-- [architecture.md](architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与技能体系、层级规范。
-- [development.md](development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
-- [testing.md](testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
-- [defensive-patterns.md](defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
-- [ci-cd.md](ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及 git-cliff 变更日志。
-- [agent-notes.md](agent-notes.md) — 决策记录：为什么这么做、放弃了什么、如何验证。
+- [docs/AGENTS.md](docs/AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
+- [docs/architecture.md](docs/architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与技能体系、层级规范。
+- [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
+- [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
+- [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
+- [docs/ci-cd.md](docs/ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及 git-cliff 变更日志。
+- [docs/agent-notes.md](docs/agent-notes.md) — 决策记录：为什么这么做、放弃了什么、如何验证。
 
 ## LLM / Provider
 
-OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时文本走语音桥。详见 [docs/architecture.md](docs/architecture.md)。
+OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。详见 [docs/architecture.md](docs/architecture.md)。
 
 ## Defensive patterns
 
@@ -88,7 +88,7 @@ OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reaso
 
 ## Editing these instructions
 
-根 `AGENTS.md` 只放全局 standing orders；具体事实移入 docs/ 各归属地，这里只留指针。新增内容须符合 [docs/AGENTS.md](docs/AGENTS.md) 的分层归属。
+根 `AGENTS.md` 只放全局 standing orders；具体事实移入 docs/ 各归属地，这里只留指针。目录级规则写在该目录的 `AGENTS.md`，不写进根文件。新增内容须符合 [docs/AGENTS.md](docs/AGENTS.md) 的分层归属。
 
 ## Output Conventions
 

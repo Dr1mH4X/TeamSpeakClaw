@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// voice_replay 配置。默认关闭；示例配置可写 true 但须注释说明与默认值差异。
+/// voice_replay 配置。默认开启，访问由 `acl.toml` 的 `voice_replay` 权限控制；`window_secs` 默认 30。
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct VoiceReplayConfig {
@@ -12,7 +12,7 @@ pub struct VoiceReplayConfig {
 impl Default for VoiceReplayConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             window_secs: 30,
             direct_commands: vec!["!replay".to_string(), "!回放".to_string()],
         }
@@ -24,9 +24,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn voice_replay_defaults_are_disabled_with_30s_window() {
+    fn voice_replay_defaults_are_enabled_with_30s_window() {
         let cfg = VoiceReplayConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.window_secs, 30);
         assert!(cfg.direct_commands.iter().any(|c| c == "!replay"));
     }

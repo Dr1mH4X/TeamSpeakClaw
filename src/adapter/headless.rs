@@ -103,7 +103,7 @@ pub fn voice_features_enabled(config: &AppConfig) -> bool {
         || config.voice_replay.enabled
 }
 
-/// bot 麦克风/扬声器开关：与 STT/TTS/omni 配置对齐
+/// bot 麦克风/扬声器开关：扬声器随 `voice_features_enabled()`（听），麦克风随需要出声的配置（说）
 pub struct VoiceMuteFlags {
     pub input_muted: bool,
     pub input_hardware_on: bool,
@@ -113,7 +113,8 @@ pub struct VoiceMuteFlags {
 
 pub fn voice_mute_flags(config: &AppConfig) -> VoiceMuteFlags {
     let speaker_on = voice_features_enabled(config);
-    let mic_on = config.headless.tts.enabled;
+    // TTS 与语音回放都经 `AudioOutput` 从 bot 发送通道出声，任一开启即需解除输入静音
+    let mic_on = config.headless.tts.enabled || config.voice_replay.enabled;
     VoiceMuteFlags {
         input_muted: !mic_on,
         input_hardware_on: mic_on,
@@ -178,11 +179,14 @@ async fn warm_audio_surface(output: &AudioOutput, rings: &SpeakerRings) -> Resul
         .current
         .as_ref()
         .map(|info| info.started_at.elapsed());
-    info!(
-        queued_jobs = status.queued_jobs,
-        last_error = ?status.last_error,
-        "audio output surface warmed"
-    );
+    // 正常路径（队列已清空、无错误）不产生日志，仅异常残留时提示
+    if status.queued_jobs > 0 || status.last_error.is_some() {
+        warn!(
+            queued_jobs = status.queued_jobs,
+            last_error = ?status.last_error,
+            "audio output surface warmup left pending state"
+        );
+    }
 
     let stats = rings.stats();
     let snapshot = rings.snapshot(ReplayFilter::All, Some(1));
@@ -681,8 +685,14 @@ mod tests {
     }
 
     #[test]
-    fn voice_mute_flags_follow_stt_tts_omni() {
+    fn voice_mute_flags_follow_voice_features() {
+        // 语音回放默认开启，这里显式关掉全部语音功能，先断言「无语音功能」一档
         let mut config = AppConfig::default();
+        config.headless.stt.enabled = false;
+        config.headless.tts.enabled = false;
+        config.llm.omni_model = false;
+        config.voice_replay.enabled = false;
+
         let flags = voice_mute_flags(&config);
         assert!(flags.input_muted);
         assert!(!flags.input_hardware_on);
@@ -704,13 +714,21 @@ mod tests {
 
     #[test]
     fn voice_features_include_voice_replay_flag() {
+        // 语音回放默认开启，显式构造「全关」配置后再打开本开关
         let mut config = AppConfig::default();
+        config.headless.stt.enabled = false;
+        config.headless.tts.enabled = false;
+        config.llm.omni_model = false;
+        config.voice_replay.enabled = false;
+
         assert!(!voice_features_enabled(&config));
         config.voice_replay.enabled = true;
         assert!(voice_features_enabled(&config));
         let flags = voice_mute_flags(&config);
         assert!(flags.output_hardware_on);
-        assert!(flags.input_muted);
+        // 回放经 bot 发送通道出声，仅开回放也必须解除输入静音
+        assert!(!flags.input_muted);
+        assert!(flags.input_hardware_on);
     }
 
     #[tokio::test]
@@ -730,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn grpc_bind_fails_when_port_already_occupied() {
-        let _listener = bind_grpc_listener().await.expect("首次 bind 必须成功");
+        let _listener = bind_grpc_listener().await.expect("first bind must succeed");
 
         let second = bind_grpc_listener().await;
 

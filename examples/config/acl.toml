@@ -7,6 +7,12 @@
 #   3. 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集）
 #   4. 如果任一匹配规则包含 "*"，则允许所有技能
 #
+# 服务器组 ID（TS3 默认布局，可在客户端右键查看服务器组，或按 sgid 核对）：
+#   - 6: Server Admin  服务器管理员
+#   - 7: Normal        普通用户
+#   - 8: Guest         访客
+# 频道组是另一套编号（「频道管理员」是 5），不要和服务器组混用。
+#
 # NapCat 虚拟组 ID 映射：
 #   - 9000: 任意 NapCat 用户
 #   - 9001: NapCat 群聊上下文
@@ -22,17 +28,43 @@
 #   - get_client_info: 获取用户详细信息
 #   - music_control: 音乐控制
 #   - web_search: 搜索最新网络信息
-#   - voice_replay: 语音窗口回放/status/stop（单人回放更敏感，按组收紧）
+#   - voice_replay: 回放最近语音窗口
 
+# 6 Server Admin：全部技能，并可对受保护组的成员执行踢出/封禁
 [[rules]]
-server_group_ids = [6]    # 服务器管理员组 ID 通常是 6
+server_group_ids = [6]
 channel_group_ids = []
 allowed_skills = ["*"]
 can_target_admins = true
 
+# 7 Normal：常用技能；不能对受保护组的成员执行踢出/封禁
+[[rules]]
+server_group_ids = [7]
+channel_group_ids = []
+allowed_skills = [
+  "poke_client",
+  "send_message",
+  "get_client_info",
+  "music_control",
+  "voice_replay"
+]
+can_target_admins = false
+
+# 8 Guest：只保留聊天、查询与点歌
+[[rules]]
+server_group_ids = [8]
+channel_group_ids = []
+allowed_skills = [
+  "send_message",
+  "get_client_info",
+  "music_control"
+]
+can_target_admins = false
+
+# 频道管理员：只看频道组（服务器组留空表示不限制）
 [[rules]]
 server_group_ids = []
-channel_group_ids = [5]   # 频道管理员组 ID
+channel_group_ids = [5]
 allowed_skills = [
   "poke_client",
   "send_message",
@@ -40,17 +72,6 @@ allowed_skills = [
   "music_control",
   "kick_client",
   "voice_replay"
-]
-can_target_admins = false
-
-[[rules]]
-server_group_ids = [8]    # 普通用户组 ID
-channel_group_ids = []
-allowed_skills = [
-  "poke_client",
-  "send_message",
-  "get_client_info",
-  "music_control"
 ]
 can_target_admins = false
 
@@ -65,13 +86,13 @@ allowed_skills = [
 ]
 can_target_admins = false
 
-# 默认规则 (匹配所有人)
+# 默认规则（匹配所有人）：以上规则都没命中时的兜底
 [[rules]]
 server_group_ids = []
 channel_group_ids = []
 allowed_skills = ["music_control"]
 can_target_admins = false
 
-# 受保护的组 ID，can_target_admins = false 的用户不能对这些组的成员执行踢出/封禁等操作
+# 受保护的组 ID：can_target_admins = false 的用户不能对这些组的成员执行踢出/封禁等操作
 [acl]
-protected_group_ids = [6, 8, 9]
+protected_group_ids = [6, 7, 8]

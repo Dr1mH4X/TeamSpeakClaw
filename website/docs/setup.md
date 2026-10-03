@@ -33,7 +33,7 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 - `[headless.stt]` / `[headless.tts]` — 如需语音服务，启用并配置（可选）
 - `[headless.wakeword]` — 如需语音唤醒，启用并按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`），再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并把文件名填在 `model`（可选，依赖 STT 或多模态输入）
 - `[napcat]` — 如需 QQ 机器人，启用并配置 WebSocket 地址（可选）
-- `[voice_replay]` — 如需语音回放，默认保持 `enabled = false`；开启后在 `acl.toml` 按组授权（可选，改配置需重启）。直呼与技能共用 ACL。用法见 [usage.md](usage.md)
+- `[voice_replay]` — 语音回放默认已开启，如需关闭设为 `enabled = false`；回放权限需在 `acl.toml` 按组授权（改配置需重启）。直呼与技能共用 ACL。用法见 [usage.md](usage.md)
 
 详细配置说明请参考 [配置指南](/docs/configuration)。
 
@@ -58,7 +58,7 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 
 直接使用 `docker-compose.yml`：
 - 在线 STT：在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
-- 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，自动禁用 TTS/STT、直接用语音输入输出，无需配置 STT
+- 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，语音以音频直接送入该模型（跳过 STT，无需配置 `[headless.stt]`；`model` 需支持音频输入）；模型回复仍是文本，需要语音回复时另行启用 `[headless.tts]`
 
 **方案二：本地 STT（whisper.cpp，离线）**
 

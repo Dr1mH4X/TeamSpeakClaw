@@ -9,13 +9,15 @@ use crate::llm::context::SessionSource;
 use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
 use crate::permission::PermissionGate;
 use crate::router::{
-    run_llm_turn, ReplyPolicy, RouterContext, UnifiedInboundEvent, LLM_ERROR_REPLY,
+    run_llm_turn_with_audio_recovery, ReplyPolicy, RouterContext, TurnLoopSpec,
+    UnifiedInboundEvent, LLM_ERROR_REPLY,
 };
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 #[derive(Clone)]
@@ -239,13 +241,18 @@ Online: {}"#,
             }
         }
 
-        // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复
-        match run_llm_turn(
+        // 注意这里传入了 None 作为 callbacks，意味着等待流式全部完成后拿整体回复；
+        // 该会话可能回放音频历史，故走体积类失败可自愈的入口
+        match run_llm_turn_with_audio_recovery(
             &self.llm,
             &self.registry,
+            &source,
             |llm| llm.build_messages(&source, system_prompt, &user_ctx, msg_content),
-            &allowed_skills,
-            None,
+            TurnLoopSpec {
+                allowed_skills: &allowed_skills,
+                callbacks: None,
+                cancel: &CancellationToken::new(),
+            },
             || {
                 UnifiedExecutionContext::for_ts(
                     TsCaller {

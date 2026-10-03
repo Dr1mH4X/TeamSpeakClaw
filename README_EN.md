@@ -29,7 +29,7 @@ TeamSpeakClaw is an LLM (Large Language Model) powered intelligent assistant for
 
 It connects to your TeamSpeak server via a headless client, allowing users to interact with the server using natural language. Whether playing music, managing members, or querying information, simply speak in the channel and TSClaw will understand your intent and execute the corresponding actions. It can not only manage the server directly but also work seamlessly with other bots and plugins, providing a smooth voice server experience.
 
-## ✨ Features
+## Features
 
 - **🧠 Natural Language Interaction**: No more memorizing complicated commands. Just say "play Jay Chou's song" or "kick that guy who just joined the channel".
 - **🛡️ Fine-grained Permission Control**: Built-in powerful permission system. Configure specific skill permissions for different TeamSpeak server groups/user groups.
@@ -42,15 +42,22 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 - **📱 NapCat (QQ) Support**: Cross-platform interaction, flexible trigger mechanisms, fine-grained permissions, etc.
 - **🤖 Broad Model Support**: Compatible with OpenAI API format, easily integrates with DeepSeek, Xiaomi Mimo, and various other LLMs.
 
-## 🚀 Documentation
+## Documentation
+
  - [User & Developer Docs](http://tsclaw.dreamhax.cc/)
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)
 - [NetEaseCloudmusic-plugin](https://github.com/ZHANGTIANYAO1/TS3AudioBot-NetEaseCloudmusic-plugin)
 - [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)
 - [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)
 - [NapCatQQ](https://github.com/NapNeko/NapCatQQ)
+
+## LICENSE
+
+[TeamSpeakClaw License](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE)
+
+openWakeWord pretrained models are licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); models from the community model library are distributed under its site [commercial license](https://openwakeword.com/license). See [models/README.md](models/README.md).
 
 ![Alt](https://repobeats.axiom.co/api/embed/e20c0a7a0fb24465f50fb3882dadf4416456dd24.svg "Repobeats analytics image")

@@ -25,7 +25,7 @@ sidebar_position: 3
 | `api_key` | string | `""` | API 密钥；本地免鉴权服务可留空 |
 | `base_url` | string | `https://api.openai.com/v1` | API 基础 URL，仅支持 HTTP 或 HTTPS |
 | `model` | string | `gpt-4o` | 模型名称 |
-| `omni_model` | bool | `false` | 是否直接使用多模态模型处理语音 |
+| `omni_model` | bool | `false` | 语音输入多模态模型（音频作为 `input_audio`，跳过 STT，`model` 需支持音频输入）；模型回复仍是文本，语音回复由 `[headless.tts]` 提供 |
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
 
 ### NapCat 配置详解
@@ -83,11 +83,11 @@ sidebar_position: 3
 
 ### 语音回放
 
-配置区段 `[voice_replay]` 控制 TeamSpeak 录音窗回放。默认关闭；**修改配置后需重启进程**生效（无热重载）。
+配置区段 `[voice_replay]` 控制 TeamSpeak 录音窗回放。默认开启，访问受 `acl.toml` 的 `voice_replay` 权限控制；**修改配置后需重启进程**生效（无热重载）。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `enabled` | bool | `false` | 是否启用录制回放与语音回放技能/直呼 |
+| `enabled` | bool | `true` | 是否启用录制回放与语音回放技能/直呼 |
 | `window_secs` | integer | `30` | 录音窗秒数，合法范围 **1–120**；`seconds` 超窗时 clamp |
 | `direct_commands` | 数组 | `["!replay", "!回放"]` | 频道直呼前缀 |
 
@@ -106,6 +106,10 @@ sidebar_position: 3
 控制哪些用户组可以使用哪些功能。**所有匹配规则的允许技能会合并收集**（非首个匹配），取并集。
 
 **查看完整配置示例**：[acl.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/acl.toml)
+
+### 服务器组 ID
+
+`server_group_ids` 填 TeamSpeak 服务器组 ID：默认布局是 `6` Server Admin、`7` Normal、`8` Guest，示例即按这三个组划分权限。频道组是另一套编号（「频道管理员」是 `5`），不要和服务器组混用；`protected_group_ids`（默认 `[6, 7, 8]`）列出不允许被未授权用户踢出或封禁的组。
 
 ### 可用技能名称
 

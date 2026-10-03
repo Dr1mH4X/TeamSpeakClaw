@@ -15,10 +15,10 @@
 | `docs/defensive-patterns.md` | 编码反面与替代：FAILFAST、YAGNI、警告压制处置、类型安全优先 | 常规开发流程 |
 | `docs/ci-cd.md` | 各 GitHub Actions workflow 的触发条件与职责 | 架构决策 |
 | `docs/agent-notes.md` | 决策记录：为什么这么做、放弃了什么、如何验证；已落地条目用现在时描述现状 | 迁移计划、验收清单、spec 语气 |
-| 源码内 `.instructions.md` | 模块级规则，如 `src/config/.instructions.md` | 仓库级规则（→ 根 AGENTS.md） |
+| 模块内 `AGENTS.md` | 目录级规则，如 `docs/AGENTS.md`、`src/config/AGENTS.md`、`website/AGENTS.md` | 仓库级规则（→ 根 AGENTS.md） |
 | `website/` | 面向最终用户的文档 | 内部实现、引用目录、决策历史 |
 
-放置速查：standing orders → 根 `AGENTS.md`；拓扑/关键路径 → `architecture.md`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；决策理由 → `agent-notes.md`；模块规则 → 源码内 `.instructions.md`；用户文档 → `website/`。
+放置速查：standing orders → 根 `AGENTS.md`；拓扑/关键路径 → `architecture.md`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；决策理由 → `agent-notes.md`；模块规则 → 模块内 `AGENTS.md`；用户文档 → `website/`。
 
 ## 写作规则
 
@@ -34,7 +34,7 @@
 
 ## 文档索引
 
-仓库级 standing orders 见根 `AGENTS.md`，源码内的模块级规则见各模块 `.instructions.md`，面向最终用户的文档在 `website/`。
+仓库级 standing orders 见根 `AGENTS.md`，各目录的模块级规则见该目录的 `AGENTS.md`，面向最终用户的文档在 `website/`。
 
 ## 精简版 slop checklist
 

@@ -24,7 +24,7 @@ pub struct AclSettings {
 impl Default for AclSettings {
     fn default() -> Self {
         Self {
-            protected_group_ids: vec![6, 8, 9],
+            protected_group_ids: vec![6, 7, 8],
         }
     }
 }
