@@ -24,7 +24,6 @@ struct NcInboundText {
     user_id: i64,
     sender_name: String,
     group_id: Option<i64>,
-    is_triggered: bool,
 }
 
 pub struct NcRouter {
@@ -115,6 +114,19 @@ impl NcRouter {
                         continue;
                     }
                     let user_id = msg.user_id;
+                    let self_id = self.adapter.get_self_id();
+                    // 同步门先过：不需要回合的消息不占容量、不排队等会话锁
+                    let Some(stripped) = precheck_text_turn(
+                        &self.config,
+                        &self.llm,
+                        self_id,
+                        user_id,
+                        &msg.sender.nickname,
+                        None,
+                        &msg.message,
+                    ) else {
+                        continue;
+                    };
                     self.spawn_handle(
                         &mut tasks,
                         msg,
@@ -127,9 +139,8 @@ impl NcRouter {
                                         user_id: msg.user_id,
                                         sender_name: msg.sender.nickname,
                                         group_id: None,
-                                        is_triggered: true,
                                     },
-                                    &msg.message,
+                                    stripped,
                                     session,
                                 )
                                 .await
@@ -153,7 +164,20 @@ impl NcRouter {
                         continue;
                     }
                     let group_id = msg.group_id;
-                    let triggered = self.is_triggered(&msg.message);
+                    let self_id = self.adapter.get_self_id();
+                    // 未命中触发条件的群闲聊不进队列：它们排在群里正在跑的回合后面时，
+                    // 会一直占着全局容量，把别的会话挤掉
+                    let Some(stripped) = precheck_text_turn(
+                        &self.config,
+                        &self.llm,
+                        self_id,
+                        msg.user_id,
+                        &msg.sender.nickname,
+                        Some(group_id),
+                        &msg.message,
+                    ) else {
+                        continue;
+                    };
                     self.spawn_handle(
                         &mut tasks,
                         msg,
@@ -166,9 +190,8 @@ impl NcRouter {
                                         user_id: msg.user_id,
                                         sender_name: msg.sender.nickname,
                                         group_id: Some(msg.group_id),
-                                        is_triggered: triggered,
                                     },
-                                    &msg.message,
+                                    stripped,
                                     session,
                                 )
                                 .await
@@ -208,9 +231,10 @@ impl NcRouter {
             on_queue_full();
             return;
         };
+        let ticket = llm.enqueue_turn_ticket(&source);
 
         tasks.spawn(async move {
-            let session = permit.acquire_session(&llm, &source).await;
+            let session = permit.acquire_session(&llm, &source, ticket).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -224,52 +248,12 @@ impl NcRouter {
         });
     }
 
-    async fn handle_text(
-        &self,
-        inbound: NcInboundText,
-        segments: &[Segment],
-        session: TurnSession,
-    ) {
+    async fn handle_text(&self, inbound: NcInboundText, stripped: String, session: TurnSession) {
         let NcInboundText {
             user_id,
             sender_name,
             group_id,
-            is_triggered,
         } = inbound;
-
-        if group_id.is_some() && !is_triggered {
-            return;
-        }
-
-        let raw = segments_to_text(segments);
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return;
-        }
-        let stripped =
-            strip_trigger_prefix(raw, &self.config.napcat.trigger_prefixes).unwrap_or(raw);
-
-        if group_id.is_some() {
-            info!(
-                group_id = ?group_id,
-                user_id,
-                user = %sender_name,
-                message_chars = stripped.chars().count(),
-                "[NC Group] message received"
-            );
-        } else {
-            info!(
-                user_id,
-                user = %sender_name,
-                message_chars = stripped.chars().count(),
-                "[NC Private] message received"
-            );
-        }
-
-        if let Err(error) = self.llm.check_user_text_bounds(stripped) {
-            warn!(error = %error, "NC message dropped for exceeding size limit");
-            return;
-        }
 
         let caller_groups = nc_pseudo_groups(&self.config.napcat, user_id, group_id);
         let source = match group_id {
@@ -316,7 +300,7 @@ impl NcRouter {
             system_prompt,
             user_ctx: user_ctx.as_str(),
             allowed_skills: &allowed_skills,
-            input: TurnInput::Text(stripped),
+            input: TurnInput::Text(&stripped),
             callbacks: None,
             cancel: &cancel,
         };
@@ -349,9 +333,13 @@ impl NcRouter {
         }
     }
 
-    fn is_triggered(&self, message: &[Segment]) -> bool {
-        let nc = &self.config.napcat;
-        let self_id = self.adapter.get_self_id().to_string();
+    /// 群消息是否命中触发条件：@ 机器人、CQ 码 @，或文本以任一触发前缀开头。
+    fn is_group_message_triggered(
+        config: &NapCatConfig,
+        self_id: i64,
+        message: &[Segment],
+    ) -> bool {
+        let self_id = self_id.to_string();
         if message
             .iter()
             .any(|segment| matches!(segment, Segment::At { qq } if qq == &self_id))
@@ -363,10 +351,61 @@ impl NcRouter {
         if text.contains(&format!("[CQ:at,qq={self_id}]")) {
             return true;
         }
-        nc.trigger_prefixes
+        config
+            .trigger_prefixes
             .iter()
             .any(|p| text.starts_with(p.as_str()))
     }
+}
+
+/// 回合准入前的同步门：未命中触发条件的群消息、空消息、超限消息都在这里返回 `None`。
+///
+/// 必须在容量占位与会话排队之前调用：不需要回合的消息若先进队列，会在等同会话锁期间
+/// 占着全局容量（容量 4，含等待中的回合），把别的会话的有效消息挤成「queue full」。
+/// 群里一条正在跑的回合下攒够四条闲聊就足以让所有会话开始丢消息。
+fn precheck_text_turn(
+    config: &AppConfig,
+    llm: &LlmEngine,
+    self_id: i64,
+    user_id: i64,
+    sender_name: &str,
+    group_id: Option<i64>,
+    segments: &[Segment],
+) -> Option<String> {
+    if group_id.is_some()
+        && !NcRouter::is_group_message_triggered(&config.napcat, self_id, segments)
+    {
+        return None;
+    }
+    let raw = segments_to_text(segments);
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let stripped = strip_trigger_prefix(raw, &config.napcat.trigger_prefixes).unwrap_or(raw);
+
+    if group_id.is_some() {
+        info!(
+            group_id = ?group_id,
+            user_id,
+            user = %sender_name,
+            message_chars = stripped.chars().count(),
+            "[NC Group] message received"
+        );
+    } else {
+        info!(
+            user_id,
+            user = %sender_name,
+            message_chars = stripped.chars().count(),
+            "[NC Private] message received"
+        );
+    }
+
+    if let Err(error) = llm.check_user_text_bounds(stripped) {
+        warn!(error = %error, "NC message dropped for exceeding size limit");
+        return None;
+    }
+    Some(stripped.to_string())
 }
 
 /// NapCat 回复落点：群聊先 @ 发送者再跟正文
@@ -421,6 +460,127 @@ mod tests {
         assert_eq!(
             nc_pseudo_groups(&config, 42, Some(7)),
             vec![9000, 9001, 9002, 9003]
+        );
+    }
+
+    fn trigger_config() -> NapCatConfig {
+        NapCatConfig {
+            trigger_prefixes: vec!["!bot".to_string()],
+            ..NapCatConfig::default()
+        }
+    }
+
+    fn engine() -> LlmEngine {
+        LlmEngine::new(Arc::new(AppConfig::default()))
+            .expect("engine builds without a network call")
+    }
+
+    #[test]
+    fn group_trigger_accepts_prefix_and_at_mentions() {
+        let config = trigger_config();
+
+        assert!(NcRouter::is_group_message_triggered(
+            &config,
+            99,
+            &[Segment::text("!bot hello")]
+        ));
+        assert!(NcRouter::is_group_message_triggered(
+            &config,
+            99,
+            &[Segment::at(99), Segment::text(" hello")]
+        ));
+        assert!(!NcRouter::is_group_message_triggered(
+            &config,
+            99,
+            &[Segment::text("just chatting")]
+        ));
+        assert!(!NcRouter::is_group_message_triggered(
+            &config,
+            99,
+            &[Segment::at(1), Segment::text(" hello")]
+        ));
+    }
+
+    /// 不需要回合的消息必须在排队之前返回 `None`：进队列就会占着全局容量等会话锁
+    #[test]
+    fn precheck_rejects_messages_that_need_no_turn() {
+        let config = AppConfig {
+            napcat: trigger_config(),
+            ..AppConfig::default()
+        };
+        let llm = engine();
+
+        assert!(
+            precheck_text_turn(
+                &config,
+                &llm,
+                99,
+                7,
+                "someone",
+                Some(5),
+                &[Segment::text("just chatting")]
+            )
+            .is_none(),
+            "an untriggered group message must not queue"
+        );
+        assert!(
+            precheck_text_turn(
+                &config,
+                &llm,
+                99,
+                7,
+                "someone",
+                Some(5),
+                &[Segment::text("   ")]
+            )
+            .is_none(),
+            "an empty message must not queue"
+        );
+
+        let oversized = Segment::text(format!(
+            "!bot {}",
+            "x".repeat(crate::llm::engine::MAX_USER_TEXT_BYTES + 1)
+        ));
+        assert!(
+            precheck_text_turn(&config, &llm, 99, 7, "someone", Some(5), &[oversized]).is_none(),
+            "an oversized message must not queue"
+        );
+    }
+
+    /// 触发文本在预检里就剥好前缀；私聊不看前缀但同样只走一次预检
+    #[test]
+    fn precheck_returns_the_stripped_text_for_a_turn() {
+        let config = AppConfig {
+            napcat: trigger_config(),
+            ..AppConfig::default()
+        };
+        let llm = engine();
+
+        assert_eq!(
+            precheck_text_turn(
+                &config,
+                &llm,
+                99,
+                7,
+                "someone",
+                Some(5),
+                &[Segment::text("!bot  hello")]
+            )
+            .as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            precheck_text_turn(
+                &config,
+                &llm,
+                99,
+                7,
+                "someone",
+                None,
+                &[Segment::text("no prefix needed")]
+            )
+            .as_deref(),
+            Some("no prefix needed")
         );
     }
 }

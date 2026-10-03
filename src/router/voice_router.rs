@@ -415,16 +415,17 @@ fn apply_barge_in(
     }
 }
 
-/// 等到本会话可执行才登记产出，排队中的文本不参与跨说话人插话取消。
+/// 语音回合准入：按到达顺序等前一条同会话回合结束，再取会话锁（票据由调用点在同处登记）。
+///
+/// 这里不登记产出：`mark_producing` 由调用点在可失败的 TTS 初始化之后打，
+/// 排队等锁的回合因此不算「产出中」，跨说话人插话只取消真正在产出的回合。
 async fn acquire_voice_turn_session(
     permit: TurnPermit,
     llm: &LlmEngine,
     source: &SessionSource,
-    active: &ActiveTurn,
+    ticket: crate::llm::context::TurnTicket,
 ) -> TurnSession {
-    let session = permit.acquire_session(llm, source).await;
-    active.mark_producing();
-    session
+    permit.acquire_session(llm, source, ticket).await
 }
 
 impl VoiceRouter {
@@ -1209,13 +1210,16 @@ impl VoiceRouter {
             );
             return Ok(());
         };
-        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, active).await;
+        let ticket = self.llm.enqueue_turn_ticket(&session_source);
+        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             // omni 与 STT 同属语音回合：挂工具调用提示音，走 STT 路径同一块反馈基建
             Some(self.build_tts_callbacks(active, true).await?)
         } else {
             None
         };
+        // TTS 初始化成功后才登记产出：排队等锁与初始化失败都不算「产出中」
+        active.mark_producing();
         let sink = VoiceNoticeSink {
             channel: channel.clone(),
             target_mode: ctx.reply_target_mode,
@@ -1305,12 +1309,15 @@ impl VoiceRouter {
             return Ok(());
         };
 
-        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, active).await;
+        let ticket = self.llm.enqueue_turn_ticket(&session_source);
+        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
         } else {
             None
         };
+        // TTS 初始化成功后才登记产出：排队等锁与初始化失败都不算「产出中」
+        active.mark_producing();
         let sink = VoiceNoticeSink {
             channel: channel.clone(),
             target_mode: ctx.reply_target_mode,
@@ -1969,9 +1976,11 @@ mod tests {
             TurnPermit::reserve(&engine).unwrap(),
             &engine,
             &source,
-            &producer,
+            engine.enqueue_turn_ticket(&source),
         )
         .await;
+        // 调用点在 TTS 初始化成功后才登记产出；这里代表已经进入产出的前一条回合
+        producer.mark_producing();
 
         let queued = Arc::new(ActiveTurn::new());
         turns.begin_turn(5, &queued);
@@ -1979,7 +1988,7 @@ mod tests {
             TurnPermit::reserve(&engine).unwrap(),
             &engine,
             &source,
-            &queued,
+            engine.enqueue_turn_ticket(&source),
         );
         tokio::pin!(pending);
         assert!(futures_util::poll!(&mut pending).is_pending());
@@ -2002,6 +2011,8 @@ mod tests {
 
         drop(first);
         let _session = pending.await;
+        // 取到会话锁后由调用点在 TTS 初始化之后登记产出
+        queued.mark_producing();
         assert!(queued.is_producing());
         assert!(!queued.cancel.is_cancelled());
         let producing = turns.producing_turns();

@@ -77,6 +77,12 @@ impl LlmEngine {
         self.turn_coordinator.acquire_session(source).await
     }
 
+    /// 同步登记同会话到达顺序（事件循环内调用，不等待），票据交给 `TurnPermit::acquire_session`；
+    /// 取会话锁的先后因此钉在到达顺序上，不再取决于任务被调度执行的顺序。
+    pub fn enqueue_turn_ticket(&self, source: &SessionSource) -> super::context::TurnTicket {
+        self.turn_coordinator.enqueue_ticket(source)
+    }
+
     /// 校验单回合用户文本不超过 MAX_USER_TEXT_BYTES（UTF-8 字节数）。
     pub fn check_user_text_bounds(&self, text: &str) -> Result<()> {
         if text.len() > MAX_USER_TEXT_BYTES {

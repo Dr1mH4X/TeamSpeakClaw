@@ -1,14 +1,18 @@
 //! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、体积自愈与回复策略。
 //!
 //! 调用点只提供回合请求（会话、提示、输入、回调、取消）与回复落点 `TurnSink`：
-//! 容量占位在事件循环里同步获取（`TurnPermit::reserve`），会话串行锁在任务准备请求前获取。
+//! 容量占位（`TurnPermit::reserve`）与到达顺序票据（`LlmEngine::enqueue_turn_ticket`）
+//! 都在单一到达点（事件循环）同步获取，会话串行锁由 `TurnPermit::acquire_session`
+//! 在任务里、请求准备之前获取。
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::llm::context::{SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard};
+use crate::llm::context::{
+    SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
+};
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
@@ -55,23 +59,30 @@ impl TurnPermit {
             .map(|_capacity| Self { _capacity })
     }
 
+    /// 按到达顺序取会话锁：先等同会话前一条回合结束（票据在到达点生成），再取串行锁。
+    /// 票据与容量占位一起放进 `TurnSession`，持有到回复落库完成才放行后继者
     pub(crate) async fn acquire_session(
         self,
         llm: &LlmEngine,
         source: &SessionSource,
+        ticket: TurnTicket,
     ) -> TurnSession {
+        let ticket = ticket.wait_for_predecessor().await;
         let session = llm.acquire_turn_session(source).await;
         TurnSession {
             _permit: self,
             _session: session,
+            _ticket: ticket,
         }
     }
 }
 
-/// 容量占位与会话锁一起持有，覆盖请求准备、回复投递与历史保存。
+/// 容量占位、会话串行锁与到达顺序票据一起持有，覆盖请求准备、回复投递与历史保存。
+/// 字段顺序即释放顺序：先放容量、再放锁、最后放行同会话的下一条
 pub(crate) struct TurnSession {
     _permit: TurnPermit,
     _session: TurnSessionGuard,
+    _ticket: TurnTicket,
 }
 
 /// 一回合 LLM 请求：提示与输入由调用点准备，门禁、循环与回复策略由本 module 承担
@@ -228,6 +239,8 @@ mod tests {
         PayloadTooLarge,
         HttpError,
         Success,
+        /// 固定文本回复：让「哪条回复先送达」可断言，顺序类用例用它
+        Reply(&'static str),
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
     }
@@ -277,6 +290,13 @@ mod tests {
                 FakeOutcome::HttpError => Err(anyhow::anyhow!("LLM API error: HTTP 500")),
                 FakeOutcome::Success => Ok(Box::pin(stream::iter(vec![
                     Ok(LlmStreamEvent::Token("hello".to_string())),
+                    Ok(LlmStreamEvent::Done {
+                        finish_reason: "stop".to_string(),
+                        tool_calls: Vec::new(),
+                    }),
+                ]))),
+                FakeOutcome::Reply(text) => Ok(Box::pin(stream::iter(vec![
+                    Ok(LlmStreamEvent::Token(text.to_string())),
                     Ok(LlmStreamEvent::Done {
                         finish_reason: "stop".to_string(),
                         tool_calls: Vec::new(),
@@ -341,10 +361,9 @@ mod tests {
         input: TurnInput<'_>,
         sink: &RecordingSink,
     ) -> Result<(), TurnError> {
-        let session = TurnPermit::reserve(llm)
-            .expect("capacity is free in tests")
-            .acquire_session(llm, source)
-            .await;
+        let permit = TurnPermit::reserve(llm).expect("capacity is free in tests");
+        let ticket = llm.enqueue_turn_ticket(source);
+        let session = permit.acquire_session(llm, source, ticket).await;
         run_session(llm, source, input, sink, session).await
     }
 
@@ -381,22 +400,28 @@ mod tests {
             SessionSource::NapCatGroup { group_id: 42 },
         ] {
             let provider = Arc::new(FakeProvider::new(vec![
-                FakeOutcome::Success,
-                FakeOutcome::Success,
+                FakeOutcome::Reply("r-first"),
+                FakeOutcome::Reply("r-second"),
             ]));
             let llm = engine_with(&provider, 8);
             let sink = RecordingSink::new();
             let (finish_preparing, prepared) = tokio::sync::oneshot::channel();
             let first_permit = TurnPermit::reserve(&llm).unwrap();
+            let first_ticket = llm.enqueue_turn_ticket(&source);
             let second_permit = TurnPermit::reserve(&llm).unwrap();
+            let second_ticket = llm.enqueue_turn_ticket(&source);
 
             let first = async {
-                let session = first_permit.acquire_session(&llm, &source).await;
+                let session = first_permit
+                    .acquire_session(&llm, &source, first_ticket)
+                    .await;
                 prepared.await.unwrap();
                 run_session(&llm, &source, TurnInput::Text("first"), &sink, session).await
             };
             let second = async {
-                let session = second_permit.acquire_session(&llm, &source).await;
+                let session = second_permit
+                    .acquire_session(&llm, &source, second_ticket)
+                    .await;
                 run_session(&llm, &source, TurnInput::Text("second"), &sink, session).await
             };
             tokio::pin!(first, second);
@@ -410,7 +435,7 @@ mod tests {
             assert!(first.await.is_ok());
             assert!(second.await.is_ok());
             assert_eq!(provider.calls(), 2);
-            assert_eq!(sink.sent(), vec!["hello", "hello"]);
+            assert_eq!(sink.sent(), vec!["r-first", "r-second"]);
             let history = llm.stored_history(&source);
             assert_eq!(history.len(), 2);
             for (turn, expected) in history.iter().zip(["first", "second"]) {
@@ -420,6 +445,59 @@ mod tests {
                 assert_eq!(text, expected);
             }
         }
+    }
+
+    /// 取会话锁的先后由到达顺序票据决定，不由任务被调度执行的顺序决定。
+    ///
+    /// 这里故意让「后到」那条消息的任务先被 spawn：没有票据时它会先拿到会话锁、
+    /// 先回复先落库（顺序反转），有票据时它必须等同会话前一条结束。
+    /// 事件循环在一批事件里连续 spawn 时正是这个形状。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn arrival_order_outranks_task_scheduling_order() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::Reply("r-first"),
+            FakeOutcome::Reply("r-second"),
+        ]));
+        let llm = Arc::new(engine_with(&provider, 8));
+        let source = SessionSource::TeamSpeak {
+            uid: "arrival-order".to_string(),
+        };
+        let sink = Arc::new(RecordingSink::new());
+
+        // 事件循环：按到达顺序给两条消息发票据
+        let first_permit = TurnPermit::reserve(&llm).unwrap();
+        let first_ticket = llm.enqueue_turn_ticket(&source);
+        let second_permit = TurnPermit::reserve(&llm).unwrap();
+        let second_ticket = llm.enqueue_turn_ticket(&source);
+
+        let mut tasks = tokio::task::JoinSet::new();
+        // 后到者先 spawn，让调度顺序与到达顺序相反
+        for (permit, ticket, input) in [
+            (second_permit, second_ticket, "second"),
+            (first_permit, first_ticket, "first"),
+        ] {
+            let llm = llm.clone();
+            let sink = sink.clone();
+            let source = source.clone();
+            tasks.spawn(async move {
+                let session = permit.acquire_session(&llm, &source, ticket).await;
+                let _ = run_session(&llm, &source, TurnInput::Text(input), &sink, session).await;
+            });
+        }
+
+        tokio::task::yield_now().await;
+        while tasks.join_next().await.is_some() {}
+
+        assert_eq!(sink.sent(), vec!["r-first", "r-second"]);
+        let history = llm.stored_history(&source);
+        let texts: Vec<&str> = history
+            .iter()
+            .map(|turn| match &turn.user {
+                ContextUser::Text(text) => text.as_str(),
+                _ => panic!("text input must be saved as a text turn"),
+            })
+            .collect();
+        assert_eq!(texts, vec!["first", "second"]);
     }
 
     #[tokio::test]
@@ -574,7 +652,7 @@ mod tests {
         .run(
             TurnPermit::reserve(&llm)
                 .expect("capacity is free in tests")
-                .acquire_session(&llm, &source)
+                .acquire_session(&llm, &source, llm.enqueue_turn_ticket(&source))
                 .await,
             || panic!("no tool execution in these tests"),
             &sink,
