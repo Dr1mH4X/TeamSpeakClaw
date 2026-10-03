@@ -209,16 +209,29 @@ impl FeedbackPlayer {
         }
     }
 
-    /// 启动期预热全部短语；失败只记日志，首次触发时按需重试
+    /// 启动期预热全部短语：全部成功只汇总一条日志，单条失败照常逐条告警；
+    /// 失败不致命，首次触发时按需重试
     pub(crate) async fn prewarm(&self) {
+        let mut failures = 0usize;
+        let mut samples = 0usize;
         for phrase in feedback_phrases() {
-            if let Err(error) = self.pcm_for(phrase).await {
-                warn!(
-                    phrase = %phrase,
-                    error = %error,
-                    "feedback phrase prewarm failed; will retry on first trigger"
-                );
+            match self.pcm_for(phrase).await {
+                Ok(pcm) => samples = samples.saturating_add(pcm.len()),
+                Err(error) => {
+                    failures += 1;
+                    warn!(
+                        phrase = %phrase,
+                        error = %error,
+                        "feedback phrase prewarm failed; will retry on first trigger"
+                    );
+                }
             }
+        }
+        if failures == 0 {
+            info!(
+                phrases = feedback_phrases().count(),
+                samples, "generate feedback phrase cache"
+            );
         }
     }
 
@@ -242,11 +255,6 @@ impl FeedbackPlayer {
             .lock()
             .expect("feedback cache poisoned")
             .insert(phrase, pcm.clone());
-        info!(
-            phrase = %phrase,
-            samples = pcm.len(),
-            "feedback phrase cached"
-        );
         Ok(pcm)
     }
 

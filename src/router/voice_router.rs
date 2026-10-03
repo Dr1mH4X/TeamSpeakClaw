@@ -436,10 +436,11 @@ impl VoiceRouter {
             OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
                 .ok()
                 .map(Arc::new);
-        // 短反馈短语的合成走同一 provider：provider 构造成功即可建缓存器，
-        // 是否预热与是否启用由 tts.enabled 决定（`is_tts_effectively_enabled`）
+        // 短反馈短语的合成走同一 provider：STT 也用它，故 provider 不随 tts.enabled 关掉；
+        // tts 未开启时根本不建缓存器，既不预热也不会有提示音/确认音
         let feedback = speech_provider
             .as_ref()
+            .filter(|_| config.headless.tts.enabled)
             .map(|provider| Arc::new(FeedbackPlayer::new(provider.clone(), audio_output.clone())));
         let need_audio_pipeline = config.headless.stt.enabled || config.llm.omni_model;
         let wakeword = wakeword.map(|models| {
@@ -1101,7 +1102,7 @@ impl VoiceRouter {
         let Some(player) = &self.feedback else {
             debug!(
                 clid,
-                "wakeword confirmation skipped: tts provider unavailable"
+                "wakeword confirmation skipped: feedback disabled (tts off or provider unavailable)"
             );
             return Ok(());
         };
