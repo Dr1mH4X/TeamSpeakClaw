@@ -60,36 +60,36 @@ Use the base `docker-compose.yml`:
 - Online STT: configure an OpenAI-compatible online STT API under `[headless.stt]` in `config/settings.toml`
 - Multimodal model: set `omni_model = true` under `[llm]` — speech is sent to that model as audio (no STT, so `[headless.stt]` is not needed; `model` must accept audio input). Replies are still text; enable `[headless.tts]` separately for spoken replies
 
-**Option 2: Local STT (whisper.cpp, offline)**
+**Option 2: Local STT (FunASR, offline)**
+
+Switch to the compose variant that includes the `funasr-server` service:
+
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/funasr/docker-compose.yml
+```
+
+- Download a model from [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) into the `models/` directory
+- Set `base_url = "http://funasr-server:8000/v1"` under `[headless.stt]` in `config/settings.toml`; leave `api_key` empty and `model` can be any value
+- The service is published for amd64 only; on ARM or when you need GPU acceleration, use Option 1 or Option 3
+
+**Option 3: Local STT (whisper.cpp, offline)**
 
 Switch to one of the compose variants that include the `stt-api` service, based on your GPU:
 
 | Variant | Hardware | File |
 |---|---|---|
-| CPU | No dedicated GPU | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cpu.yml) |
-| GPU (Vulkan) | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-gpu.yml) |
-| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cuda.yml) |
+| CPU | No dedicated GPU | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-cpu.yml) |
+| GPU (Vulkan) | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-gpu.yml) |
+| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-cuda.yml) |
 
 ```bash
 # Example (CUDA): download the variant directly as docker-compose.yml
-curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-cuda.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/whisper/docker-compose-cuda.yml
 ```
 
 - Download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) into the `models/` directory
 - For voice wake, download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), and download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) into the same directory; model files are not shipped with the release archive
 - NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host; Intel/AMD needs `/dev/dri` device mapping (already configured in the compose file)
-
-**Option 3: Local STT (FunASR, offline)**
-
-Switch to the compose variant that includes the `funasr-server` service:
-
-```bash
-curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-funasr.yml
-```
-
-- Download a model from [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) into the `models/` directory
-- Set `base_url = "http://funasr-server:8000/v1"` under `[headless.stt]` in `config/settings.toml`; leave `api_key` empty and `model` can be any value
-- The service is published for amd64 only; on ARM or when you need GPU acceleration, use Option 1 or Option 2
 
 4. Start the service:
 

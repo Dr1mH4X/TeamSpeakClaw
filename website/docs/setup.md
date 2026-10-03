@@ -60,36 +60,36 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 - 在线 STT：在 `config/settings.toml` 的 `[headless.stt]` 中配置 OpenAI 兼容的在线 STT API
 - 多模态模型：在 `[llm]` 段将 `omni_model` 设为 `true`，语音以音频直接送入该模型（跳过 STT，无需配置 `[headless.stt]`；`model` 需支持音频输入）；模型回复仍是文本，需要语音回复时另行启用 `[headless.tts]`
 
-**方案二：本地 STT（whisper.cpp，离线）**
+**方案二：本地 STT（FunASR，离线）**
+
+换用带 `funasr-server` 服务的 compose 变体：
+
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/funasr/docker-compose.yml
+```
+
+- 从 [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) 下载模型到 `models/` 目录
+- 在 `config/settings.toml` 的 `[headless.stt]` 中设 `base_url = "http://funasr-server:8000/v1"`，`api_key` 留空、`model` 可填任意值
+- 该服务仅提供 amd64 镜像；ARM 设备或需要 GPU 加速时请改用方案一或方案三
+
+**方案三：本地 STT（whisper.cpp，离线）**
 
 换用带 `stt-api` 服务的 compose 变体，按显卡类型选择：
 
 | 变体 | 硬件 | 配置文件 |
 |---|---|---|
-| CPU | 无独显 | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cpu.yml) |
-| GPU（Vulkan） | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-gpu.yml) |
-| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/docker-compose-cuda.yml) |
+| CPU | 无独显 | [docker-compose-cpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-cpu.yml) |
+| GPU（Vulkan） | Intel / AMD | [docker-compose-gpu.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-gpu.yml) |
+| CUDA | NVIDIA | [docker-compose-cuda.yml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/whisper/docker-compose-cuda.yml) |
 
 ```bash
 # 以 CUDA 为例：
-curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-cuda.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/whisper/docker-compose-cuda.yml
 ```
 
 - 下载 [whisper.cpp GGML 模型](https://huggingface.co/ggerganov/whisper.cpp/tree/main)到 `models/` 目录
 - 启用语音唤醒时，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载两个前端模型（`melspectrogram.onnx`、`embedding_model.onnx`）到 `models/` 目录，并从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）一并放入；模型文件不随发行包提供
 - NVIDIA（CUDA）需在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)；Intel/AMD 需要 `/dev/dri` 设备映射（compose 中已配置）
-
-**方案三：本地 STT（FunASR，离线）**
-
-换用带 `funasr-server` 服务的 compose 变体：
-
-```bash
-curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/docker-compose-funasr.yml
-```
-
-- 从 [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) 下载模型到 `models/` 目录
-- 在 `config/settings.toml` 的 `[headless.stt]` 中设 `base_url = "http://funasr-server:8000/v1"`，`api_key` 留空、`model` 可填任意值
-- 该服务仅提供 amd64 镜像；ARM 设备或需要 GPU 加速时请改用方案一或方案二
 
 4. 启动服务：
 
