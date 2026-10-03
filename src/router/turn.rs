@@ -1,14 +1,14 @@
 //! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、体积自愈与回复策略。
 //!
 //! 调用点只提供回合请求（会话、提示、输入、回调、取消）与回复落点 `TurnSink`：
-//! 容量占位在事件循环里同步获取（`TurnPermit::reserve`），会话串行锁在执行任务内获取。
+//! 容量占位在事件循环里同步获取（`TurnPermit::reserve`），会话串行锁在任务准备请求前获取。
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::llm::context::{SessionSource, TurnCapacityPermit, TurnQueueFull};
+use crate::llm::context::{SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard};
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
@@ -54,6 +54,24 @@ impl TurnPermit {
         llm.try_reserve_turn_capacity()
             .map(|_capacity| Self { _capacity })
     }
+
+    pub(crate) async fn acquire_session(
+        self,
+        llm: &LlmEngine,
+        source: &SessionSource,
+    ) -> TurnSession {
+        let session = llm.acquire_turn_session(source).await;
+        TurnSession {
+            _permit: self,
+            _session: session,
+        }
+    }
+}
+
+/// 容量占位与会话锁一起持有，覆盖请求准备、回复投递与历史保存。
+pub(crate) struct TurnSession {
+    _permit: TurnPermit,
+    _session: TurnSessionGuard,
 }
 
 /// 一回合 LLM 请求：提示与输入由调用点准备，门禁、循环与回复策略由本 module 承担
@@ -73,7 +91,7 @@ impl TurnRequest<'_> {
     /// 执行回合：持门禁跑完工具循环，把结果交给 `sink`，只在送达成功时落上下文
     pub(crate) async fn run<F, S>(
         self,
-        permit: TurnPermit,
+        session: TurnSession,
         build_exec_ctx: F,
         sink: &S,
     ) -> Result<(), TurnError>
@@ -82,8 +100,7 @@ impl TurnRequest<'_> {
         S: TurnSink,
     {
         // 容量占位与同会话串行锁持有到回复落库完成
-        let _permit = permit;
-        let _session = self.llm.acquire_turn_session(self.source).await;
+        let _session = session;
 
         let tools = self.registry.to_tool_schemas(self.allowed_skills);
         let executor = TurnExecutor {
@@ -324,6 +341,20 @@ mod tests {
         input: TurnInput<'_>,
         sink: &RecordingSink,
     ) -> Result<(), TurnError> {
+        let session = TurnPermit::reserve(llm)
+            .expect("capacity is free in tests")
+            .acquire_session(llm, source)
+            .await;
+        run_session(llm, source, input, sink, session).await
+    }
+
+    async fn run_session(
+        llm: &LlmEngine,
+        source: &SessionSource,
+        input: TurnInput<'_>,
+        sink: &RecordingSink,
+        session: TurnSession,
+    ) -> Result<(), TurnError> {
         let cancel = CancellationToken::new();
         TurnRequest {
             llm,
@@ -336,12 +367,59 @@ mod tests {
             callbacks: None,
             cancel: &cancel,
         }
-        .run(
-            TurnPermit::reserve(llm).expect("capacity is free in tests"),
-            || panic!("no tool execution in these tests"),
-            sink,
-        )
+        .run(session, || panic!("no tool execution in these tests"), sink)
         .await
+    }
+
+    #[tokio::test]
+    async fn slow_preparation_preserves_same_session_reply_and_history_order() {
+        for source in [
+            SessionSource::TeamSpeak {
+                uid: "ordered-text".to_string(),
+            },
+            SessionSource::NapCatPrivate { user_id: 42 },
+            SessionSource::NapCatGroup { group_id: 42 },
+        ] {
+            let provider = Arc::new(FakeProvider::new(vec![
+                FakeOutcome::Success,
+                FakeOutcome::Success,
+            ]));
+            let llm = engine_with(&provider, 8);
+            let sink = RecordingSink::new();
+            let (finish_preparing, prepared) = tokio::sync::oneshot::channel();
+            let first_permit = TurnPermit::reserve(&llm).unwrap();
+            let second_permit = TurnPermit::reserve(&llm).unwrap();
+
+            let first = async {
+                let session = first_permit.acquire_session(&llm, &source).await;
+                prepared.await.unwrap();
+                run_session(&llm, &source, TurnInput::Text("first"), &sink, session).await
+            };
+            let second = async {
+                let session = second_permit.acquire_session(&llm, &source).await;
+                run_session(&llm, &source, TurnInput::Text("second"), &sink, session).await
+            };
+            tokio::pin!(first, second);
+
+            assert!(futures_util::poll!(&mut first).is_pending());
+            assert!(futures_util::poll!(&mut second).is_pending());
+            assert_eq!(provider.calls(), 0);
+            assert!(sink.sent().is_empty());
+
+            finish_preparing.send(()).unwrap();
+            assert!(first.await.is_ok());
+            assert!(second.await.is_ok());
+            assert_eq!(provider.calls(), 2);
+            assert_eq!(sink.sent(), vec!["hello", "hello"]);
+            let history = llm.stored_history(&source);
+            assert_eq!(history.len(), 2);
+            for (turn, expected) in history.iter().zip(["first", "second"]) {
+                let ContextUser::Text(text) = &turn.user else {
+                    panic!("text input must be saved as a text turn");
+                };
+                assert_eq!(text, expected);
+            }
+        }
     }
 
     #[tokio::test]
@@ -494,7 +572,10 @@ mod tests {
             cancel: &cancel,
         }
         .run(
-            TurnPermit::reserve(&llm).expect("capacity is free in tests"),
+            TurnPermit::reserve(&llm)
+                .expect("capacity is free in tests")
+                .acquire_session(&llm, &source)
+                .await,
             || panic!("no tool execution in these tests"),
             &sink,
         )

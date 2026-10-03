@@ -10,7 +10,7 @@ use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{
-    strip_trigger_prefix, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink,
+    strip_trigger_prefix, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
 };
 use crate::skills::{NcCaller, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
@@ -118,8 +118,9 @@ impl NcRouter {
                     self.spawn_handle(
                         &mut tasks,
                         msg,
+                        SessionSource::NapCatPrivate { user_id },
                         || warn!(user_id, "NC LLM turn queue full; dropping message"),
-                        |router, msg, permit| async move {
+                        |router, msg, session| async move {
                             router
                                 .handle_text(
                                     NcInboundText {
@@ -129,7 +130,7 @@ impl NcRouter {
                                         is_triggered: true,
                                     },
                                     &msg.message,
-                                    permit,
+                                    session,
                                 )
                                 .await
                         },
@@ -156,8 +157,9 @@ impl NcRouter {
                     self.spawn_handle(
                         &mut tasks,
                         msg,
+                        SessionSource::NapCatGroup { group_id },
                         || warn!(group_id, "NC LLM turn queue full; dropping message"),
-                        move |router, msg, permit| async move {
+                        move |router, msg, session| async move {
                             router
                                 .handle_text(
                                     NcInboundText {
@@ -167,7 +169,7 @@ impl NcRouter {
                                         is_triggered: triggered,
                                     },
                                     &msg.message,
-                                    permit,
+                                    session,
                                 )
                                 .await
                         },
@@ -186,11 +188,12 @@ impl NcRouter {
         &self,
         tasks: &mut JoinSet<()>,
         msg: M,
+        source: SessionSource,
         on_queue_full: impl FnOnce(),
         handler: F,
     ) where
         M: Send + 'static,
-        F: FnOnce(NcRouter, M, TurnPermit) -> Fut + Send + 'static,
+        F: FnOnce(NcRouter, M, TurnSession) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let config = self.config.clone();
@@ -207,6 +210,7 @@ impl NcRouter {
         };
 
         tasks.spawn(async move {
+            let session = permit.acquire_session(&llm, &source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -216,11 +220,16 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            handler(router, msg, permit).await;
+            handler(router, msg, session).await;
         });
     }
 
-    async fn handle_text(&self, inbound: NcInboundText, segments: &[Segment], permit: TurnPermit) {
+    async fn handle_text(
+        &self,
+        inbound: NcInboundText,
+        segments: &[Segment],
+        session: TurnSession,
+    ) {
         let NcInboundText {
             user_id,
             sender_name,
@@ -313,7 +322,7 @@ impl NcRouter {
         };
         match request
             .run(
-                permit,
+                session,
                 || {
                     UnifiedExecutionContext::for_nc(
                         NcCaller {

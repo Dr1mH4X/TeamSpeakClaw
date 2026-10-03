@@ -33,7 +33,9 @@ use crate::router::voice_feedback::{
 use crate::router::voice_turns::{
     decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
 };
-use crate::router::{resolve_ts_inbound, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink};
+use crate::router::{
+    resolve_ts_inbound, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
+};
 
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
@@ -411,6 +413,18 @@ fn apply_barge_in(
         );
         cancel_turn(turns, &target);
     }
+}
+
+/// 等到本会话可执行才登记产出，排队中的文本不参与跨说话人插话取消。
+async fn acquire_voice_turn_session(
+    permit: TurnPermit,
+    llm: &LlmEngine,
+    source: &SessionSource,
+    active: &ActiveTurn,
+) -> TurnSession {
+    let session = permit.acquire_session(llm, source).await;
+    active.mark_producing();
+    session
 }
 
 impl VoiceRouter {
@@ -1195,14 +1209,13 @@ impl VoiceRouter {
             );
             return Ok(());
         };
+        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, active).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             // omni 与 STT 同属语音回合：挂工具调用提示音，走 STT 路径同一块反馈基建
             Some(self.build_tts_callbacks(active, true).await?)
         } else {
             None
         };
-        active.mark_producing();
-
         let sink = VoiceNoticeSink {
             channel: channel.clone(),
             target_mode: ctx.reply_target_mode,
@@ -1221,7 +1234,7 @@ impl VoiceRouter {
         };
         let result = request
             .run(
-                permit,
+                session,
                 || {
                     UnifiedExecutionContext::for_ts(
                         TsCaller {
@@ -1292,13 +1305,12 @@ impl VoiceRouter {
             return Ok(());
         };
 
+        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, active).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
         } else {
             None
         };
-        active.mark_producing();
-
         let sink = VoiceNoticeSink {
             channel: channel.clone(),
             target_mode: ctx.reply_target_mode,
@@ -1317,7 +1329,7 @@ impl VoiceRouter {
         };
         let result = request
             .run(
-                permit,
+                session,
                 || {
                     UnifiedExecutionContext::for_ts(
                         TsCaller {
@@ -1941,6 +1953,60 @@ mod tests {
             let registered = turns.active(9).expect("successor stays registered");
             assert!(Arc::ptr_eq(&registered, &successor));
         }
+    }
+
+    /// 同会话排队的文本尚未产出：另一说话人插话只停当前回合，排队消息仍可执行。
+    #[tokio::test]
+    async fn cross_speaker_barge_in_preserves_text_waiting_for_its_session() {
+        let engine = LlmEngine::new(Arc::new(AppConfig::default())).unwrap();
+        let source = SessionSource::TeamSpeak {
+            uid: "text-caller".to_string(),
+        };
+        let turns = TurnRegistry::default();
+        let producer = Arc::new(ActiveTurn::new());
+        turns.begin_turn(5, &producer);
+        let first = acquire_voice_turn_session(
+            TurnPermit::reserve(&engine).unwrap(),
+            &engine,
+            &source,
+            &producer,
+        )
+        .await;
+
+        let queued = Arc::new(ActiveTurn::new());
+        turns.begin_turn(5, &queued);
+        let pending = acquire_voice_turn_session(
+            TurnPermit::reserve(&engine).unwrap(),
+            &engine,
+            &source,
+            &queued,
+        );
+        tokio::pin!(pending);
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        assert!(producer.is_producing());
+        assert!(
+            !queued.is_producing(),
+            "session wait must not count as production"
+        );
+
+        apply_barge_in(&turns, 9, turns.producing_turns(), "other-caller");
+        assert!(producer.cancel.is_cancelled());
+        assert!(
+            !queued.cancel.is_cancelled(),
+            "queued text must survive another caller's barge-in"
+        );
+        assert!(!queued.playback_cancel().load(Ordering::SeqCst));
+        assert!(turns.producing_turns().is_empty());
+        let registered = turns.active(5).expect("queued text stays registered");
+        assert!(Arc::ptr_eq(&registered, &queued));
+
+        drop(first);
+        let _session = pending.await;
+        assert!(queued.is_producing());
+        assert!(!queued.cancel.is_cancelled());
+        let producing = turns.producing_turns();
+        assert_eq!(producing.len(), 1);
+        assert!(Arc::ptr_eq(&producing[0].1, &queued));
     }
 
     #[tokio::test]

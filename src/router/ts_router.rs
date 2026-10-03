@@ -9,8 +9,8 @@ use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{
-    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink,
-    UnifiedInboundEvent,
+    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession,
+    TurnSink, UnifiedInboundEvent,
 };
 use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
@@ -85,6 +85,9 @@ impl EventRouter {
             {
                 TsEvent::TextMessage(msg) => {
                     let this = self.clone();
+                    let source = SessionSource::TeamSpeak {
+                        uid: msg.invoker_uid.clone(),
+                    };
                     let Ok(permit) = TurnPermit::reserve(&this.llm) else {
                         warn!(
                             invoker = %msg.invoker_name,
@@ -93,7 +96,8 @@ impl EventRouter {
                         continue;
                     };
                     tasks.spawn(async move {
-                        this.handle_message(msg, permit).await;
+                        let session = permit.acquire_session(&this.llm, &source).await;
+                        this.handle_message(msg, session).await;
                     });
                 }
                 TsEvent::Disconnected => {
@@ -144,7 +148,7 @@ impl EventRouter {
         }
     }
 
-    async fn handle_message(&self, event: TextMessageEvent, permit: TurnPermit) {
+    async fn handle_message(&self, event: TextMessageEvent, session: TurnSession) {
         if event.invoker_id == self.adapter.get_bot_clid() {
             return;
         }
@@ -252,7 +256,7 @@ Online: {}"#,
         };
         match request
             .run(
-                permit,
+                session,
                 || {
                     UnifiedExecutionContext::for_ts(
                         TsCaller {
