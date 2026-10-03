@@ -1113,7 +1113,8 @@ impl VoiceRouter {
         };
         let _session = self.llm.acquire_turn_session(&session_source).await;
         let tts_runtime = if self.is_tts_effectively_enabled() {
-            Some(self.build_tts_callbacks(active, false).await?)
+            // omni 与 STT 同属语音回合：挂工具调用提示音，走 STT 路径同一块反馈基建
+            Some(self.build_tts_callbacks(active, true).await?)
         } else {
             None
         };
@@ -1181,8 +1182,8 @@ impl VoiceRouter {
         Ok(())
     }
 
-    /// `tool_feedback` 只对非 omni 的 STT 语音回合为真：工具提示音是语音路径的反馈，
-    /// 桥接文本不触发（文本回复本身即反馈）
+    /// `tool_feedback` 为真时挂工具调用提示音：STT 与 omni 两条语音回合都挂，
+    /// 桥接文本不挂（回复本身就是文本反馈）
     async fn handle_user_input(
         &self,
         channel: &VoiceChannel,
@@ -1287,7 +1288,7 @@ impl VoiceRouter {
     /// 工具轮之后的最终回复按需开新会话，不会被吞掉。
     /// `keepalive` 是准入注册的活跃回合：每个流的 synth 任务持一份直到该流音频播放收尾，
     /// 让「机器人正在产出」覆盖播放尾，插话在 LLM 流结束后仍能取消播放。
-    /// `tool_feedback` 为真时挂上工具调用提示音（仅非 omni 的 STT 语音回合）
+    /// `tool_feedback` 为真时挂上工具调用提示音（语音回合：STT 与 omni 同路）
     async fn build_tts_callbacks(
         &self,
         keepalive: &Arc<ActiveTurn>,
