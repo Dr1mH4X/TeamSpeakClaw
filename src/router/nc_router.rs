@@ -7,11 +7,14 @@ use crate::adapter::napcat::{
 use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
 use crate::llm::context::SessionSource;
-use crate::llm::{LlmEngine, TurnCapacityPermit, TurnSessionGuard};
+use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::router::{run_llm_turn, strip_trigger_prefix, LLM_ERROR_REPLY};
+use crate::router::{
+    strip_trigger_prefix, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSink,
+};
 use crate::skills::{NcCaller, SkillRegistry, UnifiedExecutionContext};
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -115,9 +118,8 @@ impl NcRouter {
                     self.spawn_handle(
                         &mut tasks,
                         msg,
-                        SessionSource::NapCatPrivate { user_id },
                         || warn!(user_id, "NC LLM turn queue full; dropping message"),
-                        |router, msg, capacity, session| async move {
+                        |router, msg, permit| async move {
                             router
                                 .handle_text(
                                     NcInboundText {
@@ -127,8 +129,7 @@ impl NcRouter {
                                         is_triggered: true,
                                     },
                                     &msg.message,
-                                    capacity,
-                                    session,
+                                    permit,
                                 )
                                 .await
                         },
@@ -155,9 +156,8 @@ impl NcRouter {
                     self.spawn_handle(
                         &mut tasks,
                         msg,
-                        SessionSource::NapCatGroup { group_id },
                         || warn!(group_id, "NC LLM turn queue full; dropping message"),
-                        move |router, msg, capacity, session| async move {
+                        move |router, msg, permit| async move {
                             router
                                 .handle_text(
                                     NcInboundText {
@@ -167,8 +167,7 @@ impl NcRouter {
                                         is_triggered: triggered,
                                     },
                                     &msg.message,
-                                    capacity,
-                                    session,
+                                    permit,
                                 )
                                 .await
                         },
@@ -187,12 +186,11 @@ impl NcRouter {
         &self,
         tasks: &mut JoinSet<()>,
         msg: M,
-        source: SessionSource,
         on_queue_full: impl FnOnce(),
         handler: F,
     ) where
         M: Send + 'static,
-        F: FnOnce(NcRouter, M, TurnCapacityPermit, TurnSessionGuard) -> Fut + Send + 'static,
+        F: FnOnce(NcRouter, M, TurnPermit) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let config = self.config.clone();
@@ -203,13 +201,12 @@ impl NcRouter {
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
 
-        let Ok(capacity) = llm.try_reserve_turn_capacity() else {
+        let Ok(permit) = TurnPermit::reserve(&llm) else {
             on_queue_full();
             return;
         };
 
         tasks.spawn(async move {
-            let session = llm.acquire_turn_session(&source).await;
             let router = NcRouter {
                 config,
                 prompts,
@@ -219,18 +216,11 @@ impl NcRouter {
                 registry,
                 ts_adapter,
             };
-            handler(router, msg, capacity, session).await;
+            handler(router, msg, permit).await;
         });
     }
 
-    // 持有容量占位与同会话串行锁直至回复发送与历史保存完成
-    async fn handle_text(
-        &self,
-        inbound: NcInboundText,
-        segments: &[Segment],
-        _capacity: TurnCapacityPermit,
-        _session: TurnSessionGuard,
-    ) {
+    async fn handle_text(&self, inbound: NcInboundText, segments: &[Segment], permit: TurnPermit) {
         let NcInboundText {
             user_id,
             sender_name,
@@ -273,71 +263,11 @@ impl NcRouter {
         }
 
         let caller_groups = nc_pseudo_groups(&self.config.napcat, user_id, group_id);
-        let reply_text = self
-            .run_llm(stripped, &sender_name, user_id, group_id, &caller_groups)
-            .await;
-
-        let send_result = match group_id {
-            Some(gid) => {
-                let segs = vec![
-                    Segment::at(user_id),
-                    Segment::text(" "),
-                    Segment::text(&reply_text),
-                ];
-                self.adapter.send_group(gid, &segs).await
-            }
-            None => {
-                let segs = vec![Segment::text(&reply_text)];
-                self.adapter.send_private(user_id, &segs).await
-            }
-        };
-        if let Err(e) = send_result {
-            error!("NC send failed: {e}");
-            return;
-        }
-
         let source = match group_id {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
             None => SessionSource::NapCatPrivate { user_id },
         };
-        self.llm
-            .save_turn(&source, stripped.to_string(), reply_text);
-    }
-
-    fn is_triggered(&self, message: &[Segment]) -> bool {
-        let nc = &self.config.napcat;
-        let self_id = self.adapter.get_self_id().to_string();
-        if message
-            .iter()
-            .any(|segment| matches!(segment, Segment::At { qq } if qq == &self_id))
-        {
-            return true;
-        }
-        let text = segments_to_text(message);
-        let text = text.trim();
-        if text.contains(&format!("[CQ:at,qq={self_id}]")) {
-            return true;
-        }
-        nc.trigger_prefixes
-            .iter()
-            .any(|p| text.starts_with(p.as_str()))
-    }
-
-    /// 调用 LLM + Skill 系统，支持多轮工具调用，返回最终文本回复
-    async fn run_llm(
-        &self,
-        user_msg: &str,
-        sender_name: &str,
-        user_id: i64,
-        group_id: Option<i64>,
-        caller_groups: &[u32],
-    ) -> String {
-        let source = match group_id {
-            Some(gid) => SessionSource::NapCatGroup { group_id: gid },
-            None => SessionSource::NapCatPrivate { user_id },
-        };
-
-        let system_prompt = &self.prompts.system.content;
+        let system_prompt = self.prompts.system.content.as_str();
 
         let online_suffix = if let Some(ref adapter) = self.ts_adapter {
             let (online_clients, _) = adapter.list_clients_json(0).await;
@@ -361,44 +291,97 @@ impl NcRouter {
             ),
         };
 
-        let allowed_skills = self.gate.get_allowed_skills(caller_groups, 0);
+        let allowed_skills = self.gate.get_allowed_skills(&caller_groups, 0);
         debug!("NC allowed skills: {:?}", allowed_skills);
 
-        match run_llm_turn(
-            &self.llm,
-            &self.registry,
-            |llm| llm.build_messages(&source, system_prompt, &user_ctx, user_msg),
-            &allowed_skills,
-            None,
-            &CancellationToken::new(),
-            || {
-                UnifiedExecutionContext::for_nc(
-                    NcCaller {
-                        adapter: self.adapter.clone(),
-                        caller_id: user_id,
-                        caller_name: sender_name.to_string(),
-                        caller_groups: caller_groups.to_vec(),
-                        group_id,
-                        ts_adapter: self.ts_adapter.clone(),
-                    },
-                    self.gate.clone(),
-                    self.config.clone(),
-                )
-            },
-        )
-        .await
+        let sink = NcReplySink {
+            adapter: self.adapter.clone(),
+            user_id,
+            group_id,
+        };
+        let cancel = CancellationToken::new();
+        let request = TurnRequest {
+            llm: &self.llm,
+            registry: &self.registry,
+            source: &source,
+            system_prompt,
+            user_ctx: user_ctx.as_str(),
+            allowed_skills: &allowed_skills,
+            input: TurnInput::Text(stripped),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        match request
+            .run(
+                permit,
+                || {
+                    UnifiedExecutionContext::for_nc(
+                        NcCaller {
+                            adapter: self.adapter.clone(),
+                            caller_id: user_id,
+                            caller_name: sender_name.to_string(),
+                            caller_groups: caller_groups.clone(),
+                            group_id,
+                            ts_adapter: self.ts_adapter.clone(),
+                        },
+                        self.gate.clone(),
+                        self.config.clone(),
+                    )
+                },
+                &sink,
+            )
+            .await
         {
-            Ok(result) => {
-                let content = result.content;
-                info!(
-                    reply_chars = content.chars().count(),
-                    "[NC] LLM final reply ready"
-                );
-                content
+            Err(TurnError::Failed(error)) => error!("NC LLM error: {error}"),
+            Err(TurnError::ReplyFailed(error)) => {
+                warn!(error = %error, "NC reply delivery failed")
             }
-            Err(e) => {
-                error!("NC LLM error: {}", e);
-                LLM_ERROR_REPLY.to_string()
+            _ => {}
+        }
+    }
+
+    fn is_triggered(&self, message: &[Segment]) -> bool {
+        let nc = &self.config.napcat;
+        let self_id = self.adapter.get_self_id().to_string();
+        if message
+            .iter()
+            .any(|segment| matches!(segment, Segment::At { qq } if qq == &self_id))
+        {
+            return true;
+        }
+        let text = segments_to_text(message);
+        let text = text.trim();
+        if text.contains(&format!("[CQ:at,qq={self_id}]")) {
+            return true;
+        }
+        nc.trigger_prefixes
+            .iter()
+            .any(|p| text.starts_with(p.as_str()))
+    }
+}
+
+/// NapCat 回复落点：群聊先 @ 发送者再跟正文
+struct NcReplySink {
+    adapter: Arc<NapCatAdapter>,
+    user_id: i64,
+    group_id: Option<i64>,
+}
+
+#[async_trait]
+impl TurnSink for NcReplySink {
+    async fn send(&self, text: &str) -> Result<()> {
+        match self.group_id {
+            Some(gid) => {
+                let segs = vec![
+                    Segment::at(self.user_id),
+                    Segment::text(" "),
+                    Segment::text(text),
+                ];
+                self.adapter.send_group(gid, &segs).await
+            }
+            None => {
+                let segs = vec![Segment::text(text)];
+                self.adapter.send_private(self.user_id, &segs).await
             }
         }
     }

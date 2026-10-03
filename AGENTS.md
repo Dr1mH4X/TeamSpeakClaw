@@ -12,7 +12,7 @@ src/
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
 ├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）
 ├── router.rs                # 事件路由；组合路由器循环入口
-├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, unified, trigger）
+├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, turn, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
 ├── adapter/
 │   ├── reconnect.rs         # 重连退避常量与工具
