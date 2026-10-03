@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub use voice_audio::VoiceAudioHandles;
 
@@ -194,8 +194,7 @@ impl SkillRegistry {
             voice_audio,
         };
         let reg = Self::default();
-        for (name, factory) in DEFAULT_SKILLS.iter() {
-            debug!(skill = name, "constructing");
+        for (_, factory) in DEFAULT_SKILLS.iter() {
             reg.register(factory(&ctx));
         }
         info!("Skills registered: {:?}", reg.list_skills());
