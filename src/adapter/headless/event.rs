@@ -80,6 +80,9 @@ pub struct TsAdapter {
     client: Arc<tsclient_rs::Client>,
     event_tx: broadcast::Sender<TsEvent>,
     bot_clid: std::sync::atomic::AtomicU32,
+    /// 本进程是否主动关闭了这条连接（正常退出或握手失败后的清理）。
+    /// 用来把"我们自己关的"与"服务端/网络断的"区分开，后者才是需要报警的掉线。
+    closing: Arc<std::sync::atomic::AtomicBool>,
     main_subscriptions: Mutex<Option<MainSubscriptions>>,
 }
 
@@ -119,7 +122,13 @@ impl TsAdapter {
 
             let (event_tx, event_rx) = broadcast::channel::<TsEvent>(256);
             let (disconnect_tx, disconnect_rx) = watch::channel(false);
-            Self::register_event_handlers(&client, event_tx.clone(), disconnect_tx);
+            let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            Self::register_event_handlers(
+                &client,
+                event_tx.clone(),
+                disconnect_tx,
+                Arc::clone(&closing),
+            );
 
             client
                 .connect()
@@ -171,6 +180,7 @@ impl TsAdapter {
                         client,
                         event_tx,
                         bot_clid: std::sync::atomic::AtomicU32::new(bot_clid),
+                        closing,
                         main_subscriptions: Mutex::new(Some(MainSubscriptions {
                             events: event_rx,
                             disconnected: disconnect_rx,
@@ -180,10 +190,12 @@ impl TsAdapter {
                     return Ok(adapter);
                 }
                 Ok(Err(e)) => {
+                    closing.store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = client.disconnect().await;
                     return Err(anyhow!("wait_connected failed: {e:?}"));
                 }
                 Err(_) => {
+                    closing.store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = client.disconnect().await;
                     handshake_timeouts += 1;
                     if !should_upgrade_identity(handshake_timeouts) {
@@ -212,6 +224,7 @@ impl TsAdapter {
         client: &tsclient_rs::Client,
         tx: broadcast::Sender<TsEvent>,
         disconnect_tx: watch::Sender<bool>,
+        closing: Arc<std::sync::atomic::AtomicBool>,
     ) {
         {
             let tx = tx.clone();
@@ -249,8 +262,30 @@ impl TsAdapter {
         }
 
         {
+            let tx_kick = tx.clone();
             let tx_dc = tx.clone();
-            client.on_disconnected(Arc::new(move |_: tsclient_rs::Event| {
+            let disconnect_tx_kick = disconnect_tx.clone();
+            client.on_kicked(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::Kicked(reason) = &event {
+                    warn!(reason = %reason, "TeamSpeak server kicked the bot off the server");
+                }
+                let _ = tx_kick.send(TsEvent::Disconnected);
+                disconnect_tx_kick.send_replace(true);
+            }));
+            client.on_disconnected(Arc::new(move |event: tsclient_rs::Event| {
+                // 本进程主动关闭（正常退出或握手失败后的清理）不算掉线，不报警。
+                if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let tsclient_rs::Event::Disconnected(Some(reason)) = &event {
+                        warn!(
+                            reason = %reason,
+                            "TeamSpeak connection dropped by the client library"
+                        );
+                    } else {
+                        warn!(
+                            "TeamSpeak connection dropped without an error detail (server closed the session or the socket ended)"
+                        );
+                    }
+                }
                 let _ = tx_dc.send(TsEvent::Disconnected);
                 disconnect_tx.send_replace(true);
             }));
@@ -420,6 +455,8 @@ impl TsAdapter {
     }
 
     pub async fn quit(&self) -> Result<()> {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.client
             .disconnect()
             .await
