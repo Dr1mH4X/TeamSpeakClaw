@@ -59,8 +59,7 @@ website/                     # Docusaurus 用户文档（排除在 Rust CI 路�
 
 每条仅列要点，细节见 [docs/architecture.md](docs/architecture.md) 对应小节。
 
-- `split_message()` + `MAX_MESSAGE_BYTES`：8192 字节 TS3 ServerQuery 上限，UTF-8 安全、优先空白切分
-- 双发送路径：`event.rs:send_text_message()` / `actor.rs:notice_rx`，均经 `split_message`
+- `text_util::send_text_message()` + `split_message()` + `MAX_MESSAGE_BYTES`：8192 字节 TS3 ServerQuery 上限，UTF-8 安全、优先空白切分；TS 文本路由与技能回复、语音桥 `send_notice` 共用这一个发送实现
 - `voice_router.rs`：音频 STT/TTS 双流水线、OpenWakeWord 唤醒门（omni/STT 同门）、音乐 bot 音频过滤、gRPC 语音服务
 - `should_route_text_through_bridge`：voice bridge 就绪时 `ts_router::handle_message()` 跳过文本处理
 

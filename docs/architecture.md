@@ -10,7 +10,7 @@ TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，�
 
 ## 双入站适配器
 
-TeamSpeak 侧（`adapter/headless.rs`）封装 `tsclient-rs::Client`，提供建连、身份文件（`identity.json`）读写与等级升级、文本/断开事件回调、管理命令与 `send_text_message()` 等发送接口，接入参数与 STT/TTS 开关由 `config/headless.rs` 的 `HeadlessConfig` 控制。子模块 `adapter/headless/`：`actor` 是音频与通知发送的任务循环，`event` 是事件适配器与 `TsAdapter` 本身，`speech` 是 OPUS/STT/TTS 音频工具，`text_util` 是消息分片工具，`types` 是事件类型，`voice_service` 是 gRPC 服务端实现，`wakeword` 是 OpenWakeWord 唤醒门（推理核心 vendor 自 oww_rs；前端与分类器三个 onnx 均按配置从 `models_dir()` 运行时加载）。
+TeamSpeak 侧（`adapter/headless.rs`）封装 `tsclient-rs::Client`，提供建连、身份文件（`identity.json`）读写与等级升级、文本/断开事件回调、管理命令与 `send_text_message()` 等发送接口，接入参数与 STT/TTS 开关由 `config/headless.rs` 的 `HeadlessConfig` 控制。子模块 `adapter/headless/`：`actor` 是音频发送（唯一 pacer）与客户端目录（唯一写者，经命令通道）的任务循环，`event` 是事件适配器与 `TsAdapter` 本身，`speech` 是 OPUS/STT/TTS 音频工具，`text_util` 是消息分片工具，`types` 是事件类型，`voice_service` 是 gRPC 服务端实现，`wakeword` 是 OpenWakeWord 唤醒门（推理核心 vendor 自 oww_rs；前端与分类器三个 onnx 均按配置从 `models_dir()` 运行时加载）。
 
 NapCat 侧（`adapter/napcat.rs`）是 OneBot 11 WebSocket 客户端，仅当 `config.napcat.enabled` 才连接。子模块 `adapter/napcat/`：`api` 封装 OneBot 动作调用，`ws` 是连接循环与请求-响应匹配，`event` 解析上行事件，`types` 定义消息段与 `NcApiResponse` 结构。
 
@@ -24,7 +24,7 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 `split_message()`（`adapter/headless/text_util.rs`）把消息按 UTF-8 字节长度切分为不超过 `MAX_MESSAGE_BYTES = 8192` 的分片，这是 TS3 ServerQuery 单行上限；每片在字符边界处截断，优先在空白符处切分（最多回看 256 字节），单字符超限时强制整体成片，分片边界空白符丢弃。
 
-双发送路径均经 `split_message`：`event.rs:send_text_message()`（TS 文本路由与技能回复用）与 `actor.rs:notice_rx`（语音桥 `send_notice` 落地的文本通知用），后者对 1/2/3 目标模式归一后逐片 `sendTextMessage`。
+文本发送只有一个实现：`text_util::send_text_message()` 用 `split_message` 把整条消息切分后逐片 `sendTextMessage`。两个调用方是 `event.rs:TsAdapter::send_text_message()`（TS 文本路由与技能回复用）与 `voice_service.rs:VoiceServiceImpl::send_notice()`（语音桥 `send_notice` 的落地端，先把目标模式归一为 1/2/3 再复用该实现）。
 
 ## LLM 引擎
 
