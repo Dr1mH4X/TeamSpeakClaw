@@ -34,8 +34,8 @@ curl -fL -o models/embedding_model.onnx https://github.com/dscripka/openWakeWord
 
 ## 唤醒词分类器
 
-本程序的推理基于 tract-onnx，只读取 ONNX。
+本程序的推理基于 tract-onnx，只读取 ONNX；`.tflite` 等其它格式放进本目录不参与加载。
 
 ## 许可
 
-[openWakeWord](https://github.com/dscripka/openWakeWord) 的预训练模型由第三方独立提供，采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 许可证；该许可证的非商业使用限制仅适用于模型本身，与本项目代码的 AGPLv3 许可证相互独立、互不影响。如需商业部署，必须自行解决模型的商业授权问题，本项目不提供任何商业使用许可。；使用者自行下载后，模型文件本身的使用、修改与再分发受 CC BY-NC-SA 4.0 约束，商业部署需换成非 NC 授权的前端模型或自行训练。再分发这些模型时须保留 openWakeWord 的署名与许可说明。社区模型库下载的模型按其站点[商业许可](https://openwakeword.com/license)条款分发，商业部署前先核对该页条款。
+[openWakeWord](https://github.com/dscripka/openWakeWord) 的预训练模型由第三方独立提供，采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 许可证；该许可证的非商业使用限制仅适用于模型本身，与本项目代码的 AGPLv3 许可证相互独立、互不影响。模型文件受该非商业条款约束，本仓库与发行归档因此不代为分发，由使用者自行下载；下载后对模型文件的使用、修改与再分发仍受 CC BY-NC-SA 4.0 约束，再分发须保留 openWakeWord 的署名与许可说明。如需商业部署，必须自行解决模型的商业授权问题，本项目不提供任何商业使用许可。社区模型库下载的模型按其站点[商业许可](https://openwakeword.com/license)条款分发，商业部署前先核对该页条款。

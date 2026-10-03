@@ -1,11 +1,11 @@
 # 贡献指南
 
-欢迎贡献。本文件不重复项目约定：贡献前请阅读本仓库指导文件，动手前读完与本次改动相关的那几篇。文档索引见 [docs/README.md](docs/README.md)，分层归属与写作规则见 [docs/AGENTS.md](docs/AGENTS.md)。
+欢迎贡献。本文件不重复项目约定：贡献前请阅读本仓库指导文件，动手前读完与本次改动相关的那几篇。文档索引、分层归属与写作规则见 [docs/AGENTS.md](docs/AGENTS.md)。
 
 ## 起步
 
 - 全局 standing orders：[AGENTS.md](AGENTS.md)
-- 开发者文档索引：[docs/README.md](docs/README.md)
+- 开发者文档索引：[docs/AGENTS.md](docs/AGENTS.md)
 - 文档写法与归属：[docs/AGENTS.md](docs/AGENTS.md)
 
 ## 改什么先读什么

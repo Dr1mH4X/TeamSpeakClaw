@@ -252,7 +252,7 @@ pub enum SpeakerMatch {
     None { candidates: Vec<String> },
 }
 
-/// 直呼解析：`!replay [N] [@name with spaces]` / `!replay stop`
+/// 直呼解析：`!replay [N] [@name with spaces]`；`stop`/`status` 等子命令一律按非法命令拒绝
 pub fn parse_direct_command(text: &str, commands: &[String]) -> Option<DirectReplayCommand> {
     let text = text.trim();
     for cmd in commands {

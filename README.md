@@ -59,6 +59,7 @@ TeamSpeakClaw 是一个基于 LLM (大语言模型) 的 TeamSpeak 智能助手�
 ## 许可证
 
 [项目许可证](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE)
-[OpenWakeWord模型许可证](https://openwakeword.com/license)
+
+openWakeWord 预训练模型采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)，社区模型库下载的模型按其站点[商业许可](https://openwakeword.com/license)条款分发，详见 [models/README.md](models/README.md)。
 
 ![Alt](https://repobeats.axiom.co/api/embed/e20c0a7a0fb24465f50fb3882dadf4416456dd24.svg "Repobeats analytics image")

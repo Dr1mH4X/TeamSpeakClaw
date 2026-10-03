@@ -326,6 +326,8 @@ impl AudioOutput {
                 status.register_clip_cancel(cancel_id, cancel_for_job.clone());
             }
             AudioJob::PcmClip {
+                // 非 skill_scoped 的片段来自回合（反馈音等）而非技能：它不登记进
+                // `stop_clips` 的取消集合，`JobSource` 只影响状态展示与编码流超时，故沿用 `Tts`
                 source: if skill_scoped {
                     JobSource::SkillClip
                 } else {

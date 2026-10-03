@@ -57,6 +57,7 @@ It connects to your TeamSpeak server via a headless client, allowing users to in
 ## LICENSE
 
 [TeamSpeakClaw License](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/LICENSE)
-[OpenWakeWord 3rd party models license](https://openwakeword.com/license)
+
+openWakeWord pretrained models are licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); models from the community model library are distributed under its site [commercial license](https://openwakeword.com/license). See [models/README.md](models/README.md).
 
 ![Alt](https://repobeats.axiom.co/api/embed/e20c0a7a0fb24465f50fb3882dadf4416456dd24.svg "Repobeats analytics image")

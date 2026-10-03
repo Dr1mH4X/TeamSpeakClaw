@@ -12,7 +12,7 @@ src/
 ├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
 ├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）
 ├── router.rs                # 事件路由；组合路由器循环入口
-├── router/                  # 子模块（ts_router, nc_router, voice_router, unified, trigger）
+├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
 ├── adapter/
 │   ├── reconnect.rs         # 重连退避常量与工具
@@ -70,13 +70,13 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 
 ## Conventions
 
-- [AGENTS.md](AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
-- [architecture.md](architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与技能体系、层级规范。
-- [development.md](development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
-- [testing.md](testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
-- [defensive-patterns.md](defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
-- [ci-cd.md](ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及 git-cliff 变更日志。
-- [agent-notes.md](agent-notes.md) — 决策记录：为什么这么做、放弃了什么、如何验证。
+- [docs/AGENTS.md](docs/AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
+- [docs/architecture.md](docs/architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与技能体系、层级规范。
+- [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
+- [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
+- [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
+- [docs/ci-cd.md](docs/ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及 git-cliff 变更日志。
+- [docs/agent-notes.md](docs/agent-notes.md) — 决策记录：为什么这么做、放弃了什么、如何验证。
 
 ## LLM / Provider
 
