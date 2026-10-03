@@ -107,6 +107,10 @@ sidebar_position: 3
 
 **查看完整配置示例**：[acl.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/acl.toml)
 
+### 服务器组 ID
+
+`server_group_ids` 填 TeamSpeak 服务器组 ID：默认布局是 `6` Server Admin、`7` Normal、`8` Guest，示例即按这三个组划分权限。频道组是另一套编号（「频道管理员」是 `5`），不要和服务器组混用；`protected_group_ids`（默认 `[6, 7, 8]`）列出不允许被未授权用户踢出或封禁的组。
+
 ### 可用技能名称
 
 | 技能名 | 说明 |

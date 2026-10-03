@@ -107,6 +107,10 @@ Controls which user groups can use which features. **All matching rules' allowed
 
 **View full configuration example**: [acl.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/acl.toml)
 
+### Server Group IDs
+
+`server_group_ids` holds TeamSpeak server group IDs: the default layout is `6` Server Admin, `7` Normal and `8` Guest, and the example splits permissions along those three groups. Channel groups use a separate numbering ("channel admin" is `5`), so do not mix the two; `protected_group_ids` (default `[6, 7, 8]`) lists the groups whose members cannot be kicked or banned by users without that authority.
+
 ### Available Skill Names
 
 | Skill Name | Description |
