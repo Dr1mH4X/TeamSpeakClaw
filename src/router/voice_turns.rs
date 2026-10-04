@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::adapter::headless::wakeword::WakeVerdict;
+
 /// 唤醒门裁决后的准入动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WakewordAction {
@@ -32,11 +34,11 @@ pub(crate) enum WakewordAction {
 /// 唤醒词命中不区分产出回合的归属：出站音频只有一路（`AudioOutput` FIFO）是全局资源，
 /// 说话人无法从听觉上分辨当前在播的是谁触发的回复，所以「正在播报时再喊一次唤醒词」
 /// 一律夺回话语权；未命中唤醒词的补充语音在产出期间仍然丢弃。
-pub(crate) fn decide_wakeword_action(open: bool, detected: bool, busy: bool) -> WakewordAction {
-    if !open {
+pub(crate) fn decide_wakeword_action(verdict: &WakeVerdict, busy: bool) -> WakewordAction {
+    if !verdict.open {
         return WakewordAction::Drop;
     }
-    if !detected {
+    if !verdict.detected {
         return if busy {
             WakewordAction::Drop
         } else {
@@ -189,14 +191,23 @@ impl TurnRegistry {
 mod tests {
     use super::*;
 
+    /// 构造一条裁决：只有 `open` / `detected` 参与动作表
+    fn verdict(open: bool, detected: bool) -> WakeVerdict {
+        WakeVerdict {
+            open,
+            detected,
+            ..WakeVerdict::default()
+        }
+    }
+
     #[test]
     fn closed_gate_drops_utterances_without_a_wakeword() {
         assert_eq!(
-            decide_wakeword_action(false, false, false),
+            decide_wakeword_action(&verdict(false, false), false),
             WakewordAction::Drop
         );
         assert_eq!(
-            decide_wakeword_action(false, false, true),
+            decide_wakeword_action(&verdict(false, false), true),
             WakewordAction::Drop
         );
     }
@@ -205,7 +216,7 @@ mod tests {
     fn wakeword_passes_when_idle() {
         // 命中即开门：无论此前是否在窗口内，空闲时都放行（窗口顺带刷新）
         assert_eq!(
-            decide_wakeword_action(true, true, false),
+            decide_wakeword_action(&verdict(true, true), false),
             WakewordAction::Talk
         );
     }
@@ -214,7 +225,7 @@ mod tests {
     fn a_wakeword_hit_always_arrives_with_an_open_gate() {
         // 防御性分支：命中即开门，所以 (open=false, detected=true) 不是真实输入
         assert_eq!(
-            decide_wakeword_action(false, true, false),
+            decide_wakeword_action(&verdict(false, true), false),
             WakewordAction::Drop
         );
     }
@@ -222,11 +233,11 @@ mod tests {
     #[test]
     fn window_utterance_talks_only_while_idle() {
         assert_eq!(
-            decide_wakeword_action(true, false, false),
+            decide_wakeword_action(&verdict(true, false), false),
             WakewordAction::Talk
         );
         assert_eq!(
-            decide_wakeword_action(true, false, true),
+            decide_wakeword_action(&verdict(true, false), true),
             WakewordAction::Drop
         );
     }
@@ -236,7 +247,7 @@ mod tests {
     #[test]
     fn wakeword_barges_in_regardless_of_who_owns_the_floor() {
         assert_eq!(
-            decide_wakeword_action(true, true, true),
+            decide_wakeword_action(&verdict(true, true), true),
             WakewordAction::BargeIn
         );
     }

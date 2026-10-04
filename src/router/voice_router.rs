@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -16,9 +15,7 @@ use crate::adapter::headless::speech::{
     preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk, SttFrameOutcome,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
-use crate::adapter::headless::wakeword::{
-    WakewordGate, WakewordModels, CHUNK_SIZE as WAKE_BLOCK_SAMPLES,
-};
+use crate::adapter::headless::wakeword::{WakeFrame, WakeVerdict, WakewordGate, WakewordModels};
 use crate::adapter::headless::{
     parse_server_groups, TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR,
 };
@@ -28,7 +25,7 @@ use crate::llm::tool_loop::AsyncTokenCallback;
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
 use crate::router::voice_feedback::{
-    release_when_played, FeedbackGroup, FeedbackPlayer, ToolFeedback, WakeUtterance,
+    release_when_played, FeedbackGroup, FeedbackPlayer, ToolFeedback,
 };
 use crate::router::voice_turns::{
     decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
@@ -285,12 +282,9 @@ pub struct VoiceRouter {
     audio_output: AudioOutput,
     /// 直呼/技能共享的录制与出站句柄
     voice_audio: crate::skills::VoiceAudioHandles,
-    /// 唤醒门：`[headless.wakeword]` 启用时 Some；per-clid 会话状态只在事件循环任务里访问
-    /// （收帧路径喂门、收尾路径只读窗口）
+    /// 唤醒门：`[headless.wakeword]` 启用时 Some；per-clid 会话状态（含本条 utterance 的
+    /// 命中与命令尾累计）只在事件循环任务里访问（收帧路径喂门、收尾路径取裁决）
     wakeword: Option<Mutex<WakewordGate>>,
-    /// 在飞 utterance 的流式唤醒状态（键为 clid）：收帧路径累计命中与命中后活跃语音，
-    /// 收尾时取走做准入裁决；只在事件循环任务里访问
-    pending_wake: StdMutex<HashMap<u32, WakeUtterance>>,
     /// per-clid 活跃回合：准入判断「忙」与插话取消目标
     turns: TurnRegistry,
     /// 预生成短反馈音频：工具调用提示音与唤醒确认音共用；TTS provider 不可用时为 None
@@ -310,53 +304,6 @@ pub struct VoiceRouterHandles {
     pub voice_audio: crate::skills::VoiceAudioHandles,
     /// 已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
     pub wakeword: Option<Arc<WakewordModels>>,
-}
-
-/// 唤醒门对一条已收尾 utterance 的裁决：音频已在收帧路径逐帧喂过门，
-/// 这里只携带结果，准入任务不再重复喂门
-#[derive(Debug, Clone, Copy)]
-struct WakeVerdict {
-    /// 门是否放行（本条命中，或仍在既有开门窗口内）
-    open: bool,
-    /// 本条 utterance 是否命中唤醒词
-    detected: bool,
-    /// 命中块锚点之后没有成段活跃语音：本条只有唤醒词
-    wakeword_only: bool,
-    /// 命中块绝对起始采样位置（16k）；未命中为 None。确认音日志用它换算块序号，
-    /// 与命中时的 `voice.wakeword.calibration` 互校
-    anchor_sample: Option<usize>,
-    /// 锚点之后的 VAD 活跃毫秒：判据实际用到的量，确认音日志据此回看阈值取舍
-    anchor_active_ms: u64,
-    /// 本条 utterance 首个 VAD 活跃帧的绝对采样位置（16k）：给出命令开头相对 utterance 起点的位置
-    utterance_start_sample: Option<usize>,
-}
-
-impl Default for WakeVerdict {
-    /// 唤醒门未启用时的等价裁决：放行、未命中、无独占可言
-    fn default() -> Self {
-        Self {
-            open: true,
-            detected: false,
-            wakeword_only: false,
-            anchor_sample: None,
-            anchor_active_ms: 0,
-            utterance_start_sample: None,
-        }
-    }
-}
-
-/// 合成一条 utterance 的准入裁决：命中即开门（命中状态来自收帧路径的在飞记录），
-/// 未命中时沿用门窗口（窗口内续说算正常对话）；命中块锚点之后没有成段活跃语音的判为
-/// 「只有唤醒词」，准入据此播确认音而不进 STT/LLM。锚点与活跃毫秒一并带出，供日志实测滞后
-fn combine_wake_verdict(wake: WakeUtterance, window_open: bool) -> WakeVerdict {
-    WakeVerdict {
-        open: wake.detected() || window_open,
-        detected: wake.detected(),
-        wakeword_only: wake.detected() && !wake.has_command_tail(),
-        anchor_sample: wake.anchor_sample(),
-        anchor_active_ms: wake.active_ms_after(),
-        utterance_start_sample: wake.first_voiced_sample(),
-    }
 }
 
 /// 取消一条回合并按身份从注册表摘除：置 LLM 取消令牌与 TTS 播放取消位，再把这一条摘出集合。
@@ -476,7 +423,6 @@ impl VoiceRouter {
             audio_output,
             voice_audio,
             wakeword,
-            pending_wake: StdMutex::new(HashMap::new()),
             turns: TurnRegistry::default(),
             feedback,
         }
@@ -915,38 +861,25 @@ impl VoiceRouter {
 
     /// 收帧路径：把这一帧喂唤醒门。命中即夺回话语权——TTS 立刻停声，
     /// 不必等整条 utterance 收尾（旧实现整段喂门，插话要等用户把指令说完再断句）。
-    /// 命中同时记入该 clid 的在飞状态，供收尾时的准入裁决使用。
+    /// 命中与 VAD 记账落在门的 per-clid 会话上，收尾时由 `take_wake_verdict` 取走。
     async fn feed_wakeword_frame(&self, clid: u32, speaker: &str, frame: &SttFrameOutcome) {
         let Some(gate) = &self.wakeword else {
             return;
         };
-        if frame.utterance_started {
-            // 新的 utterance：清掉上一段残留的命中状态，避免独占判定串到新一段
-            self.pending_wake
-                .lock()
-                .expect("wake pending poisoned")
-                .remove(&clid);
-        }
         let event = {
             let mut gate = gate.lock().await;
-            gate.feed(clid, &frame.mono_16k, Instant::now())
-        };
-        // 本帧在门时间轴上的绝对起点：与 `fire_sample`（命中块绝对起点）同一坐标系
-        let frame_sample = event.fed_samples_before;
-        let frame_ms = frame.mono_16k.len() as u64 * 1000 / 16_000;
-        let (anchor_active_ms, utterance_start_sample) = {
-            let mut pending = self.pending_wake.lock().expect("wake pending poisoned");
-            let wake = pending.entry(clid).or_default();
-            // 命中时 `feed` 必给出命中块起点（`fire_sample` 与 `detected` 同源置位），
-            // 用绝对锚点而不是本帧位置：命中块的起点在这之前最多 carry 采样处
-            if let Some(fire_sample) = event.fire_sample {
-                wake.note_detection(fire_sample);
-            }
-            wake.note_frame(frame_sample, frame.voiced, frame_ms);
-            (wake.active_ms_after(), wake.first_voiced_sample())
+            gate.feed(
+                clid,
+                WakeFrame {
+                    pcm16: &frame.mono_16k,
+                    voiced: frame.voiced,
+                    utterance_started: frame.utterance_started,
+                },
+                Instant::now(),
+            )
         };
         let Some(fire_sample) = event.fire_sample else {
-            // 未命中：本帧只进在飞状态，不触发插话与打点
+            // 未命中：本帧只进门的累计状态，不触发插话与打点
             return;
         };
         info!(
@@ -955,8 +888,8 @@ impl VoiceRouter {
             speaker,
             probability = event.verdict.probability,
             fire_sample,
-            detection_block_index = fire_sample / WAKE_BLOCK_SAMPLES,
-            input_samples = event.fed_samples_before + frame.mono_16k.len(),
+            detection_block_index = event.detection_block_index().unwrap_or(0),
+            input_samples = event.fed_samples,
             window_open_before_feed = event.window_open_before_feed,
             "wakeword detected; opening gate"
         );
@@ -964,13 +897,13 @@ impl VoiceRouter {
             event = "voice.wakeword.calibration",
             clid,
             fire_sample,
-            // 命中块序号：可与 fire_sample / 块长 互校，也可与 raw_scores 的 chunk_index 对齐
-            detection_block_index = fire_sample / WAKE_BLOCK_SAMPLES,
+            // 命中块序号：可与 fire_sample 互校，也可与 raw_scores 的 chunk_index 对齐
+            detection_block_index = event.detection_block_index().unwrap_or(0),
             // utterance 起点与锚点后活跃毫秒：把命中位置换算成「utterance 内命令开头在哪」，
             // 用于实测 T_rep − T_end 这条判据滞后（旧打点只有命中时刻，无法对齐 VAD 时间轴）
-            utterance_start_sample = ?utterance_start_sample,
-            anchor_active_ms,
-            input_samples = event.fed_samples_before + frame.mono_16k.len(),
+            utterance_start_sample = ?event.utterance_start_sample,
+            anchor_active_ms = event.anchor_active_ms,
+            input_samples = event.fed_samples,
             first_chunk_index = event.calibration.first_chunk_index,
             peak_chunk_index = event.calibration.peak_chunk_index().unwrap_or(0),
             peak_score = event.calibration.peak_score().unwrap_or(0.0),
@@ -987,22 +920,13 @@ impl VoiceRouter {
     }
 
     /// 收段路径：取走这条 utterance 的唤醒裁决。音频已经逐帧喂过门，
-    /// 这里只读窗口状态，不再喂音频（重复喂会打乱推理窗口）
+    /// 裁决（命中 / 窗口 / 是否只喊了唤醒词）全部由门的 per-clid 会话给出，这里不再喂音频
     async fn take_wake_verdict(&self, clid: u32) -> WakeVerdict {
         let Some(gate) = &self.wakeword else {
             return WakeVerdict::default();
         };
-        let wake = self
-            .pending_wake
-            .lock()
-            .expect("wake pending poisoned")
-            .remove(&clid)
-            .unwrap_or_default();
-        let window_open = {
-            let mut gate = gate.lock().await;
-            gate.window_state(clid, Instant::now()).open
-        };
-        combine_wake_verdict(wake, window_open)
+        let mut gate = gate.lock().await;
+        gate.take_utterance_verdict(clid, Instant::now())
     }
 
     /// 准入：按唤醒裁决表调度 → 丢弃 / 插话 / 注册并派发回合任务。
@@ -1026,7 +950,7 @@ impl VoiceRouter {
             // 或反过来该插话却判成空闲
             let producing = self.turns.producing_turns();
             let busy = !producing.is_empty();
-            match decide_wakeword_action(verdict.open, verdict.detected, busy) {
+            match decide_wakeword_action(&verdict, busy) {
                 WakewordAction::Talk => {}
                 WakewordAction::Drop => {
                     debug!(
@@ -1060,7 +984,7 @@ impl VoiceRouter {
 
             // 命中块锚点之后没有成段活跃语音 = 这条 utterance 只有唤醒词：播确认音代替 STT/LLM，
             // 让用户立刻知道唤醒了；真正的指令在窗口内随后到达，走正常回合
-            if verdict.detected && verdict.wakeword_only {
+            if verdict.wakeword_only {
                 info!(
                     event = "voice.wakeword.confirm",
                     clid,
@@ -1069,7 +993,7 @@ impl VoiceRouter {
                     // 与命中时的 `voice.wakeword.calibration` 同一组锚点字段，
                     // 便于事后核对「判成独占的这段为什么没够到阈值」
                     anchor_sample = ?verdict.anchor_sample,
-                    detection_block_index = ?verdict.anchor_sample.map(|sample| sample / WAKE_BLOCK_SAMPLES),
+                    detection_block_index = ?verdict.detection_block_index(),
                     utterance_start_sample = ?verdict.utterance_start_sample,
                     anchor_active_ms = verdict.anchor_active_ms,
                     "wakeword-only utterance; playing the confirmation phrase"
@@ -1733,82 +1657,6 @@ mod tests {
 
         let (_, first, _) = rx.recv().await.unwrap();
         assert_eq!(first.speaker_client_id, 1);
-    }
-
-    /// 准入裁决的合成：命中即放行且独占与否由「命中块锚点之后的活跃语音」决定，
-    /// 未命中时只由门窗口决定放行——这条语义决定「唤醒词+指令」是否立刻进 STT/LLM
-    #[test]
-    fn wake_verdict_combines_detection_and_window_state() {
-        // 命中、锚点之后无活跃语音：播确认音，不进 STT/LLM
-        let mut only_wake = WakeUtterance::default();
-        only_wake.note_detection(1_280);
-        let verdict = combine_wake_verdict(only_wake, false);
-        assert!(verdict.open && verdict.detected && verdict.wakeword_only);
-        // 锚点与活跃毫秒随裁决带出，供确认音日志
-        assert_eq!(verdict.anchor_sample, Some(1_280));
-        assert_eq!(verdict.anchor_active_ms, 0);
-
-        // 命中且随后有成段指令：正常对话（窗口查询结果不影响命中即放行）
-        let mut command = WakeUtterance::default();
-        command.note_detection(0);
-        for index in 0..10 {
-            command.note_frame(index * 320, true, 20);
-        }
-        let verdict = combine_wake_verdict(command, false);
-        assert!(verdict.open && verdict.detected && !verdict.wakeword_only);
-        // 10 帧 × 20ms = 200ms，恰好等于 `WAKE_ONLY_TAIL_MS`
-        assert_eq!(verdict.anchor_active_ms, 200);
-
-        // 未命中但在窗口内：续说，正常对话
-        let verdict = combine_wake_verdict(WakeUtterance::default(), true);
-        assert!(verdict.open && !verdict.detected && !verdict.wakeword_only);
-        assert_eq!(verdict.anchor_sample, None);
-
-        // 未命中且窗口已关：丢弃
-        let verdict = combine_wake_verdict(WakeUtterance::default(), false);
-        assert!(!verdict.open && !verdict.detected);
-    }
-
-    /// 锚点口径的端到端合成：命中块内、报告之前喂入的活跃帧被回补计入，
-    /// 「唤醒词 停」因此不再被判成唤醒词独占；命中块之后的静音帧不推高计数
-    #[test]
-    fn wake_verdict_backfills_the_hit_block_at_the_threshold_boundary() {
-        // 命中块 4 帧 = 80ms，报告帧是块的最后一帧（前 3 帧在报告之前已喂入）
-        let mut wake = WakeUtterance::default();
-        for index in 0..3 {
-            wake.note_frame(index * 320, true, 20);
-        }
-        wake.note_detection(0);
-        wake.note_frame(960, true, 20);
-        let verdict = combine_wake_verdict(wake.clone(), false);
-        assert!(verdict.detected && verdict.wakeword_only);
-        assert_eq!(verdict.anchor_active_ms, 80);
-        assert_eq!(verdict.utterance_start_sample, Some(0));
-
-        // 「停」再攒 6 帧 = 120ms，合计恰好 200ms：判为有命令，进 STT/LLM
-        let mut command = wake;
-        for index in 4..10 {
-            command.note_frame(index * 320, true, 20);
-        }
-        let verdict = combine_wake_verdict(command, false);
-        assert!(verdict.detected && !verdict.wakeword_only);
-        assert_eq!(verdict.anchor_active_ms, 200);
-
-        // 命中块结束后的 VAD 静音不把计数推过阈值；锚点仍可换算命中块序号
-        let mut silent = WakeUtterance::default();
-        silent.note_frame(0, true, 20);
-        silent.note_detection(1_280);
-        silent.note_frame(1_280, false, 20);
-        silent.note_frame(1_600, false, 20);
-        let verdict = combine_wake_verdict(silent, false);
-        assert!(verdict.wakeword_only);
-        assert_eq!(verdict.anchor_active_ms, 0);
-        assert_eq!(
-            verdict
-                .anchor_sample
-                .map(|sample| sample / WAKE_BLOCK_SAMPLES),
-            Some(1)
-        );
     }
 
     /// 同一 clid 两条产出回合：插话一次把两条都取消——LLM 取消令牌与 TTS 播放取消位都置位，
