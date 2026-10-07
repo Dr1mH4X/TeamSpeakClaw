@@ -6,6 +6,8 @@
 //! 逐组件 ready 上报驱动 `Initializing -> Running` 的模型待后续接入。
 //! 语音桥组件就绪（`BridgeReadiness`）的写入归属也在此模块：其余模块只报告
 //! `BridgeComponent` 的 Up/Down 事件，不自行持有或改写具体标志位。
+//! 组件就绪写入已全部经 `BridgeReadiness` 上报：适配器、actor 与路由层都直接调用
+//! `set_up` / `set_down` / `take_stream_established`，不再有中间的薄门面结构。
 //!
 //! 重试驱动 `run_retry_loop` 也由本模块拥有：适配器只执行单次尝试并用自身措辞记录失败，
 //! 记账、会话建立后的退避重置与等待关闭都在驱动内完成。

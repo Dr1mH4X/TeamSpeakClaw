@@ -205,7 +205,7 @@ async fn run_connected_session(
         }
     };
 
-    let voice_bridge_state = headless::VoiceBridgeState::default();
+    let voice_bridge_state = lifecycle::BridgeReadiness::default();
     let ts_router = EventRouter::new_with_clients(
         context.clone(),
         adapter.clone(),

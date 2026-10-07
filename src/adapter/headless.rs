@@ -51,48 +51,6 @@ pub use self::speaker_ring::SpeakerRings;
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 语音桥就绪状态的薄门面：状态与闩语义归属 [`crate::adapter::lifecycle::BridgeReadiness`]，
-/// 本结构只把现有调用点的事件措辞翻译成组件 Up/Down 报告。
-#[derive(Clone, Default)]
-pub struct VoiceBridgeState {
-    readiness: BridgeReadiness,
-}
-
-impl VoiceBridgeState {
-    pub fn is_ready(&self) -> bool {
-        self.readiness.is_ready()
-    }
-
-    pub(crate) fn set_service_running(&self, running: bool) {
-        if running {
-            self.readiness.set_up(BridgeComponent::Service);
-        } else {
-            self.readiness.set_down(BridgeComponent::Service);
-        }
-    }
-
-    /// actor 事件 handler 注册完成后置位
-    pub(crate) fn set_actor_ready(&self, ready: bool) {
-        if ready {
-            self.readiness.set_up(BridgeComponent::Actor);
-        } else {
-            self.readiness.set_down(BridgeComponent::Actor);
-        }
-    }
-
-    pub(crate) fn set_stream_ready(&self, ready: bool) {
-        if ready {
-            self.readiness.set_up(BridgeComponent::Stream);
-        } else {
-            self.readiness.set_down(BridgeComponent::Stream);
-        }
-    }
-
-    fn take_connected_since_retry(&self) -> bool {
-        self.readiness.take_stream_established()
-    }
-}
-
 pub fn voice_features_enabled(config: &AppConfig) -> bool {
     config.headless.stt.enabled
         || config.headless.tts.enabled
@@ -218,19 +176,19 @@ async fn warm_audio_surface(output: &AudioOutput, rings: &SpeakerRings) -> Resul
 }
 
 struct ServiceRunningGuard {
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
 }
 
 impl ServiceRunningGuard {
-    fn new(bridge_state: VoiceBridgeState) -> Self {
-        bridge_state.set_service_running(true);
+    fn new(bridge_state: BridgeReadiness) -> Self {
+        bridge_state.set_up(BridgeComponent::Service);
         Self { bridge_state }
     }
 }
 
 impl Drop for ServiceRunningGuard {
     fn drop(&mut self) {
-        self.bridge_state.set_service_running(false);
+        self.bridge_state.set_down(BridgeComponent::Service);
     }
 }
 
@@ -269,12 +227,12 @@ async fn bind_grpc_listener() -> Result<tokio::net::TcpListener> {
         .map_err(|error| anyhow!("grpc listen failed on {addr}: {error}"))
 }
 
-pub async fn run(
+pub(crate) async fn run(
     client: Arc<tsclient_rs::Client>,
     listener: tokio::net::TcpListener,
     config: Arc<AppConfig>,
     shutdown: CancellationToken,
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
     bot_clid: u32,
     voice_runtime: HeadlessVoiceRuntime,
 ) -> Result<()> {
@@ -407,16 +365,16 @@ fn service_exit_signal(result: &Result<()>) -> Option<&'static str> {
 }
 
 /// headless Runtime::start 入参（避免参数列表过长）
-pub struct HeadlessStartHandles {
-    pub ts_adapter: Arc<TsAdapter>,
-    pub bridge_state: VoiceBridgeState,
-    pub voice_audio: VoiceAudioHandles,
+pub(crate) struct HeadlessStartHandles {
+    pub(crate) ts_adapter: Arc<TsAdapter>,
+    pub(crate) bridge_state: BridgeReadiness,
+    pub(crate) voice_audio: VoiceAudioHandles,
     /// 连接前已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
-    pub wakeword_models: Option<Arc<wakeword::WakewordModels>>,
+    pub(crate) wakeword_models: Option<Arc<wakeword::WakewordModels>>,
 }
 
 impl Runtime {
-    pub async fn start(
+    pub(crate) async fn start(
         config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
         gate: Arc<PermissionGate>,
@@ -432,8 +390,8 @@ impl Runtime {
         } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
-            bridge_state.set_service_running(false);
-            bridge_state.set_stream_ready(false);
+            bridge_state.set_down(BridgeComponent::Service);
+            bridge_state.set_down(BridgeComponent::Stream);
             info!("headless: voice disabled (stt/tts/omni/voice_replay not enabled), management-only mode");
             let (failed_tx, _) = watch::channel::<Option<&'static str>>(None);
             return Ok(Self {
@@ -492,8 +450,8 @@ impl Runtime {
                 service_voice_runtime,
             )
             .await;
-            service_bridge_state.set_service_running(false);
-            service_bridge_state.set_stream_ready(false);
+            service_bridge_state.set_down(BridgeComponent::Service);
+            service_bridge_state.set_down(BridgeComponent::Stream);
             if let Err(error) = &result {
                 error!("headless service failed: {error}");
             }
@@ -514,7 +472,7 @@ impl Runtime {
         let bridge_voice_audio = voice_audio;
         let bridge_wakeword = wakeword_models;
         let bridge_task = tokio::spawn(async move {
-            let _ = bridge_state_for_router.take_connected_since_retry();
+            let _ = bridge_state_for_router.take_stream_established();
             // 循环无界：预先标记会话已建立，连续失败不判定为耗尽。
             let mut reconnect = ReconnectState::default();
             reconnect.record_session_started();
@@ -537,18 +495,18 @@ impl Runtime {
                     let shutdown = shutdown_for_bridge.clone();
                     let state = bridge_state_for_router.clone();
                     async move {
-                        state.set_stream_ready(false);
+                        state.set_down(BridgeComponent::Stream);
                         let run_result = tokio::select! {
                             biased;
                             _ = shutdown.cancelled() => return AttemptOutcome::Cancelled,
                             result = crate::router::VoiceRouter::new(handles).run(shutdown.clone()) => result,
                         };
-                        state.set_stream_ready(false);
+                        state.set_down(BridgeComponent::Stream);
                         if shutdown.is_cancelled() {
                             return AttemptOutcome::Cancelled;
                         }
 
-                        let session_started = state.take_connected_since_retry();
+                        let session_started = state.take_stream_established();
                         let error = match run_result {
                             Ok(()) => {
                                 error!("voice router stopped unexpectedly");
@@ -577,7 +535,7 @@ impl Runtime {
             if let Err(error) = loop_result {
                 error!("voice router retry loop exhausted unexpectedly: {error}");
             }
-            bridge_state_for_router.set_stream_ready(false);
+            bridge_state_for_router.set_down(BridgeComponent::Stream);
         });
         // 监控 bridge 任务 panic：panic 不可自愈，置失败信号让上层重建会话
         let failed_tx_for_bridge = failed_tx.clone();
@@ -586,7 +544,7 @@ impl Runtime {
             let result = bridge_task.await;
             if let Err(error) = result {
                 if error.is_panic() {
-                    bridge_state_watcher.set_stream_ready(false);
+                    bridge_state_watcher.set_down(BridgeComponent::Stream);
                     let _ = failed_tx_for_bridge.send(Some("voice router"));
                     error!("voice router task panicked; signaling session restart");
                 }
@@ -643,43 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_state_requires_service_stream_and_actor() {
-        let state = VoiceBridgeState::default();
-        assert!(!state.is_ready());
-
-        state.set_actor_ready(true);
-        assert!(!state.is_ready());
-        state.set_stream_ready(true);
-        assert!(!state.is_ready());
-        state.set_service_running(true);
-        assert!(state.is_ready());
-
-        state.set_service_running(false);
-        assert!(!state.is_ready());
-        state.set_stream_ready(false);
-        assert!(!state.is_ready());
-        state.set_actor_ready(false);
-        assert!(!state.is_ready());
-    }
-
-    #[test]
-    fn bridge_state_is_unready_before_actor_handler_registration() {
-        let state = VoiceBridgeState::default();
-        state.set_service_running(true);
-        state.set_stream_ready(true);
-
-        // actor 未就绪时即使服务与订阅流都正常也不就绪
-        assert!(!state.is_ready());
-
-        state.set_actor_ready(true);
-        assert!(state.is_ready());
-    }
-
-    #[test]
     fn service_guard_marks_unready_when_dropped() {
-        let state = VoiceBridgeState::default();
-        state.set_stream_ready(true);
-        state.set_actor_ready(true);
+        let state = BridgeReadiness::default();
+        state.set_up(BridgeComponent::Stream);
+        state.set_up(BridgeComponent::Actor);
 
         {
             let _guard = ServiceRunningGuard::new(state.clone());
@@ -767,15 +692,6 @@ mod tests {
         let second = bind_grpc_listener().await;
 
         assert!(second.is_err());
-    }
-
-    #[test]
-    fn bridge_connection_latch_is_consumed_once() {
-        let state = VoiceBridgeState::default();
-        state.set_stream_ready(true);
-
-        assert!(state.take_connected_since_retry());
-        assert!(!state.take_connected_since_retry());
     }
 
     #[tokio::test]

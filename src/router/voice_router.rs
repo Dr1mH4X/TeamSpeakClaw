@@ -16,9 +16,8 @@ use crate::adapter::headless::speech::{
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::wakeword::{WakeFrame, WakeVerdict, WakewordGate, WakewordModels};
-use crate::adapter::headless::{
-    parse_server_groups, TsAdapter, VoiceBridgeState, INTERNAL_GRPC_ADDR,
-};
+use crate::adapter::headless::{parse_server_groups, TsAdapter, INTERNAL_GRPC_ADDR};
+use crate::adapter::lifecycle::{BridgeComponent, BridgeReadiness};
 use crate::adapter::reconnect::{abort_managed_tasks, now_unix_ms};
 use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
 use crate::llm::tool_loop::AsyncTokenCallback;
@@ -252,19 +251,19 @@ impl TtsTurnRuntime {
 }
 
 struct VoiceBridgeReadyGuard {
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
 }
 
 impl VoiceBridgeReadyGuard {
-    fn new(bridge_state: VoiceBridgeState) -> Self {
-        bridge_state.set_stream_ready(true);
+    fn new(bridge_state: BridgeReadiness) -> Self {
+        bridge_state.set_up(BridgeComponent::Stream);
         Self { bridge_state }
     }
 }
 
 impl Drop for VoiceBridgeReadyGuard {
     fn drop(&mut self) {
-        self.bridge_state.set_stream_ready(false);
+        self.bridge_state.set_down(BridgeComponent::Stream);
     }
 }
 
@@ -277,7 +276,7 @@ pub struct VoiceRouter {
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
     /// 统一出站：TTS/clip/外部流 FIFO；并发由 TurnCoordinator + 本层队列承担
     audio_output: AudioOutput,
     /// 直呼/技能共享的录制与出站句柄
@@ -293,17 +292,17 @@ pub struct VoiceRouter {
 
 /// VoiceRouter 装配句柄（避免构造参数列表过长）
 pub struct VoiceRouterHandles {
-    pub config: Arc<AppConfig>,
-    pub prompts: Arc<PromptsConfig>,
-    pub gate: Arc<PermissionGate>,
-    pub llm: Arc<LlmEngine>,
-    pub registry: Arc<SkillRegistry>,
-    pub ts_adapter: Arc<TsAdapter>,
-    pub bridge_state: VoiceBridgeState,
-    pub audio_output: AudioOutput,
-    pub voice_audio: crate::skills::VoiceAudioHandles,
+    pub(crate) config: Arc<AppConfig>,
+    pub(crate) prompts: Arc<PromptsConfig>,
+    pub(crate) gate: Arc<PermissionGate>,
+    pub(crate) llm: Arc<LlmEngine>,
+    pub(crate) registry: Arc<SkillRegistry>,
+    pub(crate) ts_adapter: Arc<TsAdapter>,
+    pub(crate) bridge_state: BridgeReadiness,
+    pub(crate) audio_output: AudioOutput,
+    pub(crate) voice_audio: crate::skills::VoiceAudioHandles,
     /// 已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
-    pub wakeword: Option<Arc<WakewordModels>>,
+    pub(crate) wakeword: Option<Arc<WakewordModels>>,
 }
 
 /// 取消一条回合并按身份从注册表摘除：置 LLM 取消令牌与 TTS 播放取消位，再把这一条摘出集合。
@@ -433,7 +432,7 @@ impl VoiceRouter {
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
-        self.bridge_state.set_stream_ready(false);
+        self.bridge_state.set_down(BridgeComponent::Stream);
         let channel = connect_voice_channel().await?;
         let mut client = VoiceServiceClient::new(channel.clone());
         let channel = VoiceChannel::new(channel);
