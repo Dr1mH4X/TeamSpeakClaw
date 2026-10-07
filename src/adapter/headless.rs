@@ -11,6 +11,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::adapter::lifecycle::{run_retry_loop, AttemptOutcome, ReconnectState};
 use crate::adapter::reconnect::join_or_abort;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
@@ -517,51 +518,68 @@ impl Runtime {
         let bridge_voice_audio = voice_audio;
         let bridge_wakeword = wakeword_models;
         let bridge_task = tokio::spawn(async move {
-            let mut attempt = 1u32;
             let _ = bridge_state_for_router.take_connected_since_retry();
-            loop {
-                bridge_state_for_router.set_stream_ready(false);
-                let run_result = tokio::select! {
-                    biased;
-                    _ = shutdown_for_bridge.cancelled() => break,
-                    result = crate::router::VoiceRouter::new(
-                        crate::router::VoiceRouterHandles {
-                            config: bridge_config.clone(),
-                            prompts: bridge_prompts.clone(),
-                            gate: bridge_gate.clone(),
-                            llm: bridge_llm.clone(),
-                            registry: bridge_registry.clone(),
-                            ts_adapter: bridge_ts_adapter.clone(),
-                            bridge_state: bridge_state_for_router.clone(),
-                            audio_output: bridge_audio_output.clone(),
-                            voice_audio: bridge_voice_audio.clone(),
-                            wakeword: bridge_wakeword.clone(),
-                        },
-                    ).run(shutdown_for_bridge.clone()) => result,
-                };
-                bridge_state_for_router.set_stream_ready(false);
-                if shutdown_for_bridge.is_cancelled() {
-                    break;
-                }
+            // 循环无界：预先标记会话已建立，连续失败不判定为耗尽。
+            let mut reconnect = ReconnectState::default();
+            reconnect.record_session_started();
+            let loop_result = run_retry_loop(
+                &mut reconnect,
+                &shutdown_for_bridge,
+                || {
+                    let handles = crate::router::VoiceRouterHandles {
+                        config: bridge_config.clone(),
+                        prompts: bridge_prompts.clone(),
+                        gate: bridge_gate.clone(),
+                        llm: bridge_llm.clone(),
+                        registry: bridge_registry.clone(),
+                        ts_adapter: bridge_ts_adapter.clone(),
+                        bridge_state: bridge_state_for_router.clone(),
+                        audio_output: bridge_audio_output.clone(),
+                        voice_audio: bridge_voice_audio.clone(),
+                        wakeword: bridge_wakeword.clone(),
+                    };
+                    let shutdown = shutdown_for_bridge.clone();
+                    let state = bridge_state_for_router.clone();
+                    async move {
+                        state.set_stream_ready(false);
+                        let run_result = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return AttemptOutcome::Cancelled,
+                            result = crate::router::VoiceRouter::new(handles).run(shutdown.clone()) => result,
+                        };
+                        state.set_stream_ready(false);
+                        if shutdown.is_cancelled() {
+                            return AttemptOutcome::Cancelled;
+                        }
 
-                if bridge_state_for_router.take_connected_since_retry() {
-                    attempt = 1;
-                }
-                match run_result {
-                    Ok(()) => error!("voice router stopped unexpectedly"),
-                    Err(error) => error!("voice router failed: {error}"),
-                }
-
-                let delay = crate::adapter::lifecycle::reconnect_delay_for_attempt(attempt);
-                warn!(
-                    attempt,
-                    delay_secs = delay.as_secs(),
-                    "voice router unavailable; TeamSpeak text fallback is active"
-                );
-                if !crate::adapter::lifecycle::wait_for_retry(delay, &shutdown_for_bridge).await {
-                    break;
-                }
-                attempt = attempt.saturating_add(1);
+                        let session_started = state.take_connected_since_retry();
+                        let error = match run_result {
+                            Ok(()) => {
+                                error!("voice router stopped unexpectedly");
+                                anyhow!("voice router stopped unexpectedly")
+                            }
+                            Err(error) => {
+                                error!("voice router failed: {error}");
+                                error
+                            }
+                        };
+                        AttemptOutcome::Failed {
+                            error,
+                            session_started,
+                        }
+                    }
+                },
+                |attempt, delay| {
+                    warn!(
+                        attempt,
+                        delay_secs = delay.as_secs(),
+                        "voice router unavailable; TeamSpeak text fallback is active"
+                    );
+                },
+            )
+            .await;
+            if let Err(error) = loop_result {
+                error!("voice router retry loop exhausted unexpectedly: {error}");
             }
             bridge_state_for_router.set_stream_ready(false);
         });

@@ -4,7 +4,11 @@
 //!
 //! 组件就绪事件模型尚未接入：当前由适配器在进入路由运行后直接报告 `Running`，
 //! 逐组件 ready 上报驱动 `Initializing -> Running` 的模型待后续接入。
+//!
+//! 重试驱动 `run_retry_loop` 也由本模块拥有：适配器只执行单次尝试并用自身措辞记录失败，
+//! 记账、会话建立后的退避重置与等待关闭都在驱动内完成。
 
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -231,16 +235,76 @@ pub(crate) async fn retry_after_failure(
     }
 }
 
+/// 一次尝试的结局：失败并按退避策略重试，或因根取消令牌触发而不计账地结束。
+pub(crate) enum AttemptOutcome {
+    /// 本轮尝试以失败告终；`session_started` 为真时先重置退避再记账。
+    Failed {
+        /// 失败原因，有界用法耗尽尝试次数时由驱动交回调用方。
+        error: anyhow::Error,
+        /// 本轮尝试内是否成功建立过会话。
+        session_started: bool,
+    },
+    /// 根取消令牌触发，本轮不计账，驱动随即正常返回。
+    Cancelled,
+}
+
+/// 可测的重试驱动：反复执行一次会话尝试，失败后记账并按共享退避策略等待。
+///
+/// `attempt` 每轮执行一次尝试并报告结局，`on_failure` 在记账后、等待前收到尝试序号与
+/// 延迟，由调用方用自身措辞记录日志。有界用法（未标记过会话建立）耗尽尝试次数时返回
+/// `Err`，携带最后一次失败原因；`Ok(())` 一律表示根取消令牌触发而正常结束。
+pub(crate) async fn run_retry_loop<F, Fut, R>(
+    reconnect: &mut ReconnectState,
+    shutdown: &CancellationToken,
+    mut attempt: F,
+    mut on_failure: R,
+) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = AttemptOutcome>,
+    R: FnMut(u32, Duration),
+{
+    loop {
+        let AttemptOutcome::Failed {
+            error,
+            session_started,
+        } = attempt().await
+        else {
+            return Ok(());
+        };
+        if session_started {
+            reconnect.record_session_started();
+        }
+        let (attempt_number, delay) = match reconnect.record_failure() {
+            RetryDecision::Retry { attempt, delay } => (attempt, delay),
+            RetryDecision::Exhausted => return Err(error),
+        };
+        on_failure(attempt_number, delay);
+        if !wait_for_retry(delay, shutdown).await {
+            return Ok(());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_after_failure, wait_for_retry, FailureKind, ReconnectState, RetryAction,
-        RetryDecision, SessionCompletion, SessionPhase, MAX_RECONNECT_ATTEMPTS,
-        RECONNECT_DELAYS_MS,
+        retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome, FailureKind,
+        ReconnectState, RetryAction, RetryDecision, SessionCompletion, SessionPhase,
+        MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
     };
     use crate::router::RouterExit;
+    use std::cell::Cell;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    /// 只报告失败、未建立会话的单次尝试。
+    fn failing_attempt() -> AttemptOutcome {
+        AttemptOutcome::Failed {
+            error: anyhow::anyhow!("attempt failed"),
+            session_started: false,
+        }
+    }
 
     #[test]
     fn initial_failures_are_bounded() {
@@ -495,5 +559,168 @@ mod tests {
         .expect("关闭不是失败");
 
         assert_eq!(action, RetryAction::Shutdown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unbounded_retry_loop_walks_the_shared_backoff_and_caps_it() {
+        let mut state = ReconnectState::default();
+        state.record_session_started();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let mut recorded = Vec::new();
+
+        let result = run_retry_loop(
+            &mut state,
+            &shutdown,
+            || async { failing_attempt() },
+            |attempt, delay| {
+                recorded.push((attempt, delay));
+                if recorded.len() == 6 {
+                    stop.cancel();
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            recorded,
+            vec![
+                (1, Duration::from_secs(10)),
+                (2, Duration::from_secs(30)),
+                (3, Duration::from_secs(60)),
+                (4, Duration::from_secs(120)),
+                (5, Duration::from_secs(300)),
+                (6, Duration::from_secs(300)),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_attempt_that_started_a_session_resets_the_backoff() {
+        let mut state = ReconnectState::default();
+        state.record_session_started();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let calls = Cell::new(0u32);
+        let mut recorded = Vec::new();
+
+        let result = run_retry_loop(
+            &mut state,
+            &shutdown,
+            || {
+                let session_started = calls.replace(calls.get() + 1) == 2;
+                async move {
+                    AttemptOutcome::Failed {
+                        error: anyhow::anyhow!("attempt failed"),
+                        session_started,
+                    }
+                }
+            },
+            |attempt, delay| {
+                recorded.push((attempt, delay));
+                if recorded.len() == 4 {
+                    stop.cancel();
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            recorded,
+            vec![
+                (1, Duration::from_secs(10)),
+                (2, Duration::from_secs(30)),
+                (1, Duration::from_secs(10)),
+                (2, Duration::from_secs(30)),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_the_wait_stops_the_loop_without_another_attempt() {
+        let mut state = ReconnectState::default();
+        state.record_session_started();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let attempts = Cell::new(0u32);
+        let started = tokio::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            stop.cancel();
+        });
+
+        let result = run_retry_loop(
+            &mut state,
+            &shutdown,
+            || {
+                attempts.set(attempts.get() + 1);
+                async { failing_attempt() }
+            },
+            |_, _| {},
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unbounded_retry_loop_continues_past_the_attempt_budget() {
+        let mut state = ReconnectState::default();
+        state.record_session_started();
+        let shutdown = CancellationToken::new();
+        let stop = shutdown.clone();
+        let attempts = Cell::new(0u32);
+
+        let result = run_retry_loop(
+            &mut state,
+            &shutdown,
+            || {
+                attempts.set(attempts.get() + 1);
+                async { failing_attempt() }
+            },
+            |_, _| {
+                if attempts.get() == MAX_RECONNECT_ATTEMPTS + 3 {
+                    stop.cancel();
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), MAX_RECONNECT_ATTEMPTS + 3);
+        assert_eq!(state.consecutive_failures, MAX_RECONNECT_ATTEMPTS + 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_attempt_ends_the_loop_without_recording_a_failure() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+        let attempts = Cell::new(0u32);
+        let failures = Cell::new(0u32);
+        let started = tokio::time::Instant::now();
+
+        let result = run_retry_loop(
+            &mut state,
+            &shutdown,
+            || {
+                attempts.set(attempts.get() + 1);
+                async { AttemptOutcome::Cancelled }
+            },
+            |_, _| failures.set(failures.get() + 1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(failures.get(), 0);
+        assert_eq!(state.consecutive_failures, 0);
+        assert_eq!(tokio::time::Instant::now() - started, Duration::ZERO);
     }
 }
