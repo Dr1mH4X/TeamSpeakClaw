@@ -21,23 +21,31 @@ TeamSpeakClaw is a standalone binary application and does not require a complex 
 
 The extracted archive contains a `config/` directory with the following configuration files:
 
-- `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service, voice_replay)
+- `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service)
 - `acl.toml` — Permission control rules
 - `prompts.toml` — System prompt and error messages
 
-Use a text editor to modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
-
-**Quick configuration checklist**:
-- `[headless]` — TeamSpeak server address, port, password, etc.
-- `[llm]` — API Key, Base URL, model name
-- `[headless.stt]` / `[headless.tts]` — Enable if you need voice services (optional)
-- `[headless.wakeword]` — Enable if you need voice wake: download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), then download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model` (optional; requires STT or omni input)
-- `[napcat]` — Enable and set WebSocket URL for QQ bot (optional)
-- `[voice_replay]` — Voice replay is enabled by default; set `enabled = false` to turn it off. Replay access must be granted by group in `acl.toml` (restart after changes). Direct commands share the skill ACL. See [usage.md](usage.md)
+Modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
 
 For detailed configuration instructions, please refer to the [Configuration Guide](/docs/configuration).
 
-## 4. Docker Deployment (Recommended)
+## 4. Wake Word Models (Optional) {#wakeword}
+
+When `[headless.wakeword]` is set to `enabled = true` in `config/settings.toml`, the wake word model files must be prepared; skip this section if voice wake is not enabled.
+
+Models go in a `models/` directory whose location depends on the deployment method:
+
+- Binary deployment: next to the `teamspeakclaw` executable, i.e. `<extracted-dir>/models/` after unpacking the release archive
+- Docker deployment: `./models/` in the project directory
+
+Three ONNX files are required:
+
+1. Front-end models `melspectrogram.onnx` and `embedding_model.onnx`: download them as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md).
+2. A wake word classifier: download one model from the [openWakeWord community model library](https://openwakeword.com/library) (choose the ONNX export) and set `[headless.wakeword].model` to its file name (including the extension).
+
+Voice wake needs a speech input path: enable `[headless.stt]` or set `omni_model = true` under `[llm]`. The STT and multimodal options are listed in the next section. With the gate enabled but model files missing or invalid, the program exits at startup.
+
+## 5. Docker Deployment
 
 Deploying with Docker is the easiest way, without manually installing dependencies.
 
@@ -57,12 +65,12 @@ curl -O https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/do
 **Option 1: Online STT / Multimodal Model (Recommended)**
 
 Use the base `docker-compose.yml`:
+- Multimodal model: set `omni_model = true` under `[llm]` — speech is sent to that model as audio (skips STT, so `[headless.stt]` is not needed; `model` must accept audio input). Replies are still text; enable `[headless.tts]` separately for spoken replies
 - Online STT: configure an OpenAI-compatible online STT API under `[headless.stt]` in `config/settings.toml`
-- Multimodal model: set `omni_model = true` under `[llm]` — speech is sent to that model as audio (no STT, so `[headless.stt]` is not needed; `model` must accept audio input). Replies are still text; enable `[headless.tts]` separately for spoken replies
 
-**Option 2: Local STT (FunASR, offline)**
+**Option 2: Local STT (FunASR)**
 
-Switch to the compose variant that includes the `funasr-server` service:
+Switch to the compose file that includes the `funasr-server` service:
 
 ```bash
 curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakClaw/main/examples/funasr/docker-compose.yml
@@ -70,11 +78,11 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakCl
 
 - Download a model from [SenseVoiceSmall-GGUF](https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF) into the `models/` directory
 - Set `base_url = "http://funasr-server:8000/v1"` under `[headless.stt]` in `config/settings.toml`; leave `api_key` empty and `model` can be any value
-- The service is published for amd64 only; on ARM or when you need GPU acceleration, use Option 1 or Option 3
+- In practice, a 2 vCPU / 4 GB ECS can run the Q8-quantized FunASR model, for reference
 
-**Option 3: Local STT (whisper.cpp, offline)**
+**Option 3: Local STT (whisper.cpp)**
 
-Switch to one of the compose variants that include the `stt-api` service, based on your GPU:
+based on your GPU:
 
 | Variant | Hardware | File |
 |---|---|---|
@@ -88,8 +96,7 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/Dr1mH4X/TeamSpeakCl
 ```
 
 - Download [whisper.cpp GGML models](https://huggingface.co/ggerganov/whisper.cpp/tree/main) into the `models/` directory
-- For voice wake, download the two front-end models (`melspectrogram.onnx`, `embedding_model.onnx`) into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md), and download a wake word classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) into the same directory; model files are not shipped with the release archive
-- NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host; Intel/AMD needs `/dev/dri` device mapping (already configured in the compose file)
+- NVIDIA (CUDA) requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host
 
 4. Start the service:
 
@@ -110,7 +117,7 @@ docker compose logs -f
 docker pull ghcr.io/dr1mh4x/teamspeakclaw:latest
 
 # Create directories
-mkdir -p config logs
+mkdir -p config logs models
 
 # Copy example configuration and edit
 # Copy configuration files from the examples/config/ directory and modify them
@@ -126,7 +133,7 @@ docker run -d \
   ghcr.io/dr1mh4x/teamspeakclaw:latest
 ```
 
-## 5. Start Service (Traditional Method)
+## 6. Start the Service (Binary Deployment)
 
 Once the configuration is complete, simply run the program:
 
@@ -136,6 +143,6 @@ Once the configuration is complete, simply run the program:
 
 If configured correctly, the bot will connect to your TeamSpeak server and begin listening for events.
 
-## 6. Grant Permissions
+## 7. Grant Permissions
 
 After the bot connects, **right-click the bot in the TeamSpeak client → Edit Server Groups** and assign it the **Serveradmin** server group. Otherwise, the bot will not be able to perform administrative actions (such as kick, ban, move users, etc.).

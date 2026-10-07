@@ -33,21 +33,20 @@ You can interact with the bot in the following ways:
     -   Default Prefixes: `!tsclaw`, `!bot`, `@TSClaw`
     -   Example: `!bot Play Nocturne by Jay Chou`
 
-2.  **Private Chat (Recommended)**: Double-click the bot to start a private conversation.
+2.  **Private Chat**: Double-click the bot to start a private conversation.
     -   Private messages usually do not require a prefix (depending on the `respond_to_private` setting).
-    -   Example: `Kick that person named User123`
+    -   Example: `How long has the person named User123 been online on the server`
 
-3.  **Headless Voice Mode** (Optional): After enabling Headless service, you can interact with the bot directly via voice.
-    -   Configure the `[headless]` section in `settings.toml`
-    -   Voice wake (optional): enable `[headless.wakeword]` and download `melspectrogram.onnx` and `embedding_model.onnx` into `models/` as described in the [model directory notes](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md); download a classifier (choose the ONNX export) from the [openWakeWord community model library](https://openwakeword.com/library) and name it in `model`, say the wake word first, then your command; within `window_secs` (default 10s) after waking you can keep talking; saying the wake word again while the bot is speaking interrupts the current reply and handles that sentence instead, while extra speech without the wake word is dropped during playback; when you say only the wake word without a command, the bot answers with a pre-generated confirmation sound ("嗯哼" or "在呢", alternating) to signal it is awake (TTS required), and the command that follows is handled within `window_secs`
-    -   The bot will reply via voice (requires TTS configuration); the first tool call of a turn starts with a short cue phrase (`我来看看` or `我来搜索下` for `web_search`, `我来研究下` for other tools), later tool calls in the same turn stay silent, and the actual reply is spoken after the tool result
-    -   Example: (Say) `wake word play Nocturne by Jay Chou`
-    -   **Without STT and omni**: spoken natural-language triggers are unavailable; chat into the bridge and direct commands still work
+3.  **Headless Voice Mode**: After enabling Headless service, you can interact with the bot directly via voice.
+    -   If a wake word is configured, say the wake word first, then your command; within `window_secs` (default 10s) after waking you can keep talking without waking again; saying the wake word again while the bot is speaking interrupts the current reply and handles that sentence instead, while extra speech without the wake word is dropped during playback
+    -   The bot will reply via voice (requires TTS configuration)
+    -   Example: (Say) `Hey Claw, play Nocturne by Jay Chou`
+    -   **Without STT and omni**: spoken natural-language triggers are unavailable; text chat and direct commands still work
 
 4.  **Voice Replay** (Enabled by default; set `enabled = false` in config to turn it off, **restart** after changes):
 
     **Prerequisites**
-    - Grant voice replay in `acl.toml` (same ACL as direct commands).
+    - Grant voice replay for the needed groups in `acl.toml`.
     - Replay **after humans have spoken** in the channel; an empty recording window has nothing useful to play.
 
     | Direct command | Meaning |
@@ -89,15 +88,17 @@ Skill arguments (`action` is required):
 | `seconds` | integer | Optional; legal **0–120** (error if out of range), then clamped to `window_secs` |
 | `speaker` | string | Optional; nickname in the window (exact / longest match) |
 
-### 🎵 Music Control (music_control)
+### Music Control
 
 TeamSpeakClaw supports three music backends:
 
+Set `musicbot_name` in `settings.toml` (default `TS3AudioBot`).
+
 **Mode 1: ts3audiobot (Example configuration)**
 
-Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages. Set `musicbot_name` in `settings.toml` (default `TS3AudioBot`).
+The bot controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private messages.
 
-| Action | Description |
+| Supported actions | Description |
 |---|---|
 | `ts_play` / `play` | Play a song (search by name) |
 | `ts_add` | Add song to next |
@@ -110,9 +111,9 @@ Controls [TS3AudioBot](https://github.com/Splamy/TS3AudioBot) via TS private mes
 
 **Mode 2: tsmusicbot**
 
-Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages. Set `musicbot_name` in `settings.toml`.
+The bot controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via TS private messages.
 
-| Action | Description |
+| Supported actions | Description |
 |---|---|
 | `play` | Play a song |
 | `add` | Add to queue |
@@ -132,7 +133,7 @@ Controls [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) via 
 
 Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP API. Requires `backend = "tsbot_backend"` and `base_url` in `settings.toml`.
 
-| Action | Description |
+| Supported actions | Description |
 |---|---|
 | `play` / `pause` / `next` / `previous` / `skip` | Playback control |
 | `seek` | Seek to time (seconds) |
@@ -144,21 +145,21 @@ Controls [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) via HTTP AP
 | `volume` | Volume percentage (0-200) |
 | `fx` | Sound effects (pan/width/swap/bass/reverb) |
 
-### 🛡️ Administration
+### Administration
 
-- **Kick Client** (kick_client): "Kick UserA from the server"
-- **Ban Client** (ban_client): "Ban UserB for 10 minutes"
-- **Move Client** (move_client): "Move UserA to channel 12"
+- **Kick Client**: "Kick UserA from the server"
+- **Ban Client**: "Ban UserB for 10 minutes"
+- **Move Client**: "Move UserA to channel 12"
 
-### 💬 Communication
+### Communication
 
-- **Poke Client** (poke_client): "Poke UserA"
-- **Send Message** (send_message): "Send a private message to UserA saying hello"
+- **Poke Client**: "Poke UserA"
+- **Send Message**: "Send a private message to UserA saying hello"
 
-### ℹ️ Information Query
+### Information Query
 
-- **Client Info** (get_client_info): "Show detailed info for UserA"
-- **Web Search** (web_search): "Search for today's latest news"
+- **Client Info**: "Show detailed info for UserA"
+- **Web Search**: "Search for today's latest news"
 
 ## FAQ
 

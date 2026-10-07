@@ -33,21 +33,20 @@ INFO Bot ready. Listening for TS + NapCat events.
     -   默认前缀: `!tsclaw`, `!bot`, `@TSClaw`
     -   例如: `!bot 播放周杰伦的夜曲`
 
-2.  **私聊 (推荐)**: 双击机器人进行私聊。
+2.  **私聊**: 双击机器人进行私聊。
     -   私聊通常不需要前缀（取决于 `respond_to_private` 设置）。
-    -   例如: `踢掉那个叫 User123 的人`
+    -   例如: `那个叫 User123 的人在服务器在线多久了`
 
-3.  **Headless 语音模式**（可选）：启用 Headless 服务后，可直接通过语音与机器人交互。
-    -   配置 `settings.toml` 中的 `[headless]` 区段
-    -   语音唤醒（可选）：启用 `[headless.wakeword]`，按[模型目录说明](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/models/README.md)下载 `melspectrogram.onnx` 与 `embedding_model.onnx` 两个前端模型到 `models/` 目录，再从 [openWakeWord 社区模型库](https://openwakeword.com/library)下载一个唤醒词分类器（选 ONNX 导出）并在 `model` 填其文件名，先说唤醒词再下指令；唤醒后 `window_secs`（默认 10s）内可连续对话，机器人在播报时再说一次唤醒词会打断当前回复并接着处理这一句；播报期间不含唤醒词的补充语音会被丢弃；只说唤醒词、没有接着说指令时，机器人回一句预生成的确认音（「嗯哼」「在呢」轮换）表示已唤醒（需配置 TTS），随后的指令在 `window_secs` 内正常处理
-    -   机器人会通过语音回复（需配置 TTS）；模型在一轮对话里第一次调用工具时先播一句提示音（`web_search` 为「我来看看」或「我来搜索下」，其余工具为「我来研究下」），同一轮后续工具不重复播，工具返回后再播正式回复
-    -   例如: （说）`唤醒词 播放周杰伦的夜曲`
-    -   **未开 STT 且未启用 omni 时**：语音自然语言触发不可用；文本进桥/直呼命令仍可用
+3.  **Headless 语音模式**：启用 Headless 服务后，可直接通过语音与机器人交互。
+    -   若配置了Wakeword，需要先说唤醒词再下指令；唤醒后 `window_secs`（默认 10s）内可连续对话，机器人在播报时再说一次唤醒词会打断当前回复并接着处理这一句；播报期间不含唤醒词的补充语音会被丢弃；
+    -   机器人会通过语音回复（需配置 TTS）
+    -   例如: （说）`Hey Claw, 播放周杰伦的夜曲`
+    -   **未开 STT 且未启用 omni 时**：语音自然语言触发不可用；文本聊天/直呼命令仍可用
 
 4.  **语音回放**（默认开启；如需关闭，在配置里设 `enabled = false`，改配置后**重启**生效）：
 
     **前置**
-    - 在 `acl.toml` 为需要的组授予语音回放权限（与直呼同一 ACL）。
+    - 在 `acl.toml` 为需要的组授予语音回放权限。
     - **有人类在频道说话**之后再回放；窗内无人类语音时不会回放出有效内容。
 
     | 直呼 | 含义 |
@@ -89,15 +88,17 @@ INFO Bot ready. Listening for TS + NapCat events.
 | `seconds` | integer | 可选；合法 **0–120**，超出报错；再 clamp 到 `window_secs` |
 | `speaker` | string | 可选；窗内说话人昵称（精确/最长匹配） |
 
-### 🎵 音乐控制 (music_control)
+### 音乐控制
 
 TeamSpeakClaw 支持三种音乐后端：
 
+需在 `settings.toml` 中配置 `musicbot_name`（默认 `TS3AudioBot`）。
+
 **模式一：ts3audiobot（配置示例）**
 
-通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。需在 `settings.toml` 中配置 `musicbot_name`（默认 `TS3AudioBot`）。
+机器人通过 TS 私信控制 [TS3AudioBot](https://github.com/Splamy/TS3AudioBot)。
 
-| 动作 | 说明 |
+| 支持的动作 | 说明 |
 |---|---|
 | `ts_play` / `play` | 播放歌曲（名称搜索） |
 | `ts_add` | 添加音乐到下一首 |
@@ -110,9 +111,9 @@ TeamSpeakClaw 支持三种音乐后端：
 
 **模式二：tsmusicbot**
 
-通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)。需在 `settings.toml` 中配置 `musicbot_name`。
+机器人通过 TS 私信控制 [TSMusicBot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot)。
 
-| 动作 | 说明 |
+| 支持的动作 | 说明 |
 |---|---|
 | `play` | 播放歌曲 |
 | `add` | 添加到队列 |
@@ -132,7 +133,7 @@ TeamSpeakClaw 支持三种音乐后端：
 
 通过 HTTP API 控制 [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)。需在 `settings.toml` 中配置 `backend = "tsbot_backend"` 和 `base_url`。
 
-| 动作 | 说明 |
+| 支持的动作 | 说明 |
 |---|---|
 | `play` / `pause` / `next` / `previous` / `skip` | 播放控制 |
 | `seek` | 跳转到指定时间（秒） |
@@ -144,21 +145,21 @@ TeamSpeakClaw 支持三种音乐后端：
 | `volume` | 音量百分比（0-200） |
 | `fx` | 音效设置（pan/width/swap/bass/reverb） |
 
-### 🛡️ 管理功能
+### 管理功能
 
-- **踢出用户** (kick_client): "把 UserA 踢出服务器"
-- **封禁用户** (ban_client): "封禁 UserB 10 分钟"
-- **移动用户** (move_client): "把 UserA 移动到频道 12"
+- **踢出用户**: "把 UserA 踢出服务器"
+- **封禁用户**: "封禁 UserB 10 分钟"
+- **移动用户**: "把 UserA 移动到频道 12"
 
-### 💬 通讯功能
+### 通讯功能
 
-- **戳一戳** (poke_client): "戳一下 UserA"
-- **发送消息** (send_message): "给 UserA 发私信说你好"
+- **戳一戳**: "戳一下 UserA"
+- **发送消息**: "给 UserA 发私信说你好"
 
-### ℹ️ 信息查询
+### 信息查询
 
-- **查询用户信息** (get_client_info): "UserA 的详细信息"
-- **搜索网络** (web_search): "搜索今天的最新新闻"
+- **查询用户信息**: "UserA 的详细信息"
+- **搜索网络**: "搜索今天的最新新闻"
 
 ## 常见问题
 
