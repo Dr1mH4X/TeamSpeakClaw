@@ -1,7 +1,8 @@
 use crate::adapter::headless::{
     parse_server_groups, should_route_text_through_bridge, voice_features_enabled,
-    MainSubscriptions, TextMessageEvent, TsAdapter, TsEvent, VoiceBridgeState,
+    MainSubscriptions, TextMessageEvent, TsAdapter, TsEvent,
 };
+use crate::adapter::lifecycle::BridgeReadiness;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::reconnect::drain_managed_tasks;
 use crate::config::{AppConfig, PromptsConfig};
@@ -30,19 +31,19 @@ pub struct EventRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<SkillRegistry>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
-    voice_bridge_state: VoiceBridgeState,
+    voice_bridge_state: BridgeReadiness,
     voice_audio: crate::skills::VoiceAudioHandles,
     subscriptions: Arc<Mutex<Option<MainSubscriptions>>>,
 }
 
 impl EventRouter {
-    pub fn new_with_clients(
+    pub(crate) fn new_with_clients(
         context: RouterContext,
         adapter: Arc<TsAdapter>,
         event_rx: broadcast::Receiver<TsEvent>,
         disconnect_rx: watch::Receiver<bool>,
         nc_adapter: Option<Arc<NapCatAdapter>>,
-        voice_bridge_state: VoiceBridgeState,
+        voice_bridge_state: BridgeReadiness,
     ) -> Self {
         let RouterContext {
             config,

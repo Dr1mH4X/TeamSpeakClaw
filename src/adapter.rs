@@ -1,3 +1,4 @@
+pub(crate) mod lifecycle;
 pub(crate) mod reconnect;
 
 pub mod headless;
@@ -13,9 +14,10 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
-use crate::adapter::reconnect::{
-    wait_for_retry, wait_with_timeout, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS,
+use crate::adapter::lifecycle::{
+    retry_after_failure, FailureKind, ReconnectState, RetryAction, SessionCompletion,
 };
+use crate::adapter::reconnect::wait_with_timeout;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -35,6 +37,62 @@ fn load_wakeword_models(config: &AppConfig) -> Result<Option<Arc<WakewordModels>
     )?))
 }
 
+/// 一次 TeamSpeak 连接尝试的产物：连接与主订阅就绪，或按类别上报失败。
+enum ConnectOutcome {
+    /// 连接已建立且主订阅已取出，可以进入会话运行。
+    Connected {
+        adapter: Arc<TsAdapter>,
+        event_rx: broadcast::Receiver<TsEvent>,
+        disconnect_rx: watch::Receiver<bool>,
+    },
+    /// 连接或订阅取出失败，交给唯一的失败决策点。
+    Failed {
+        kind: FailureKind,
+        failure: anyhow::Error,
+    },
+    /// 等待连接期间根取消令牌触发。
+    Shutdown,
+}
+
+/// 一次连接尝试：建立 TeamSpeak 连接并取出主订阅。失败只上报事件，不做重试决策。
+async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> ConnectOutcome {
+    let connection = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return ConnectOutcome::Shutdown,
+        result = TsAdapter::connect(config) => result,
+    };
+
+    let adapter = match connection {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            return ConnectOutcome::Failed {
+                kind: FailureKind::Connection,
+                failure: error,
+            }
+        }
+    };
+
+    let subscriptions = match adapter.take_main_subscriptions() {
+        Ok(subscriptions) => subscriptions,
+        Err(error) => {
+            // 已建立连接但订阅取出失败：先断开避免泄漏，再走统一重连计数
+            warn!("Failed to take TS subscriptions: {error}");
+            disconnect_adapter(&adapter).await;
+            return ConnectOutcome::Failed {
+                kind: FailureKind::Subscription,
+                failure: error,
+            };
+        }
+    };
+
+    let (event_rx, disconnect_rx) = subscriptions;
+    ConnectOutcome::Connected {
+        adapter,
+        event_rx,
+        disconnect_rx,
+    }
+}
+
 pub async fn run(
     config: Arc<AppConfig>,
     prompts: Arc<PromptsConfig>,
@@ -50,127 +108,61 @@ pub async fn run(
     let context = RouterContext::new(config, prompts, gate, llm, registry, voice_audio.clone());
 
     loop {
-        let connection = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Ok(()),
-            result = TsAdapter::connect(context.config.clone()) => result,
-        };
+        // 连接阶段的失败与运行阶段的结果都汇成 (类别, 失败原因)，
+        // 由唯一的决策点完成记账、日志与等待。
+        let (kind, failure) = match connect_ts(context.config.clone(), &shutdown).await {
+            ConnectOutcome::Shutdown => return Ok(()),
+            ConnectOutcome::Failed { kind, failure } => (kind, failure),
+            ConnectOutcome::Connected {
+                adapter,
+                event_rx,
+                disconnect_rx,
+            } => {
+                let session = run_connected_session(
+                    context.clone(),
+                    adapter,
+                    event_rx,
+                    disconnect_rx,
+                    shutdown.clone(),
+                    voice_audio.clone(),
+                    wakeword_models.clone(),
+                )
+                .await;
 
-        let (adapter, event_rx, disconnect_rx) = match connection {
-            Ok(adapter) => {
-                let subscriptions = match adapter.take_main_subscriptions() {
-                    Ok(subscriptions) => subscriptions,
-                    Err(error) => {
-                        // 已建立连接但订阅取出失败：先断开避免泄漏，再走统一重连计数
-                        warn!("Failed to take TS subscriptions: {error}");
-                        disconnect_adapter(&adapter).await;
-                        let had_running_session = reconnect.has_started_session();
-                        match reconnect.record_failure() {
-                            RetryDecision::Exhausted => {
-                                return Err(error);
-                            }
-                            RetryDecision::Retry { attempt, delay } => {
-                                if !had_running_session {
-                                    warn!(
-                                        "Initial TeamSpeak connection attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed; retrying after {:.0?}",
-                                        delay
-                                    );
-                                }
-                                if !wait_for_retry(delay, &shutdown).await {
-                                    return Ok(());
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                };
-                (adapter, subscriptions.0, subscriptions.1)
-            }
-            Err(error) => {
-                let had_running_session = reconnect.has_started_session();
-                match reconnect.record_failure() {
-                    RetryDecision::Exhausted => {
-                        error!(
-                            "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
-                        );
-                        return Err(error);
-                    }
-                    RetryDecision::Retry { attempt, delay } => {
-                        if had_running_session {
-                            warn!(
-                                "TeamSpeak reconnect attempt {attempt} failed: {error}; retrying after {:.0?}",
-                                delay
-                            );
-                        } else {
-                            warn!(
-                                "Initial TeamSpeak connection attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed: {error}; retrying after {:.0?}",
-                                delay
-                            );
-                        }
-                        if !wait_for_retry(delay, &shutdown).await {
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                }
-            }
-        };
-
-        let session = run_connected_session(
-            context.clone(),
-            adapter,
-            event_rx,
-            disconnect_rx,
-            shutdown.clone(),
-            voice_audio.clone(),
-            wakeword_models.clone(),
-        )
-        .await;
-
-        let entered_running = session.entered_running;
-        if entered_running {
-            reconnect.record_session_started();
-        }
-
-        let failure = match session.result {
-            Ok(RouterExit::Shutdown) => return Ok(()),
-            Ok(RouterExit::TeamSpeakDisconnected) => {
-                warn!("TeamSpeak session disconnected; reconnecting");
-                anyhow::anyhow!("TeamSpeak session disconnected")
-            }
-            Err(error) => {
+                let SessionCompletion {
+                    entered_running,
+                    result,
+                } = session;
                 if entered_running {
-                    warn!("Running session failed: {error}; reconnecting");
-                } else {
-                    warn!("Session initialization failed: {error}; retrying");
+                    reconnect.record_session_started();
                 }
-                error
+
+                match result {
+                    Ok(RouterExit::Shutdown) => return Ok(()),
+                    Ok(RouterExit::TeamSpeakDisconnected) => {
+                        warn!("TeamSpeak session disconnected; reconnecting");
+                        (
+                            FailureKind::Running,
+                            anyhow::anyhow!("TeamSpeak session disconnected"),
+                        )
+                    }
+                    Err(error) => {
+                        if entered_running {
+                            warn!("Running session failed: {error}; reconnecting");
+                            (FailureKind::Running, error)
+                        } else {
+                            warn!("Session initialization failed: {error}; retrying");
+                            (FailureKind::Initialization, error)
+                        }
+                    }
+                }
             }
         };
 
-        let had_running_session = reconnect.has_started_session();
-        let (attempt, delay) = match reconnect.record_failure() {
-            RetryDecision::Retry { attempt, delay } => (attempt, delay),
-            RetryDecision::Exhausted => {
-                error!(
-                    "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}"
-                );
-                return Err(failure);
-            }
-        };
-        if had_running_session {
-            warn!(
-                "TeamSpeak reconnect attempt {attempt} scheduled after {:.0?}",
-                delay
-            );
-        } else {
-            warn!(
-                "Initial startup attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed: {failure}; retrying after {:.0?}",
-                delay
-            );
-        }
-        if !wait_for_retry(delay, &shutdown).await {
-            return Ok(());
+        match retry_after_failure(&mut reconnect, kind, failure, &shutdown).await {
+            Ok(RetryAction::ContinueLoop) => {}
+            Ok(RetryAction::Shutdown) => return Ok(()),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -215,7 +207,7 @@ async fn run_connected_session(
         }
     };
 
-    let voice_bridge_state = headless::VoiceBridgeState::default();
+    let voice_bridge_state = lifecycle::BridgeReadiness::default();
     let ts_router = EventRouter::new_with_clients(
         context.clone(),
         adapter.clone(),
@@ -314,27 +306,6 @@ async fn wait_headless_failure(mut status: watch::Receiver<Option<&'static str>>
     }
 }
 
-struct SessionCompletion {
-    entered_running: bool,
-    result: Result<RouterExit>,
-}
-
-impl SessionCompletion {
-    fn initialization(result: Result<RouterExit>) -> Self {
-        Self {
-            entered_running: false,
-            result,
-        }
-    }
-
-    fn running(result: Result<RouterExit>) -> Self {
-        Self {
-            entered_running: true,
-            result,
-        }
-    }
-}
-
 enum InitializationWait<T> {
     Completed(T),
     Shutdown,
@@ -406,11 +377,10 @@ async fn disconnect_adapter(adapter: &TsAdapter) {
 mod tests {
     use super::{
         load_wakeword_models, wait_for_initialization, wait_headless_failure,
-        wait_nc_supervisor_failure, wait_with_timeout, InitializationWait, SessionCompletion,
+        wait_nc_supervisor_failure, wait_with_timeout, InitializationWait,
     };
     use crate::adapter::napcat::ConnectionExit;
     use crate::config::AppConfig;
-    use crate::router::RouterExit;
     use std::future::pending;
     use std::time::Duration;
     use tokio::sync::watch;
@@ -450,15 +420,6 @@ mod tests {
         let config = AppConfig::default();
 
         assert!(load_wakeword_models(&config).unwrap().is_none());
-    }
-
-    #[test]
-    fn only_running_completion_marks_session_started() {
-        let initialization = SessionCompletion::initialization(Err(anyhow::anyhow!("failed")));
-        let running = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected));
-
-        assert!(!initialization.entered_running);
-        assert!(running.entered_running);
     }
 
     #[tokio::test]

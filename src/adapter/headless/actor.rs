@@ -260,12 +260,12 @@ fn spawn_directory_refresher(
     });
 }
 
-pub async fn ts3_actor(
+pub(crate) async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
     mut audio_rx: mpsc::Receiver<(Vec<u8>, i32)>,
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
-    bridge_state: super::VoiceBridgeState,
+    bridge_state: crate::adapter::lifecycle::BridgeReadiness,
     record_hook: Option<SpeakerRecordHook>,
 ) -> Result<()> {
     let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(OUT_BUF_MAX);
@@ -302,7 +302,7 @@ pub async fn ts3_actor(
         }
     }));
 
-    bridge_state.set_actor_ready(true);
+    bridge_state.set_up(crate::adapter::lifecycle::BridgeComponent::Actor);
 
     let client_directory: ClientDirectory = Arc::new(Mutex::new(DirectoryState::default()));
     let dir_seq = Arc::new(AtomicU64::new(0));

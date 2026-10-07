@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -11,6 +8,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::adapter::lifecycle::{
+    run_retry_loop, AttemptOutcome, BridgeComponent, BridgeReadiness, ReconnectState,
+};
 use crate::adapter::reconnect::join_or_abort;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
@@ -50,51 +50,6 @@ pub use self::speaker_ring::SpeakerRings;
 
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Default)]
-struct VoiceBridgeStateInner {
-    service_running: AtomicBool,
-    stream_ready: AtomicBool,
-    actor_ready: AtomicBool,
-    connected_since_retry: AtomicBool,
-}
-
-#[derive(Clone, Default)]
-pub struct VoiceBridgeState {
-    inner: Arc<VoiceBridgeStateInner>,
-}
-
-impl VoiceBridgeState {
-    pub fn is_ready(&self) -> bool {
-        self.inner.service_running.load(Ordering::Acquire)
-            && self.inner.stream_ready.load(Ordering::Acquire)
-            && self.inner.actor_ready.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn set_service_running(&self, running: bool) {
-        self.inner.service_running.store(running, Ordering::Release);
-    }
-
-    /// actor 事件 handler 注册完成后置位
-    pub(crate) fn set_actor_ready(&self, ready: bool) {
-        self.inner.actor_ready.store(ready, Ordering::Release);
-    }
-
-    pub(crate) fn set_stream_ready(&self, ready: bool) {
-        self.inner.stream_ready.store(ready, Ordering::Release);
-        if ready {
-            self.inner
-                .connected_since_retry
-                .store(true, Ordering::Release);
-        }
-    }
-
-    fn take_connected_since_retry(&self) -> bool {
-        self.inner
-            .connected_since_retry
-            .swap(false, Ordering::AcqRel)
-    }
-}
 
 pub fn voice_features_enabled(config: &AppConfig) -> bool {
     config.headless.stt.enabled
@@ -221,19 +176,19 @@ async fn warm_audio_surface(output: &AudioOutput, rings: &SpeakerRings) -> Resul
 }
 
 struct ServiceRunningGuard {
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
 }
 
 impl ServiceRunningGuard {
-    fn new(bridge_state: VoiceBridgeState) -> Self {
-        bridge_state.set_service_running(true);
+    fn new(bridge_state: BridgeReadiness) -> Self {
+        bridge_state.set_up(BridgeComponent::Service);
         Self { bridge_state }
     }
 }
 
 impl Drop for ServiceRunningGuard {
     fn drop(&mut self) {
-        self.bridge_state.set_service_running(false);
+        self.bridge_state.set_down(BridgeComponent::Service);
     }
 }
 
@@ -272,12 +227,12 @@ async fn bind_grpc_listener() -> Result<tokio::net::TcpListener> {
         .map_err(|error| anyhow!("grpc listen failed on {addr}: {error}"))
 }
 
-pub async fn run(
+pub(crate) async fn run(
     client: Arc<tsclient_rs::Client>,
     listener: tokio::net::TcpListener,
     config: Arc<AppConfig>,
     shutdown: CancellationToken,
-    bridge_state: VoiceBridgeState,
+    bridge_state: BridgeReadiness,
     bot_clid: u32,
     voice_runtime: HeadlessVoiceRuntime,
 ) -> Result<()> {
@@ -410,16 +365,16 @@ fn service_exit_signal(result: &Result<()>) -> Option<&'static str> {
 }
 
 /// headless Runtime::start 入参（避免参数列表过长）
-pub struct HeadlessStartHandles {
-    pub ts_adapter: Arc<TsAdapter>,
-    pub bridge_state: VoiceBridgeState,
-    pub voice_audio: VoiceAudioHandles,
+pub(crate) struct HeadlessStartHandles {
+    pub(crate) ts_adapter: Arc<TsAdapter>,
+    pub(crate) bridge_state: BridgeReadiness,
+    pub(crate) voice_audio: VoiceAudioHandles,
     /// 连接前已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
-    pub wakeword_models: Option<Arc<wakeword::WakewordModels>>,
+    pub(crate) wakeword_models: Option<Arc<wakeword::WakewordModels>>,
 }
 
 impl Runtime {
-    pub async fn start(
+    pub(crate) async fn start(
         config: Arc<AppConfig>,
         prompts: Arc<PromptsConfig>,
         gate: Arc<PermissionGate>,
@@ -435,8 +390,8 @@ impl Runtime {
         } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
-            bridge_state.set_service_running(false);
-            bridge_state.set_stream_ready(false);
+            bridge_state.set_down(BridgeComponent::Service);
+            bridge_state.set_down(BridgeComponent::Stream);
             info!("headless: voice disabled (stt/tts/omni/voice_replay not enabled), management-only mode");
             let (failed_tx, _) = watch::channel::<Option<&'static str>>(None);
             return Ok(Self {
@@ -495,8 +450,8 @@ impl Runtime {
                 service_voice_runtime,
             )
             .await;
-            service_bridge_state.set_service_running(false);
-            service_bridge_state.set_stream_ready(false);
+            service_bridge_state.set_down(BridgeComponent::Service);
+            service_bridge_state.set_down(BridgeComponent::Stream);
             if let Err(error) = &result {
                 error!("headless service failed: {error}");
             }
@@ -517,53 +472,71 @@ impl Runtime {
         let bridge_voice_audio = voice_audio;
         let bridge_wakeword = wakeword_models;
         let bridge_task = tokio::spawn(async move {
-            let mut attempt = 1u32;
-            let _ = bridge_state_for_router.take_connected_since_retry();
-            loop {
-                bridge_state_for_router.set_stream_ready(false);
-                let run_result = tokio::select! {
-                    biased;
-                    _ = shutdown_for_bridge.cancelled() => break,
-                    result = crate::router::VoiceRouter::new(
-                        crate::router::VoiceRouterHandles {
-                            config: bridge_config.clone(),
-                            prompts: bridge_prompts.clone(),
-                            gate: bridge_gate.clone(),
-                            llm: bridge_llm.clone(),
-                            registry: bridge_registry.clone(),
-                            ts_adapter: bridge_ts_adapter.clone(),
-                            bridge_state: bridge_state_for_router.clone(),
-                            audio_output: bridge_audio_output.clone(),
-                            voice_audio: bridge_voice_audio.clone(),
-                            wakeword: bridge_wakeword.clone(),
-                        },
-                    ).run(shutdown_for_bridge.clone()) => result,
-                };
-                bridge_state_for_router.set_stream_ready(false);
-                if shutdown_for_bridge.is_cancelled() {
-                    break;
-                }
+            let _ = bridge_state_for_router.take_stream_established();
+            // 循环无界：预先标记会话已建立，连续失败不判定为耗尽。
+            let mut reconnect = ReconnectState::default();
+            reconnect.record_session_started();
+            let loop_result = run_retry_loop(
+                &mut reconnect,
+                &shutdown_for_bridge,
+                || {
+                    let handles = crate::router::VoiceRouterHandles {
+                        config: bridge_config.clone(),
+                        prompts: bridge_prompts.clone(),
+                        gate: bridge_gate.clone(),
+                        llm: bridge_llm.clone(),
+                        registry: bridge_registry.clone(),
+                        ts_adapter: bridge_ts_adapter.clone(),
+                        bridge_state: bridge_state_for_router.clone(),
+                        audio_output: bridge_audio_output.clone(),
+                        voice_audio: bridge_voice_audio.clone(),
+                        wakeword: bridge_wakeword.clone(),
+                    };
+                    let shutdown = shutdown_for_bridge.clone();
+                    let state = bridge_state_for_router.clone();
+                    async move {
+                        state.set_down(BridgeComponent::Stream);
+                        let run_result = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return AttemptOutcome::Cancelled,
+                            result = crate::router::VoiceRouter::new(handles).run(shutdown.clone()) => result,
+                        };
+                        state.set_down(BridgeComponent::Stream);
+                        if shutdown.is_cancelled() {
+                            return AttemptOutcome::Cancelled;
+                        }
 
-                if bridge_state_for_router.take_connected_since_retry() {
-                    attempt = 1;
-                }
-                match run_result {
-                    Ok(()) => error!("voice router stopped unexpectedly"),
-                    Err(error) => error!("voice router failed: {error}"),
-                }
-
-                let delay = crate::adapter::reconnect::reconnect_delay_for_attempt(attempt);
-                warn!(
-                    attempt,
-                    delay_secs = delay.as_secs(),
-                    "voice router unavailable; TeamSpeak text fallback is active"
-                );
-                if !crate::adapter::reconnect::wait_for_retry(delay, &shutdown_for_bridge).await {
-                    break;
-                }
-                attempt = attempt.saturating_add(1);
+                        let session_started = state.take_stream_established();
+                        let error = match run_result {
+                            Ok(()) => {
+                                error!("voice router stopped unexpectedly");
+                                anyhow!("voice router stopped unexpectedly")
+                            }
+                            Err(error) => {
+                                error!("voice router failed: {error}");
+                                error
+                            }
+                        };
+                        AttemptOutcome::Failed {
+                            error,
+                            session_started,
+                        }
+                    }
+                },
+                |attempt, delay| {
+                    warn!(
+                        attempt,
+                        delay_secs = delay.as_secs(),
+                        "voice router unavailable; TeamSpeak text fallback is active"
+                    );
+                },
+            )
+            .await;
+            if let Err(error) = loop_result {
+                // 循环无界（会话已预先标记建立），耗尽分支不可达；真出现即编码错误。
+                unreachable!("voice router retry loop exhausted unexpectedly: {error}");
             }
-            bridge_state_for_router.set_stream_ready(false);
+            bridge_state_for_router.set_down(BridgeComponent::Stream);
         });
         // 监控 bridge 任务 panic：panic 不可自愈，置失败信号让上层重建会话
         let failed_tx_for_bridge = failed_tx.clone();
@@ -572,7 +545,7 @@ impl Runtime {
             let result = bridge_task.await;
             if let Err(error) = result {
                 if error.is_panic() {
-                    bridge_state_watcher.set_stream_ready(false);
+                    bridge_state_watcher.set_down(BridgeComponent::Stream);
                     let _ = failed_tx_for_bridge.send(Some("voice router"));
                     error!("voice router task panicked; signaling session restart");
                 }
@@ -629,43 +602,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_state_requires_service_stream_and_actor() {
-        let state = VoiceBridgeState::default();
-        assert!(!state.is_ready());
-
-        state.set_actor_ready(true);
-        assert!(!state.is_ready());
-        state.set_stream_ready(true);
-        assert!(!state.is_ready());
-        state.set_service_running(true);
-        assert!(state.is_ready());
-
-        state.set_service_running(false);
-        assert!(!state.is_ready());
-        state.set_stream_ready(false);
-        assert!(!state.is_ready());
-        state.set_actor_ready(false);
-        assert!(!state.is_ready());
-    }
-
-    #[test]
-    fn bridge_state_is_unready_before_actor_handler_registration() {
-        let state = VoiceBridgeState::default();
-        state.set_service_running(true);
-        state.set_stream_ready(true);
-
-        // actor 未就绪时即使服务与订阅流都正常也不就绪
-        assert!(!state.is_ready());
-
-        state.set_actor_ready(true);
-        assert!(state.is_ready());
-    }
-
-    #[test]
     fn service_guard_marks_unready_when_dropped() {
-        let state = VoiceBridgeState::default();
-        state.set_stream_ready(true);
-        state.set_actor_ready(true);
+        let state = BridgeReadiness::default();
+        state.set_up(BridgeComponent::Stream);
+        state.set_up(BridgeComponent::Actor);
 
         {
             let _guard = ServiceRunningGuard::new(state.clone());
@@ -753,15 +693,6 @@ mod tests {
         let second = bind_grpc_listener().await;
 
         assert!(second.is_err());
-    }
-
-    #[test]
-    fn bridge_connection_latch_is_consumed_once() {
-        let state = VoiceBridgeState::default();
-        state.set_stream_ready(true);
-
-        assert!(state.take_connected_since_retry());
-        assert!(!state.take_connected_since_retry());
     }
 
     #[tokio::test]
