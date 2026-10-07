@@ -129,13 +129,15 @@ pub async fn run(
                 )
                 .await;
 
-                let session = session.close();
-                let entered_running = session.entered_running();
+                let SessionCompletion {
+                    entered_running,
+                    result,
+                } = session;
                 if entered_running {
                     reconnect.record_session_started();
                 }
 
-                match session.result {
+                match result {
                     Ok(RouterExit::Shutdown) => return Ok(()),
                     Ok(RouterExit::TeamSpeakDisconnected) => {
                         warn!("TeamSpeak session disconnected; reconnecting");

@@ -6,7 +6,7 @@ TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，�
 
 `main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`、`prompts.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`SkillRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
 
-`adapter::run()`（`adapter.rs`）是生命周期主循环：`[headless.wakeword]` 启用时先从 `models_dir()` 加载三个 OpenWakeWord 模型，缺文件或模型非法直接终止启动，不进入连接与重连；随后 `TsAdapter::connect()` 建 TeamSpeak 连接，再 `run_connected_session()` 按需启动 NapCat 适配器（`connect_if_enabled()`，未启用则为 `None`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。TeamSpeak 断线、NapCat supervisor 异常退出或 headless 组件失败都会结束本轮会话并进入重连循环；会话阶段（`SessionPhase`：Connecting/Initializing/Running/Closed）、退避序列与尝试上限、以及失败时的日志措辞都归 `adapter/lifecycle.rs`，`adapter.rs` 只经 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。
+`adapter::run()`（`adapter.rs`）是生命周期主循环：`[headless.wakeword]` 启用时先从 `models_dir()` 加载三个 OpenWakeWord 模型，缺文件或模型非法直接终止启动，不进入连接与重连；随后 `TsAdapter::connect()` 建 TeamSpeak 连接，再 `run_connected_session()` 按需启动 NapCat 适配器（`connect_if_enabled()`，未启用则为 `None`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。TeamSpeak 断线、NapCat supervisor 异常退出或 headless 组件失败都会结束本轮会话并进入重连循环；退避序列与尝试上限、以及失败时的日志措辞都归 `adapter/lifecycle.rs`，`adapter.rs` 只经 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。会话是否进入过路由运行由 `SessionCompletion` 的布尔字段记录，作为重试记账的输入。
 
 ## 双入站适配器
 

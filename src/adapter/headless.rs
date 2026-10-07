@@ -533,7 +533,8 @@ impl Runtime {
             )
             .await;
             if let Err(error) = loop_result {
-                error!("voice router retry loop exhausted unexpectedly: {error}");
+                // 循环无界（会话已预先标记建立），耗尽分支不可达；真出现即编码错误。
+                unreachable!("voice router retry loop exhausted unexpectedly: {error}");
             }
             bridge_state_for_router.set_down(BridgeComponent::Stream);
         });

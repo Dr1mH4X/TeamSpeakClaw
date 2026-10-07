@@ -15,7 +15,7 @@ src/
 ├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, turn, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
 ├── adapter/
-│   ├── lifecycle.rs         # 会话生命周期阶段与重连退避策略的唯一归属地
+│   ├── lifecycle.rs         # 会话生命周期与重连退避策略的唯一归属地
 │   ├── reconnect.rs         # 任务回收与限时等待工具
 │   ├── headless.rs          # 无头 TS 客户端 + gRPC 语音桥；voice_features_enabled、should_route_text_through_bridge
 │   ├── headless/            # (actor, event, speech, text_util, types, voice_service, wakeword)

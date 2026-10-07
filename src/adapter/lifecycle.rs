@@ -1,15 +1,13 @@
-//! 会话生命周期的唯一归属地：连接尝试（`Connecting`）、会话建立、组件就绪
-//! （`Initializing -> Running`）与关闭（`Closed`）的阶段迁移，以及重试退避策略，
-//! 都在这里定义。其余模块只报告事件或只读状态，不自行推进阶段。
+//! 会话生命周期的唯一归属地：重连退避策略（`ReconnectState`、`RetryDecision`）、
+//! 失败后的重试决策（`retry_after_failure`）与重试驱动（`run_retry_loop`）都在这里定义。
+//! 其余模块只报告尝试结局或用自身措辞记录失败，不自行记账。
 //!
-//! 组件就绪事件模型尚未接入：当前由适配器在进入路由运行后直接报告 `Running`，
-//! 逐组件 ready 上报驱动 `Initializing -> Running` 的模型待后续接入。
 //! 语音桥组件就绪（`BridgeReadiness`）的写入归属也在此模块：其余模块只报告
-//! `BridgeComponent` 的 Up/Down 事件，不自行持有或改写具体标志位。
-//! 组件就绪写入已全部经 `BridgeReadiness` 上报：适配器、actor 与路由层都直接调用
-//! `set_up` / `set_down` / `take_stream_established`，不再有中间的薄门面结构。
+//! `BridgeComponent` 的 Up/Down 事件，不自行持有或改写具体标志位。适配器、actor 与
+//! 路由层都直接调用 `set_up` / `set_down` / `take_stream_established`，
+//! Service/Stream/Actor 三者全 Up 才算就绪。
 //!
-//! 重试驱动 `run_retry_loop` 也由本模块拥有：适配器只执行单次尝试并用自身措辞记录失败，
+//! 重试驱动 `run_retry_loop` 由本模块拥有：适配器只执行单次尝试并用自身措辞记录失败，
 //! 记账、会话建立后的退避重置与等待关闭都在驱动内完成。
 
 use std::future::Future;
@@ -50,23 +48,11 @@ pub(crate) enum RetryDecision {
     Exhausted,
 }
 
-/// 会话所处的生命周期阶段，按 `Connecting -> Initializing -> Running -> Closed` 推进。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionPhase {
-    /// 尚未建立连接，正在尝试。
-    Connecting,
-    /// 连接已建立，组件尚未就绪。
-    Initializing,
-    /// 已进入路由运行。
-    Running,
-    /// 已进入路由运行的会话收尾完毕。
-    Closed,
-}
-
-/// 一次会话结束时的阶段与结果。
+/// 一次会话结束时的启动历史与结果。
 #[derive(Debug)]
 pub(crate) struct SessionCompletion {
-    phase: SessionPhase,
+    /// 本轮会话是否已进入路由运行。
+    pub(crate) entered_running: bool,
     pub(crate) result: Result<RouterExit>,
 }
 
@@ -74,7 +60,7 @@ impl SessionCompletion {
     /// 连接已建立、组件或路由未就绪即结束的会话。
     pub(crate) fn initialization(result: Result<RouterExit>) -> Self {
         Self {
-            phase: SessionPhase::Initializing,
+            entered_running: false,
             result,
         }
     }
@@ -82,46 +68,23 @@ impl SessionCompletion {
     /// 已进入路由运行的会话。
     pub(crate) fn running(result: Result<RouterExit>) -> Self {
         Self {
-            phase: SessionPhase::Running,
+            entered_running: true,
             result,
         }
-    }
-
-    /// 会话收尾：已进入路由运行的会话转入终态 `Closed`，未进入运行的会话保持
-    /// `Initializing`。`entered_running()` 因此在收尾后仍反映真实的启动历史。
-    pub(crate) fn close(mut self) -> Self {
-        if matches!(self.phase, SessionPhase::Running) {
-            self.phase = SessionPhase::Closed;
-        }
-        self
-    }
-
-    /// 派生读法：会话是否已进入路由运行阶段。
-    pub(crate) fn entered_running(&self) -> bool {
-        matches!(self.phase, SessionPhase::Running | SessionPhase::Closed)
     }
 }
 
 /// 跟踪当前启动周期的连续失败；至少成功进入一次运行会话后不再耗尽重试次数。
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ReconnectState {
-    /// 本轮启动周期到达的最远阶段：成功进入运行会话后为 `Running`。
-    phase: SessionPhase,
+    /// 本轮启动周期内是否成功进入过运行会话。
+    session_started: bool,
     consecutive_failures: u32,
-}
-
-impl Default for ReconnectState {
-    fn default() -> Self {
-        Self {
-            phase: SessionPhase::Connecting,
-            consecutive_failures: 0,
-        }
-    }
 }
 
 impl ReconnectState {
     pub(crate) fn record_session_started(&mut self) {
-        self.phase = SessionPhase::Running;
+        self.session_started = true;
         self.consecutive_failures = 0;
     }
 
@@ -139,7 +102,7 @@ impl ReconnectState {
     }
 
     pub(crate) fn has_started_session(&self) -> bool {
-        matches!(self.phase, SessionPhase::Running)
+        self.session_started
     }
 }
 
@@ -174,26 +137,6 @@ pub(crate) enum RetryAction {
     Shutdown,
 }
 
-/// 连接失败在尝试次数耗尽时的日志模板。
-const CONNECTION_ATTEMPTS_EXHAUSTED_LOG: &str =
-    "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}";
-
-/// 会话启动失败在尝试次数耗尽时的日志模板。
-const STARTUP_ATTEMPTS_EXHAUSTED_LOG: &str =
-    "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}";
-
-/// 尝试次数耗尽时该失败类别对应的日志模板；`None` 表示保持静默。
-///
-/// 重构前连接失败会打印耗尽日志，而主订阅取出失败是静默 `return Err`，两者不可合并，
-/// 故由本映射唯一决定「耗尽时打哪条日志」。
-pub(crate) fn exhaustion_log(kind: FailureKind) -> Option<&'static str> {
-    match kind {
-        FailureKind::Connection => Some(CONNECTION_ATTEMPTS_EXHAUSTED_LOG),
-        FailureKind::Subscription => None,
-        FailureKind::Initialization | FailureKind::Running => Some(STARTUP_ATTEMPTS_EXHAUSTED_LOG),
-    }
-}
-
 /// 唯一的失败决策点：记账一次失败，按类别选择日志，等待退避，并把结果归类为
 /// 继续循环、正常退出或带错误退出。未运行过会话即耗尽尝试次数时返回 `Err`，
 /// 携带最后一次失败原因。
@@ -212,13 +155,13 @@ pub(crate) async fn retry_after_failure(
     let (attempt, delay) = match reconnect.record_failure() {
         RetryDecision::Retry { attempt, delay } => (attempt, delay),
         RetryDecision::Exhausted => {
-            // 主订阅取出失败在重构前耗尽即静默返回，不得并入连接路径的耗尽日志。
-            match exhaustion_log(kind) {
-                None => {}
-                Some(CONNECTION_ATTEMPTS_EXHAUSTED_LOG) => error!(
+            match kind {
+                // 主订阅取出失败在耗尽时静默返回，与连接路径的耗尽日志不同。
+                FailureKind::Subscription => {}
+                FailureKind::Connection => error!(
                     "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
                 ),
-                Some(_) => error!(
+                FailureKind::Initialization | FailureKind::Running => error!(
                     "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}"
                 ),
             }
@@ -377,14 +320,33 @@ impl BridgeReadiness {
 #[cfg(test)]
 mod tests {
     use super::{
-        exhaustion_log, retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome,
-        BridgeComponent, BridgeReadiness, FailureKind, ReconnectState, RetryAction, RetryDecision,
-        SessionCompletion, SessionPhase, MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
+        retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome, BridgeComponent,
+        BridgeReadiness, FailureKind, ReconnectState, RetryAction, RetryDecision,
+        SessionCompletion, MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
     };
     use crate::router::RouterExit;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+    use tracing_subscriber::{layer::SubscriberExt, Layer};
+
+    /// 只记录被测代码是否发出过 error 级事件，用于断言某条路径「静默」。
+    #[derive(Clone, Default)]
+    struct ErrorEvents(Arc<AtomicBool>);
+
+    impl<S: tracing::Subscriber> Layer<S> for ErrorEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+    }
 
     #[test]
     fn bridge_readiness_requires_every_component_up() {
@@ -458,28 +420,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn subscription_exhaustion_stays_silent() {
-        // 主订阅取出失败在重构前耗尽时静默 `return Err`，不得与连接失败共用耗尽日志；
-        // 此断言固定该差异，防止后续又被并回连接路径。
-        assert_eq!(exhaustion_log(FailureKind::Subscription), None);
-    }
+    #[tokio::test(start_paused = true)]
+    async fn subscription_exhaustion_stays_silent() {
+        // 主订阅取出失败耗尽时静默 `return Err`，不得并入连接路径的耗尽日志。
+        let (logged_error, _guard) = capture_errors();
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
 
-    #[test]
-    fn connection_exhaustion_uses_the_connection_template() {
-        assert_eq!(
-            exhaustion_log(FailureKind::Connection),
-            Some(
-                "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
-            )
+        let error = exhaust_attempts(&mut state, FailureKind::Subscription, &shutdown).await;
+
+        assert_eq!(error.to_string(), "last error");
+        assert!(
+            !logged_error.load(Ordering::Relaxed),
+            "订阅耗尽必须保持静默"
         );
     }
 
-    #[test]
-    fn session_exhaustion_uses_the_startup_template() {
-        let startup = "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}";
-        assert_eq!(exhaustion_log(FailureKind::Initialization), Some(startup));
-        assert_eq!(exhaustion_log(FailureKind::Running), Some(startup));
+    #[tokio::test(start_paused = true)]
+    async fn connection_exhaustion_logs_the_last_error() {
+        let (logged_error, _guard) = capture_errors();
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+
+        let error = exhaust_attempts(&mut state, FailureKind::Connection, &shutdown).await;
+
+        assert_eq!(error.to_string(), "last error");
+        assert!(
+            logged_error.load(Ordering::Relaxed),
+            "连接耗尽必须打印耗尽日志"
+        );
     }
 
     /// 只报告失败、未建立会话的单次尝试。
@@ -488,6 +457,35 @@ mod tests {
             error: anyhow::anyhow!("attempt failed"),
             session_started: false,
         }
+    }
+
+    /// 装上只记录 error 级事件的线程本地 subscriber，返回可查询的标记与守卫。
+    fn capture_errors() -> (Arc<AtomicBool>, tracing::subscriber::DefaultGuard) {
+        let logged_error = Arc::new(AtomicBool::new(false));
+        let subscriber = tracing_subscriber::registry().with(ErrorEvents(logged_error.clone()));
+        (logged_error, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// 用 `kind` 走完尝试预算，返回耗尽时的失败原因。
+    async fn exhaust_attempts(
+        state: &mut ReconnectState,
+        kind: FailureKind,
+        shutdown: &CancellationToken,
+    ) -> anyhow::Error {
+        for attempt in 1..MAX_RECONNECT_ATTEMPTS {
+            retry_after_failure(
+                state,
+                kind,
+                anyhow::anyhow!("attempt {attempt} failed"),
+                shutdown,
+            )
+            .await
+            .expect("未运行过时的前几次失败必须重试");
+        }
+
+        retry_after_failure(state, kind, anyhow::anyhow!("last error"), shutdown)
+            .await
+            .expect_err("未运行过时耗尽尝试次数必须带错误退出")
     }
 
     #[test]
@@ -573,52 +571,24 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_state_starts_in_the_connecting_phase() {
+    fn reconnect_state_starts_without_a_running_session() {
         let state = ReconnectState::default();
 
-        assert_eq!(state.phase, SessionPhase::Connecting);
         assert!(!state.has_started_session());
     }
 
     #[test]
-    fn initialization_completion_is_initializing_and_not_running() {
-        let initialization = SessionCompletion::initialization(Err(anyhow::anyhow!("failed")));
+    fn initialization_completion_has_not_entered_running() {
+        let completion = SessionCompletion::initialization(Err(anyhow::anyhow!("failed")));
 
-        assert_eq!(initialization.phase, SessionPhase::Initializing);
-        assert!(!initialization.entered_running());
+        assert!(!completion.entered_running);
     }
 
     #[test]
-    fn running_completion_is_running() {
-        let running = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected));
+    fn running_completion_has_entered_running() {
+        let completion = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected));
 
-        assert_eq!(running.phase, SessionPhase::Running);
-        assert!(running.entered_running());
-    }
-
-    #[test]
-    fn only_running_completion_marks_session_started() {
-        let initialization = SessionCompletion::initialization(Err(anyhow::anyhow!("failed")));
-        let running = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected));
-
-        assert!(!initialization.entered_running());
-        assert!(running.entered_running());
-    }
-
-    #[test]
-    fn running_completion_closes_into_closed_phase() {
-        let closed = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected)).close();
-
-        assert_eq!(closed.phase, SessionPhase::Closed);
-        assert!(closed.entered_running());
-    }
-
-    #[test]
-    fn initialization_completion_stays_initializing_after_close() {
-        let closed = SessionCompletion::initialization(Err(anyhow::anyhow!("failed"))).close();
-
-        assert_eq!(closed.phase, SessionPhase::Initializing);
-        assert!(!closed.entered_running());
+        assert!(completion.entered_running);
     }
 
     #[tokio::test(start_paused = true)]
