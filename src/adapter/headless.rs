@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -11,7 +8,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::adapter::lifecycle::{run_retry_loop, AttemptOutcome, ReconnectState};
+use crate::adapter::lifecycle::{
+    run_retry_loop, AttemptOutcome, BridgeComponent, BridgeReadiness, ReconnectState,
+};
 use crate::adapter::reconnect::join_or_abort;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
@@ -52,48 +51,45 @@ pub use self::speaker_ring::SpeakerRings;
 pub const INTERNAL_GRPC_ADDR: &str = "127.0.0.1:50051";
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Default)]
-struct VoiceBridgeStateInner {
-    service_running: AtomicBool,
-    stream_ready: AtomicBool,
-    actor_ready: AtomicBool,
-    connected_since_retry: AtomicBool,
-}
-
+/// 语音桥就绪状态的薄门面：状态与闩语义归属 [`crate::adapter::lifecycle::BridgeReadiness`]，
+/// 本结构只把现有调用点的事件措辞翻译成组件 Up/Down 报告。
 #[derive(Clone, Default)]
 pub struct VoiceBridgeState {
-    inner: Arc<VoiceBridgeStateInner>,
+    readiness: BridgeReadiness,
 }
 
 impl VoiceBridgeState {
     pub fn is_ready(&self) -> bool {
-        self.inner.service_running.load(Ordering::Acquire)
-            && self.inner.stream_ready.load(Ordering::Acquire)
-            && self.inner.actor_ready.load(Ordering::Acquire)
+        self.readiness.is_ready()
     }
 
     pub(crate) fn set_service_running(&self, running: bool) {
-        self.inner.service_running.store(running, Ordering::Release);
+        if running {
+            self.readiness.set_up(BridgeComponent::Service);
+        } else {
+            self.readiness.set_down(BridgeComponent::Service);
+        }
     }
 
     /// actor 事件 handler 注册完成后置位
     pub(crate) fn set_actor_ready(&self, ready: bool) {
-        self.inner.actor_ready.store(ready, Ordering::Release);
+        if ready {
+            self.readiness.set_up(BridgeComponent::Actor);
+        } else {
+            self.readiness.set_down(BridgeComponent::Actor);
+        }
     }
 
     pub(crate) fn set_stream_ready(&self, ready: bool) {
-        self.inner.stream_ready.store(ready, Ordering::Release);
         if ready {
-            self.inner
-                .connected_since_retry
-                .store(true, Ordering::Release);
+            self.readiness.set_up(BridgeComponent::Stream);
+        } else {
+            self.readiness.set_down(BridgeComponent::Stream);
         }
     }
 
     fn take_connected_since_retry(&self) -> bool {
-        self.inner
-            .connected_since_retry
-            .swap(false, Ordering::AcqRel)
+        self.readiness.take_stream_established()
     }
 }
 

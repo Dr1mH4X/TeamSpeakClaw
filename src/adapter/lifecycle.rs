@@ -4,11 +4,15 @@
 //!
 //! 组件就绪事件模型尚未接入：当前由适配器在进入路由运行后直接报告 `Running`，
 //! 逐组件 ready 上报驱动 `Initializing -> Running` 的模型待后续接入。
+//! 语音桥组件就绪（`BridgeReadiness`）的写入归属也在此模块：其余模块只报告
+//! `BridgeComponent` 的 Up/Down 事件，不自行持有或改写具体标志位。
 //!
 //! 重试驱动 `run_retry_loop` 也由本模块拥有：适配器只执行单次尝试并用自身措辞记录失败，
 //! 记账、会话建立后的退避重置与等待关闭都在驱动内完成。
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -286,17 +290,149 @@ where
     }
 }
 
+/// 语音桥的组件身份：gRPC 服务在跑 / VoiceRouter 已建立事件订阅流 /
+/// TS3 actor 事件 handler 已注册。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BridgeComponent {
+    Service,
+    Stream,
+    Actor,
+}
+
+#[derive(Default)]
+struct BridgeReadinessInner {
+    service_up: AtomicBool,
+    stream_up: AtomicBool,
+    actor_up: AtomicBool,
+    stream_established_since_retry: AtomicBool,
+}
+
+/// 语音桥组件就绪的唯一归属：三者全 Up 才算就绪；订阅流转入 Up 时顺带置位
+/// 「本轮尝试内建立过订阅流」闩，供桥接重试循环取走（取走即清零）。
+#[derive(Clone, Default)]
+pub(crate) struct BridgeReadiness {
+    inner: Arc<BridgeReadinessInner>,
+}
+
+impl BridgeReadiness {
+    pub(crate) fn is_ready(&self) -> bool {
+        self.inner.service_up.load(Ordering::Acquire)
+            && self.inner.stream_up.load(Ordering::Acquire)
+            && self.inner.actor_up.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_up(&self, component: BridgeComponent) {
+        self.flag(component).store(true, Ordering::Release);
+        if component == BridgeComponent::Stream {
+            self.inner
+                .stream_established_since_retry
+                .store(true, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn set_down(&self, component: BridgeComponent) {
+        self.flag(component).store(false, Ordering::Release);
+    }
+
+    /// 取走「本轮尝试内建立过订阅流」闩：Stream 每次转入 Up 都会重新置位。
+    pub(crate) fn take_stream_established(&self) -> bool {
+        self.inner
+            .stream_established_since_retry
+            .swap(false, Ordering::AcqRel)
+    }
+
+    fn flag(&self, component: BridgeComponent) -> &AtomicBool {
+        match component {
+            BridgeComponent::Service => &self.inner.service_up,
+            BridgeComponent::Stream => &self.inner.stream_up,
+            BridgeComponent::Actor => &self.inner.actor_up,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome, FailureKind,
-        ReconnectState, RetryAction, RetryDecision, SessionCompletion, SessionPhase,
-        MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
+        retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome, BridgeComponent,
+        BridgeReadiness, FailureKind, ReconnectState, RetryAction, RetryDecision,
+        SessionCompletion, SessionPhase, MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
     };
     use crate::router::RouterExit;
     use std::cell::Cell;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn bridge_readiness_requires_every_component_up() {
+        let readiness = BridgeReadiness::default();
+        assert!(!readiness.is_ready());
+
+        readiness.set_up(BridgeComponent::Service);
+        readiness.set_up(BridgeComponent::Stream);
+        assert!(!readiness.is_ready());
+
+        readiness.set_up(BridgeComponent::Actor);
+        assert!(readiness.is_ready());
+    }
+
+    #[test]
+    fn bridge_readiness_is_unready_before_actor_handler_registration() {
+        let readiness = BridgeReadiness::default();
+        readiness.set_up(BridgeComponent::Service);
+        readiness.set_up(BridgeComponent::Stream);
+
+        // actor handler 注册前即使服务与订阅流都正常也不就绪
+        assert!(!readiness.is_ready());
+
+        readiness.set_up(BridgeComponent::Actor);
+        assert!(readiness.is_ready());
+    }
+
+    #[test]
+    fn bridge_stream_latch_is_consumed_once() {
+        let readiness = BridgeReadiness::default();
+        readiness.set_up(BridgeComponent::Stream);
+
+        assert!(readiness.take_stream_established());
+        assert!(!readiness.take_stream_established());
+    }
+
+    #[test]
+    fn bridge_stream_latch_rearms_when_stream_returns_up() {
+        let readiness = BridgeReadiness::default();
+        readiness.set_up(BridgeComponent::Stream);
+        assert!(readiness.take_stream_established());
+
+        readiness.set_down(BridgeComponent::Stream);
+        readiness.set_up(BridgeComponent::Stream);
+
+        assert!(readiness.take_stream_established());
+        assert!(!readiness.take_stream_established());
+    }
+
+    #[test]
+    fn bridge_readiness_flips_when_any_component_goes_down() {
+        let readiness = BridgeReadiness::default();
+        for component in [
+            BridgeComponent::Service,
+            BridgeComponent::Stream,
+            BridgeComponent::Actor,
+        ] {
+            readiness.set_up(component);
+        }
+        assert!(readiness.is_ready());
+
+        for component in [
+            BridgeComponent::Service,
+            BridgeComponent::Stream,
+            BridgeComponent::Actor,
+        ] {
+            readiness.set_down(component);
+            assert!(!readiness.is_ready());
+            readiness.set_up(component);
+            assert!(readiness.is_ready());
+        }
+    }
 
     /// 只报告失败、未建立会话的单次尝试。
     fn failing_attempt() -> AttemptOutcome {
