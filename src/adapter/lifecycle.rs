@@ -174,6 +174,26 @@ pub(crate) enum RetryAction {
     Shutdown,
 }
 
+/// 连接失败在尝试次数耗尽时的日志模板。
+const CONNECTION_ATTEMPTS_EXHAUSTED_LOG: &str =
+    "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}";
+
+/// 会话启动失败在尝试次数耗尽时的日志模板。
+const STARTUP_ATTEMPTS_EXHAUSTED_LOG: &str =
+    "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}";
+
+/// 尝试次数耗尽时该失败类别对应的日志模板；`None` 表示保持静默。
+///
+/// 重构前连接失败会打印耗尽日志，而主订阅取出失败是静默 `return Err`，两者不可合并，
+/// 故由本映射唯一决定「耗尽时打哪条日志」。
+pub(crate) fn exhaustion_log(kind: FailureKind) -> Option<&'static str> {
+    match kind {
+        FailureKind::Connection => Some(CONNECTION_ATTEMPTS_EXHAUSTED_LOG),
+        FailureKind::Subscription => None,
+        FailureKind::Initialization | FailureKind::Running => Some(STARTUP_ATTEMPTS_EXHAUSTED_LOG),
+    }
+}
+
 /// 唯一的失败决策点：记账一次失败，按类别选择日志，等待退避，并把结果归类为
 /// 继续循环、正常退出或带错误退出。未运行过会话即耗尽尝试次数时返回 `Err`，
 /// 携带最后一次失败原因。
@@ -192,11 +212,13 @@ pub(crate) async fn retry_after_failure(
     let (attempt, delay) = match reconnect.record_failure() {
         RetryDecision::Retry { attempt, delay } => (attempt, delay),
         RetryDecision::Exhausted => {
-            match kind {
-                FailureKind::Connection | FailureKind::Subscription => error!(
+            // 主订阅取出失败在重构前耗尽即静默返回，不得并入连接路径的耗尽日志。
+            match exhaustion_log(kind) {
+                None => {}
+                Some(CONNECTION_ATTEMPTS_EXHAUSTED_LOG) => error!(
                     "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
                 ),
-                FailureKind::Initialization | FailureKind::Running => error!(
+                Some(_) => error!(
                     "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}"
                 ),
             }
@@ -355,8 +377,8 @@ impl BridgeReadiness {
 #[cfg(test)]
 mod tests {
     use super::{
-        retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome, BridgeComponent,
-        BridgeReadiness, FailureKind, ReconnectState, RetryAction, RetryDecision,
+        exhaustion_log, retry_after_failure, run_retry_loop, wait_for_retry, AttemptOutcome,
+        BridgeComponent, BridgeReadiness, FailureKind, ReconnectState, RetryAction, RetryDecision,
         SessionCompletion, SessionPhase, MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
     };
     use crate::router::RouterExit;
@@ -434,6 +456,30 @@ mod tests {
             readiness.set_up(component);
             assert!(readiness.is_ready());
         }
+    }
+
+    #[test]
+    fn subscription_exhaustion_stays_silent() {
+        // 主订阅取出失败在重构前耗尽时静默 `return Err`，不得与连接失败共用耗尽日志；
+        // 此断言固定该差异，防止后续又被并回连接路径。
+        assert_eq!(exhaustion_log(FailureKind::Subscription), None);
+    }
+
+    #[test]
+    fn connection_exhaustion_uses_the_connection_template() {
+        assert_eq!(
+            exhaustion_log(FailureKind::Connection),
+            Some(
+                "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
+            )
+        );
+    }
+
+    #[test]
+    fn session_exhaustion_uses_the_startup_template() {
+        let startup = "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}";
+        assert_eq!(exhaustion_log(FailureKind::Initialization), Some(startup));
+        assert_eq!(exhaustion_log(FailureKind::Running), Some(startup));
     }
 
     /// 只报告失败、未建立会话的单次尝试。
