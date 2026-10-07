@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
+use tracing::{error, warn};
 
 use crate::router::RouterExit;
 
@@ -141,11 +142,101 @@ pub(crate) async fn wait_for_retry(delay: Duration, shutdown: &CancellationToken
     }
 }
 
+/// 一次连接或会话失败所属的类别，决定重试日志的措辞与耗尽时的归属。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    /// TeamSpeak 连接建立失败。
+    Connection,
+    /// 连接已建立但主订阅取出失败。
+    Subscription,
+    /// 未进入路由运行的会话初始化失败。
+    Initialization,
+    /// 已进入路由运行的会话失败或断开。
+    Running,
+}
+
+/// 唯一重试决策点的结果：继续循环，或等待期间关闭而正常退出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryAction {
+    /// 失败已记账、已等待完毕，调用方继续下一轮尝试。
+    ContinueLoop,
+    /// 等待期间根取消令牌触发，调用方直接返回 `Ok(())`。
+    Shutdown,
+}
+
+/// 唯一的失败决策点：记账一次失败，按类别选择日志，等待退避，并把结果归类为
+/// 继续循环、正常退出或带错误退出。未运行过会话即耗尽尝试次数时返回 `Err`，
+/// 携带最后一次失败原因。
+pub(crate) async fn retry_after_failure(
+    reconnect: &mut ReconnectState,
+    kind: FailureKind,
+    failure: anyhow::Error,
+    shutdown: &CancellationToken,
+) -> Result<RetryAction> {
+    // 已进入运行会话后本轮启动周期不再受尝试次数限制，读法与记账前后一致。
+    let had_running_session = reconnect.has_started_session();
+    // 连接与订阅路径的既有日志以 error 命名失败原因，会话路径以 failure 命名；
+    // 统一决策点只保留一个失败值，此处别名仅为保留原有的日志模板。
+    let error = &failure;
+
+    let (attempt, delay) = match reconnect.record_failure() {
+        RetryDecision::Retry { attempt, delay } => (attempt, delay),
+        RetryDecision::Exhausted => {
+            match kind {
+                FailureKind::Connection | FailureKind::Subscription => error!(
+                    "All {MAX_RECONNECT_ATTEMPTS} initial connection attempts exhausted. Last error: {error}"
+                ),
+                FailureKind::Initialization | FailureKind::Running => error!(
+                    "All {MAX_RECONNECT_ATTEMPTS} initial startup attempts exhausted. Last error: {failure}"
+                ),
+            }
+            return Err(failure);
+        }
+    };
+
+    match kind {
+        FailureKind::Subscription => {
+            if !had_running_session {
+                warn!(
+                    "Initial TeamSpeak connection attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed; retrying after {delay:.0?}"
+                );
+            }
+        }
+        FailureKind::Connection => {
+            if had_running_session {
+                warn!(
+                    "TeamSpeak reconnect attempt {attempt} failed: {error}; retrying after {delay:.0?}"
+                );
+            } else {
+                warn!(
+                    "Initial TeamSpeak connection attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed: {error}; retrying after {delay:.0?}"
+                );
+            }
+        }
+        FailureKind::Initialization | FailureKind::Running => {
+            if had_running_session {
+                warn!("TeamSpeak reconnect attempt {attempt} scheduled after {delay:.0?}");
+            } else {
+                warn!(
+                    "Initial startup attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} failed: {failure}; retrying after {delay:.0?}"
+                );
+            }
+        }
+    }
+
+    if wait_for_retry(delay, shutdown).await {
+        Ok(RetryAction::ContinueLoop)
+    } else {
+        Ok(RetryAction::Shutdown)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        wait_for_retry, ReconnectState, RetryDecision, SessionCompletion, SessionPhase,
-        MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS_MS,
+        retry_after_failure, wait_for_retry, FailureKind, ReconnectState, RetryAction,
+        RetryDecision, SessionCompletion, SessionPhase, MAX_RECONNECT_ATTEMPTS,
+        RECONNECT_DELAYS_MS,
     };
     use crate::router::RouterExit;
     use std::time::Duration;
@@ -280,5 +371,129 @@ mod tests {
 
         assert_eq!(closed.phase, SessionPhase::Initializing);
         assert!(!closed.entered_running());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_failure_without_a_running_session_retries_after_the_first_delay() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+        let started = tokio::time::Instant::now();
+
+        let action = retry_after_failure(
+            &mut state,
+            FailureKind::Connection,
+            anyhow::anyhow!("connect failed"),
+            &shutdown,
+        )
+        .await
+        .expect("未运行过的首次失败必须重试");
+
+        assert_eq!(action, RetryAction::ContinueLoop);
+        assert_eq!(state.consecutive_failures, 1);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(RECONNECT_DELAYS_MS[0])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failure_after_a_running_session_restarts_attempt_numbering() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+
+        retry_after_failure(
+            &mut state,
+            FailureKind::Connection,
+            anyhow::anyhow!("initial connect failed"),
+            &shutdown,
+        )
+        .await
+        .expect("未运行过的首次失败必须重试");
+        state.record_session_started();
+        let started = tokio::time::Instant::now();
+
+        let action = retry_after_failure(
+            &mut state,
+            FailureKind::Running,
+            anyhow::anyhow!("running session failed"),
+            &shutdown,
+        )
+        .await
+        .expect("运行过会话后的失败必须重试");
+
+        assert_eq!(action, RetryAction::ContinueLoop);
+        assert_eq!(state.consecutive_failures, 1);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(RECONNECT_DELAYS_MS[0])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_failures_exhaust_the_budget_with_the_last_error() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+
+        for attempt in 1..MAX_RECONNECT_ATTEMPTS {
+            let action = retry_after_failure(
+                &mut state,
+                FailureKind::Initialization,
+                anyhow::anyhow!("startup {attempt} failed"),
+                &shutdown,
+            )
+            .await
+            .expect("未运行过时的前几次失败必须重试");
+
+            assert_eq!(action, RetryAction::ContinueLoop);
+        }
+
+        let error = retry_after_failure(
+            &mut state,
+            FailureKind::Initialization,
+            anyhow::anyhow!("last startup error"),
+            &shutdown,
+        )
+        .await
+        .expect_err("未运行过时耗尽尝试次数必须带错误退出");
+
+        assert_eq!(error.to_string(), "last startup error");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_after_a_running_session_never_exhaust_the_budget() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+        state.record_session_started();
+
+        for attempt in 1..=MAX_RECONNECT_ATTEMPTS + 2 {
+            let action = retry_after_failure(
+                &mut state,
+                FailureKind::Running,
+                anyhow::anyhow!("reconnect {attempt} failed"),
+                &shutdown,
+            )
+            .await
+            .expect("运行过会话后不再耗尽尝试次数");
+
+            assert_eq!(action, RetryAction::ContinueLoop);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_the_retry_wait_reports_shutdown() {
+        let mut state = ReconnectState::default();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let action = retry_after_failure(
+            &mut state,
+            FailureKind::Running,
+            anyhow::anyhow!("session disconnected"),
+            &shutdown,
+        )
+        .await
+        .expect("关闭不是失败");
+
+        assert_eq!(action, RetryAction::Shutdown);
     }
 }
