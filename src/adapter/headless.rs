@@ -552,13 +552,13 @@ impl Runtime {
                     Err(error) => error!("voice router failed: {error}"),
                 }
 
-                let delay = crate::adapter::reconnect::reconnect_delay_for_attempt(attempt);
+                let delay = crate::adapter::lifecycle::reconnect_delay_for_attempt(attempt);
                 warn!(
                     attempt,
                     delay_secs = delay.as_secs(),
                     "voice router unavailable; TeamSpeak text fallback is active"
                 );
-                if !crate::adapter::reconnect::wait_for_retry(delay, &shutdown_for_bridge).await {
+                if !crate::adapter::lifecycle::wait_for_retry(delay, &shutdown_for_bridge).await {
                     break;
                 }
                 attempt = attempt.saturating_add(1);

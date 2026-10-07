@@ -4,7 +4,7 @@ use super::{
     types::{NcAction, NcApiResponse, Segment},
 };
 use crate::{
-    adapter::reconnect::{wait_for_retry, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS},
+    adapter::lifecycle::{wait_for_retry, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS},
     config::{AppConfig, NapCatConfig},
 };
 use anyhow::{anyhow, Context as _, Result};
@@ -637,7 +637,7 @@ mod tests {
             if attempt >= MAX_RECONNECT_ATTEMPTS {
                 assert_eq!(
                     delay,
-                    crate::adapter::reconnect::reconnect_delay_for_attempt(MAX_RECONNECT_ATTEMPTS)
+                    crate::adapter::lifecycle::reconnect_delay_for_attempt(MAX_RECONNECT_ATTEMPTS)
                 );
             }
         }

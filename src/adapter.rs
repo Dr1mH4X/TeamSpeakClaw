@@ -1,3 +1,4 @@
+pub(crate) mod lifecycle;
 pub(crate) mod reconnect;
 
 pub mod headless;
@@ -13,9 +14,10 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
-use crate::adapter::reconnect::{
-    wait_for_retry, wait_with_timeout, ReconnectState, RetryDecision, MAX_RECONNECT_ATTEMPTS,
+use crate::adapter::lifecycle::{
+    wait_for_retry, ReconnectState, RetryDecision, SessionCompletion, MAX_RECONNECT_ATTEMPTS,
 };
+use crate::adapter::reconnect::wait_with_timeout;
 use crate::config::{AppConfig, PromptsConfig};
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -127,7 +129,8 @@ pub async fn run(
         )
         .await;
 
-        let entered_running = session.entered_running;
+        let session = session.close();
+        let entered_running = session.entered_running();
         if entered_running {
             reconnect.record_session_started();
         }
@@ -314,27 +317,6 @@ async fn wait_headless_failure(mut status: watch::Receiver<Option<&'static str>>
     }
 }
 
-struct SessionCompletion {
-    entered_running: bool,
-    result: Result<RouterExit>,
-}
-
-impl SessionCompletion {
-    fn initialization(result: Result<RouterExit>) -> Self {
-        Self {
-            entered_running: false,
-            result,
-        }
-    }
-
-    fn running(result: Result<RouterExit>) -> Self {
-        Self {
-            entered_running: true,
-            result,
-        }
-    }
-}
-
 enum InitializationWait<T> {
     Completed(T),
     Shutdown,
@@ -406,11 +388,10 @@ async fn disconnect_adapter(adapter: &TsAdapter) {
 mod tests {
     use super::{
         load_wakeword_models, wait_for_initialization, wait_headless_failure,
-        wait_nc_supervisor_failure, wait_with_timeout, InitializationWait, SessionCompletion,
+        wait_nc_supervisor_failure, wait_with_timeout, InitializationWait,
     };
     use crate::adapter::napcat::ConnectionExit;
     use crate::config::AppConfig;
-    use crate::router::RouterExit;
     use std::future::pending;
     use std::time::Duration;
     use tokio::sync::watch;
@@ -450,15 +431,6 @@ mod tests {
         let config = AppConfig::default();
 
         assert!(load_wakeword_models(&config).unwrap().is_none());
-    }
-
-    #[test]
-    fn only_running_completion_marks_session_started() {
-        let initialization = SessionCompletion::initialization(Err(anyhow::anyhow!("failed")));
-        let running = SessionCompletion::running(Ok(RouterExit::TeamSpeakDisconnected));
-
-        assert!(!initialization.entered_running);
-        assert!(running.entered_running);
     }
 
     #[tokio::test]
