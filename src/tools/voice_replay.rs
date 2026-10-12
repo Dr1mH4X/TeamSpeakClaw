@@ -3,8 +3,8 @@
 use crate::adapter::headless::audio_output::PcmClipPayload;
 use crate::adapter::headless::speaker_ring::{NameResolve, ReplayFilter};
 use crate::config::AppConfig;
-use crate::skills::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
-use crate::skills::{Platform, Skill, UnifiedExecutionContext};
+use crate::tools::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
+use crate::tools::{Platform, Tool, UnifiedExecutionContext};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -180,7 +180,7 @@ fn execute_replay(runtime: &VoiceAudioRuntime, args: &Value) -> Result<Value> {
 }
 
 #[async_trait]
-impl Skill for VoiceReplay {
+impl Tool for VoiceReplay {
     fn name(&self) -> &'static str {
         "voice_replay"
     }
@@ -380,7 +380,7 @@ pub fn match_speaker_longest(candidates: &[(u32, String)], input: &str) -> Speak
     SpeakerMatch::Ambiguous(hits.iter().map(|(_, n)| (*n).clone()).collect())
 }
 
-/// 直呼执行：与技能同一 JSON 契约；speaker 走最长匹配
+/// 直呼执行：与工具同一 JSON 契约；speaker 走最长匹配
 pub fn execute_direct_command(
     command: DirectReplayCommand,
     runtime: &VoiceAudioRuntime,
@@ -422,14 +422,14 @@ pub fn execute_direct_command(
     }
 }
 
-/// 直呼与技能共用的 ACL：同一 `voice_replay` 白名单
+/// 直呼与工具共用的 ACL：同一 `voice_replay` 白名单
 pub fn direct_command_allowed(
     gate: &crate::permission::PermissionGate,
     groups: &[u32],
     channel_group_id: u32,
 ) -> bool {
-    let allowed = gate.get_allowed_skills(groups, channel_group_id);
-    crate::skills::is_skill_allowed("voice_replay", &allowed)
+    let allowed = gate.get_allowed_tools(groups, channel_group_id);
+    crate::tools::is_tool_allowed("voice_replay", &allowed)
 }
 
 #[cfg(test)]
@@ -489,20 +489,20 @@ mod tests {
     fn should_register_follows_config_enabled() {
         let mut disabled = AppConfig::default();
         disabled.voice_replay.enabled = false;
-        let skill = VoiceReplay::new(Arc::new(disabled), VoiceAudioHandles::default());
-        assert!(!skill.should_register());
+        let tool = VoiceReplay::new(Arc::new(disabled), VoiceAudioHandles::default());
+        assert!(!tool.should_register());
 
-        let skill = VoiceReplay::new(enabled_config(30), VoiceAudioHandles::default());
-        assert!(skill.should_register());
+        let tool = VoiceReplay::new(enabled_config(30), VoiceAudioHandles::default());
+        assert!(tool.should_register());
     }
 
     #[tokio::test]
     async fn status_action_is_removed() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles);
+        let tool = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let err = skill
+        let err = tool
             .execute(json!({"action": "status"}), &ctx)
             .await
             .unwrap_err();
@@ -513,9 +513,9 @@ mod tests {
     async fn replay_clamps_seconds_over_window() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles);
+        let tool = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let value = skill
+        let value = tool
             .execute(json!({"action": "replay", "seconds": 120}), &ctx)
             .await
             .unwrap();
@@ -541,10 +541,10 @@ mod tests {
     async fn replay_musicbot_target_reports_not_recorded() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles.clone());
+        let tool = VoiceReplay::new(config.clone(), handles.clone());
         let ctx = ts_ctx(config);
         for speaker in ["MusicBot", "<@5|MusicBot>", "@MusicBot"] {
-            let err = skill
+            let err = tool
                 .execute(json!({"action": "replay", "speaker": speaker}), &ctx)
                 .await
                 .unwrap_err();
@@ -567,9 +567,9 @@ mod tests {
     async fn replay_unknown_speaker_lists_candidates() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles);
+        let tool = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let err = skill
+        let err = tool
             .execute(json!({"action": "replay", "speaker": "nobody"}), &ctx)
             .await
             .unwrap_err();
@@ -581,9 +581,9 @@ mod tests {
     async fn stop_action_is_rejected() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles);
+        let tool = VoiceReplay::new(config.clone(), handles);
         let ctx = ts_ctx(config);
-        let err = skill
+        let err = tool
             .execute(json!({"action": "stop"}), &ctx)
             .await
             .unwrap_err();
@@ -594,10 +594,10 @@ mod tests {
     async fn napcat_platform_is_rejected() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles);
+        let tool = VoiceReplay::new(config.clone(), handles);
         let mut ctx = ts_ctx(config);
         ctx.platform = Platform::NapCat;
-        assert!(skill
+        assert!(tool
             .execute(json!({"action": "replay"}), &ctx)
             .await
             .is_err());
@@ -607,9 +607,9 @@ mod tests {
     async fn seconds_out_of_range_is_rejected() {
         let config = enabled_config(30);
         let handles = handles_with_rings(30);
-        let skill = VoiceReplay::new(config.clone(), handles.clone());
+        let tool = VoiceReplay::new(config.clone(), handles.clone());
         let ctx = ts_ctx(config);
-        let err = skill
+        let err = tool
             .execute(json!({"action": "replay", "seconds": 121}), &ctx)
             .await
             .unwrap_err();
@@ -748,12 +748,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_command_acl_denies_without_skill() {
+    fn direct_command_acl_denies_without_tool() {
         let mut acl = AclConfig::default();
         acl.rules.push(crate::config::acl::AclRule {
             server_group_ids: vec![8],
             channel_group_ids: vec![],
-            allowed_skills: vec!["poke_client".into()],
+            allowed_tools: vec!["poke_client".into()],
             can_target_admins: false,
         });
         let gate = PermissionGate::new(acl);
@@ -763,7 +763,7 @@ mod tests {
             rules: vec![crate::config::acl::AclRule {
                 server_group_ids: vec![8],
                 channel_group_ids: vec![],
-                allowed_skills: vec!["voice_replay".into()],
+                allowed_tools: vec!["voice_replay".into()],
                 can_target_admins: false,
             }],
             acl: Default::default(),

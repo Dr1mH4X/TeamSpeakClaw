@@ -31,7 +31,7 @@ const ENCODED_EXTERNAL_MAX_JOB_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobSource {
-    SkillClip,
+    ToolClip,
     Tts,
     External,
 }
@@ -90,7 +90,7 @@ enum AudioJob {
 struct AudioOutputStatusInner {
     current: Mutex<Option<CurrentJobInfo>>,
     queued_jobs: AtomicUsize,
-    /// 消费者在 job 失败时写入；技能 status / 直呼只读，不在此 panic
+    /// 消费者在 job 失败时写入；工具 status / 直呼只读，不在此 panic
     last_error: Mutex<Option<String>>,
     clip_cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     next_cancel_id: AtomicU64,
@@ -301,7 +301,7 @@ impl AudioOutput {
 
     /// 用调用方提供的取消位入队 PCM 片段：回合持有的播放取消位（插话、中断）同时作用于该片段。
     ///
-    /// 这类片段不登记进 `stop_clips` 的集合——那批取消位属于技能片段，
+    /// 这类片段不登记进 `stop_clips` 的集合——那批取消位属于工具片段，
     /// 把本片段的取消位登记进去等于让「停止播放」连带取消本回合的 TTS 播放。
     pub fn enqueue_pcm_clip_with_cancel(
         &self,
@@ -315,21 +315,21 @@ impl AudioOutput {
         &self,
         pcm: PcmClipPayload,
         cancel: Arc<AtomicBool>,
-        skill_scoped: bool,
+        tool_scoped: bool,
     ) -> Result<ClipHandle> {
         pcm_payload_duration(&pcm)?;
         let cancel_for_job = cancel.clone();
         let (done_tx, done_rx) = oneshot::channel();
         let status = &self.inner.status;
         status.enqueue_job(&self.inner.job_tx, |cancel_id| {
-            if skill_scoped {
+            if tool_scoped {
                 status.register_clip_cancel(cancel_id, cancel_for_job.clone());
             }
             AudioJob::PcmClip {
-                // 非 skill_scoped 的片段来自回合（反馈音等）而非技能：它不登记进
+                // 非 tool_scoped 的片段来自回合（反馈音等）而非工具调用：它不登记进
                 // `stop_clips` 的取消集合，`JobSource` 只影响状态展示与编码流超时，故沿用 `Tts`
-                source: if skill_scoped {
-                    JobSource::SkillClip
+                source: if tool_scoped {
+                    JobSource::ToolClip
                 } else {
                     JobSource::Tts
                 },
@@ -407,7 +407,7 @@ impl AudioOutput {
         session.finish_drained().await
     }
 
-    /// 级联取消全部仍在队列/播放中的 SkillClip
+    /// 级联取消全部仍在队列/播放中的 ToolClip
     pub fn stop_clips(&self) -> usize {
         let mut map = self
             .inner
@@ -536,7 +536,7 @@ async fn play_pcm_clip(
 fn encoded_idle_timeout(source: JobSource) -> std::time::Duration {
     match source {
         JobSource::Tts => std::time::Duration::from_secs(ENCODED_INTER_SEGMENT_IDLE_SECS),
-        JobSource::External | JobSource::SkillClip => {
+        JobSource::External | JobSource::ToolClip => {
             std::time::Duration::from_secs(ENCODED_EXTERNAL_MAX_JOB_SECS)
         }
     }
@@ -545,7 +545,7 @@ fn encoded_idle_timeout(source: JobSource) -> std::time::Duration {
 fn encoded_total_deadline(source: JobSource, dequeue_at: Instant) -> Option<Instant> {
     match source {
         JobSource::Tts => None,
-        JobSource::External | JobSource::SkillClip => {
+        JobSource::External | JobSource::ToolClip => {
             Some(dequeue_at + std::time::Duration::from_secs(ENCODED_EXTERNAL_MAX_JOB_SECS))
         }
     }
@@ -953,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_clips_cancels_queued_skill_clips() {
+    async fn stop_clips_cancels_queued_tool_clips() {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
@@ -1237,10 +1237,10 @@ mod tests {
         playback_cancel.store(true, Ordering::SeqCst);
         handle.wait().await.expect("cancelled clip finishes");
 
-        assert_eq!(output.stop_clips(), 0, "回合片段不进技能片段的取消集合");
+        assert_eq!(output.stop_clips(), 0, "回合片段不进工具片段的取消集合");
     }
 
-    /// 回合片段不登记到 stop_clips：停止技能片段不得连带取消本回合的 TTS 播放
+    /// 回合片段不登记到 stop_clips：停止工具片段不得连带取消本回合的 TTS 播放
     #[tokio::test(start_paused = true)]
     async fn turn_scoped_clip_is_not_registered_for_stop_clips() {
         let bus = AudioBus::new();

@@ -28,7 +28,7 @@ use crate::adapter::napcat::NapCatAdapter;
 use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::{SkillRegistry, VoiceAudioHandles};
+use crate::tools::{ToolRegistry, VoiceAudioHandles};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterExit {
@@ -41,7 +41,7 @@ pub(crate) struct RouterContext {
     pub(crate) config: Arc<AppConfig>,
     pub(crate) gate: Arc<PermissionGate>,
     pub(crate) llm: Arc<LlmEngine>,
-    pub(crate) registry: Arc<SkillRegistry>,
+    pub(crate) registry: Arc<ToolRegistry>,
     pub(crate) voice_audio: VoiceAudioHandles,
 }
 
@@ -50,7 +50,7 @@ impl RouterContext {
         config: Arc<AppConfig>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
+        registry: Arc<ToolRegistry>,
         voice_audio: VoiceAudioHandles,
     ) -> Self {
         Self {

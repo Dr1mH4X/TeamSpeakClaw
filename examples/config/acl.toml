@@ -4,7 +4,7 @@
 # 规则匹配逻辑：
 #   1. server_group_ids 和 channel_group_ids 需要「同时匹配」才算匹配
 #   2. 若某一侧数组为空（[]），表示对该侧不做限制，等价于"匹配所有该侧的用户"
-#   3. 当用户同时命中多条规则时，allowed_skills 会从所有匹配规则中合并（取并集）
+#   3. 当用户同时命中多条规则时，allowed_tools 会从所有匹配规则中合并（取并集）
 #   4. 如果任一匹配规则包含 "*"，则允许所有技能
 #
 # 服务器组 ID（TS3 默认布局，可在客户端右键查看服务器组，或按 sgid 核对）：
@@ -34,14 +34,14 @@
 [[rules]]
 server_group_ids = [6]
 channel_group_ids = []
-allowed_skills = ["*"]
+allowed_tools = ["*"]
 can_target_admins = true
 
 # 7 Normal：常用技能；不能对受保护组的成员执行踢出/封禁
 [[rules]]
 server_group_ids = [7]
 channel_group_ids = []
-allowed_skills = [
+allowed_tools = [
   "poke_client",
   "send_message",
   "get_client_info",
@@ -54,7 +54,7 @@ can_target_admins = false
 [[rules]]
 server_group_ids = [8]
 channel_group_ids = []
-allowed_skills = [
+allowed_tools = [
   "send_message",
   "get_client_info",
   "music_control"
@@ -65,7 +65,7 @@ can_target_admins = false
 [[rules]]
 server_group_ids = []
 channel_group_ids = [5]
-allowed_skills = [
+allowed_tools = [
   "poke_client",
   "send_message",
   "get_client_info",
@@ -79,7 +79,7 @@ can_target_admins = false
 [[rules]]
 server_group_ids = [9000]  # 任意 NapCat 用户
 channel_group_ids = []
-allowed_skills = [
+allowed_tools = [
   "send_message",
   "get_client_info",
   "music_control"
@@ -90,7 +90,7 @@ can_target_admins = false
 [[rules]]
 server_group_ids = []
 channel_group_ids = []
-allowed_skills = ["music_control"]
+allowed_tools = ["music_control"]
 can_target_admins = false
 
 # 受保护的组 ID：can_target_admins = false 的用户不能对这些组的成员执行踢出/封禁等操作

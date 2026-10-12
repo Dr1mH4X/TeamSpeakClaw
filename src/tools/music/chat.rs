@@ -1,5 +1,5 @@
 use crate::adapter::headless::{TextMessageTarget, TsEvent};
-use crate::skills::{unified_ts_adapter, UnifiedExecutionContext};
+use crate::tools::{unified_ts_adapter, UnifiedExecutionContext};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::sync::LazyLock;

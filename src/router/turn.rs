@@ -16,7 +16,7 @@ use crate::llm::context::{
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
-use crate::skills::{SkillRegistry, UnifiedExecutionContext};
+use crate::tools::{ToolRegistry, UnifiedExecutionContext};
 
 /// LLM 后端不可用时的固定回复文案（ts/nc/voice 调用点共用）
 pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
@@ -88,10 +88,10 @@ pub(crate) struct TurnSession {
 /// 一回合 LLM 请求：提示与输入由调用点准备，门禁、循环与回复策略由本 module 承担
 pub(crate) struct TurnRequest<'a> {
     pub(crate) llm: &'a LlmEngine,
-    pub(crate) registry: &'a SkillRegistry,
+    pub(crate) registry: &'a ToolRegistry,
     pub(crate) source: &'a SessionSource,
     pub(crate) user_ctx: &'a str,
-    pub(crate) allowed_skills: &'a [String],
+    pub(crate) allowed_tools: &'a [String],
     pub(crate) input: TurnInput<'a>,
     pub(crate) callbacks: Option<&'a StreamCallbacks>,
     pub(crate) cancel: &'a CancellationToken,
@@ -117,10 +117,10 @@ impl TurnRequest<'_> {
             Ok(system_prompt) => system_prompt,
             Err(error) => return Err(TurnError::Failed(error)),
         };
-        let tools = self.registry.to_tool_schemas(self.allowed_skills);
+        let tools = self.registry.to_tool_schemas(self.allowed_tools);
         let executor = TurnExecutor {
             registry: self.registry,
-            allowed_skills: self.allowed_skills,
+            allowed_tools: self.allowed_tools,
             build_exec_ctx,
         };
         let mut retries = 0usize;
@@ -205,8 +205,8 @@ impl TurnRequest<'_> {
 
 /// 工具循环执行器：调用点注入 UnifiedExecutionContext 构造闭包
 struct TurnExecutor<'a, F> {
-    registry: &'a SkillRegistry,
-    allowed_skills: &'a [String],
+    registry: &'a ToolRegistry,
+    allowed_tools: &'a [String],
     build_exec_ctx: F,
 }
 
@@ -217,7 +217,7 @@ where
 {
     async fn execute(&self, call: &ToolCall) -> String {
         self.registry
-            .execute_skill(call, (self.build_exec_ctx)(), self.allowed_skills)
+            .execute_tool(call, (self.build_exec_ctx)(), self.allowed_tools)
             .await
     }
 }
@@ -381,10 +381,10 @@ mod tests {
         let cancel = CancellationToken::new();
         TurnRequest {
             llm,
-            registry: &SkillRegistry::default(),
+            registry: &ToolRegistry::default(),
             source,
             user_ctx: "{}",
-            allowed_skills: &[],
+            allowed_tools: &[],
             input,
             callbacks: None,
             cancel: &cancel,
@@ -643,10 +643,10 @@ mod tests {
 
         let result = TurnRequest {
             llm: &llm,
-            registry: &SkillRegistry::default(),
+            registry: &ToolRegistry::default(),
             source: &source,
             user_ctx: "{}",
-            allowed_skills: &[],
+            allowed_tools: &[],
             input: TurnInput::Text("question"),
             callbacks: None,
             cancel: &cancel,

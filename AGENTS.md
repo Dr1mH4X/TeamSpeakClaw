@@ -1,6 +1,6 @@
 # AGENTS.md
 
-TeamSpeakClaw 是 Rust 编写的单二进制聊天机器人：集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）双入站适配器，通过 OpenAI 兼容接口驱动 LLM 技能。改动 src/ 代码前先读 [docs/architecture.md](docs/architecture.md)；文档维护遵循 [docs/AGENTS.md](docs/AGENTS.md)。
+TeamSpeakClaw 是 Rust 编写的单二进制聊天机器人：集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）双入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。改动 src/ 代码前先读 [docs/architecture.md](docs/architecture.md)；文档维护遵循 [docs/AGENTS.md](docs/AGENTS.md)。
 
 ## Repository layout
 
@@ -26,10 +26,9 @@ src/
 ├── prompt.rs                # 模型可见提示词装配：有序命名段落 + 严格变量 + 运行期上下文快照
 ├── prompt/                  # (sections, context)
 ├── permission.rs            # 基于 ACL 的权限门
-├── permission/              # (gate)
-├── skills.rs                # Skill trait + 注册表；Skill、UnifiedExecutionContext
-├── skills/                  # (communication, information, moderation, music, web_search)
-│   ├── music.rs             # 音乐技能根
+├── tools.rs                 # Tool trait + 注册表；Tool、UnifiedExecutionContext
+├── tools/                   # (communication, information, moderation, music, web_search)
+│   ├── music.rs             # 音乐工具根
 │   └── music/               # (ts3audiobot, tsbot_http, tsmusicbot)
 
 proto/voice.proto            # 语音桥 gRPC protobuf
@@ -58,13 +57,13 @@ website/                     # Docusaurus 用户文档（排除在 Rust CI 路�
 
 ## Architecture
 
-单二进制 `teamspeakclaw`，两族入站适配器：TeamSpeak 无头客户端（内置 gRPC 语音桥）与 NapCat OneBot 11。voice bridge 激活时文本经 `VoiceRouter` 而非 `EventRouter` 路由（由 `should_route_text_through_bridge` 决定）。入口流：main 加载 config → 建 `PermissionGate`/`SkillRegistry`/`LlmEngine` → `adapter::run()` 循环连接适配器并并发运行 `EventRouter`/`NcRouter`，TS 断线走重连循环。详见 [docs/architecture.md](docs/architecture.md)。
+单二进制 `teamspeakclaw`，两族入站适配器：TeamSpeak 无头客户端（内置 gRPC 语音桥）与 NapCat OneBot 11。voice bridge 激活时文本经 `VoiceRouter` 而非 `EventRouter` 路由（由 `should_route_text_through_bridge` 决定）。入口流：main 加载 config → 建 `PermissionGate`/`ToolRegistry`/`LlmEngine` → `adapter::run()` 循环连接适配器并并发运行 `EventRouter`/`NcRouter`，TS 断线走重连循环。详见 [docs/architecture.md](docs/architecture.md)。
 
 ## Critical Code Paths
 
 每条仅列要点，细节见 [docs/architecture.md](docs/architecture.md) 对应小节。
 
-- `text_util::send_text_message()` + `split_message()` + `MAX_MESSAGE_BYTES`：8192 字节 TS3 ServerQuery 上限，UTF-8 安全、优先空白切分；TS 文本路由与技能回复、语音桥 `send_notice` 共用这一个发送实现
+- `text_util::send_text_message()` + `split_message()` + `MAX_MESSAGE_BYTES`：8192 字节 TS3 ServerQuery 上限，UTF-8 安全、优先空白切分；TS 文本路由与工具回复、语音桥 `send_notice` 共用这一个发送实现
 - `voice_router.rs`：音频 STT/TTS 双流水线、OpenWakeWord 唤醒门（omni/STT 同门）、音乐 bot 音频过滤、gRPC 语音服务
 - `should_route_text_through_bridge`：voice bridge 就绪时 `ts_router::handle_message()` 跳过文本处理
 
@@ -75,7 +74,7 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 ## Conventions
 
 - [docs/AGENTS.md](docs/AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
-- [docs/architecture.md](docs/architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与技能体系、层级规范。
+- [docs/architecture.md](docs/architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与工具体系、层级规范。
 - [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
 - [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
 - [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。

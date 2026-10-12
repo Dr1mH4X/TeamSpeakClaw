@@ -1,10 +1,10 @@
 # 架构
 
-TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 技能。本文描述系统拓扑与关键代码路径；模块级明细以源码为准，目录级规则只出现在已建立的模块 `AGENTS.md`（当前为 `src/config/AGENTS.md` 与 `website/AGENTS.md`）中。
+TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。本文描述系统拓扑与关键代码路径；模块级明细以源码为准，目录级规则只出现在已建立的模块 `AGENTS.md`（当前为 `src/config/AGENTS.md` 与 `website/AGENTS.md`）中。
 
 ## 入口流
 
-`main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`SkillRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
+`main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`ToolRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
 
 `adapter::run()`（`adapter.rs`）是生命周期主循环：`[headless.wakeword]` 启用时先从 `models_dir()` 加载三个 OpenWakeWord 模型，缺文件或模型非法直接终止启动，不进入连接与重连；随后 `TsAdapter::connect()` 建 TeamSpeak 连接，再 `run_connected_session()` 按需启动 NapCat 适配器（`connect_if_enabled()`，未启用则为 `None`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。TeamSpeak 断线、NapCat supervisor 异常退出或 headless 组件失败都会结束本轮会话并进入重连循环；退避序列与尝试上限、以及失败时的日志措辞都归 `adapter/lifecycle.rs`，`adapter.rs` 只经 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。会话是否进入过路由运行由 `SessionCompletion` 的布尔字段记录，作为重试记账的输入。
 
@@ -24,7 +24,7 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 `split_message()`（`adapter/headless/text_util.rs`）把消息按 UTF-8 字节长度切分为不超过 `MAX_MESSAGE_BYTES = 8192` 的分片，这是 TS3 ServerQuery 单行上限；每片在字符边界处截断，优先在空白符处切分（最多回看 256 字节），单字符超限时强制整体成片，分片边界空白符丢弃。
 
-文本发送只有一个实现：`text_util::send_text_message()` 用 `split_message` 把整条消息切分后逐片 `sendTextMessage`。两个调用方是 `event.rs:TsAdapter::send_text_message()`（TS 文本路由与技能回复用）与 `voice_service.rs:VoiceServiceImpl::send_notice()`（语音桥 `send_notice` 的落地端，先把目标模式归一为 1/2/3 再复用该实现）。
+文本发送只有一个实现：`text_util::send_text_message()` 用 `split_message` 把整条消息切分后逐片 `sendTextMessage`。两个调用方是 `event.rs:TsAdapter::send_text_message()`（TS 文本路由与工具回复用）与 `voice_service.rs:VoiceServiceImpl::send_notice()`（语音桥 `send_notice` 的落地端，先把目标模式归一为 1/2/3 再复用该实现）。
 
 ## LLM 引擎
 
@@ -34,11 +34,11 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 ## 权限体系
 
-`permission.rs` + `permission/gate.rs` 提供基于 `acl.toml`（`AclConfig`）的 `PermissionGate`：`get_allowed_skills()` 按服务组与频道组匹配规则求技能白名单（`*` 通配），`can_target()` 对受保护组（`protected_group_ids`）的交互须有 `can_target_admins` 授权。
+`permission.rs` 提供基于 `acl.toml`（`AclConfig`）的 `PermissionGate`：`get_allowed_tools()` 按服务组与频道组匹配规则求工具白名单（`*` 通配，配置键 `allowed_tools`，旧的 `allowed_skills` 仍可解析），`can_target()` 对受保护组（`protected_group_ids`）的交互须有 `can_target_admins` 授权。
 
-## 技能系统
+## 工具系统
 
-`skills.rs` 定义 `Skill` trait 与 `SkillRegistry` 注册表。跨平台统一用 `UnifiedExecutionContext`（构造器 `for_ts` / `for_nc`）；技能实现 `execute`，按 `ctx.platform` 分支或使用 `unified_ts_adapter` 取 TS 适配器。注册表按 ACL 白名单生成工具 schema 并执行技能调用。技能按目录分为 `communication`、`information`、`moderation`、`music`（后端见 `skills/music/`：`ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`，默认注册表在 `DEFAULT_SKILLS`。
+`tools.rs` 定义 `Tool` trait 与 `ToolRegistry` 注册表；每个 Tool 就是一个模型可调用的函数（`name` / `description` / `parameters` 直接生成 `tools` 字段的 schema），因此代码侧一律用工具一词，用户配置里的技能名保持不变。跨平台统一用 `UnifiedExecutionContext`（构造器 `for_ts` / `for_nc`）；工具实现 `execute`，按 `ctx.platform` 分支或使用 `unified_ts_adapter` 取 TS 适配器。注册表按 ACL 白名单生成工具 schema 并执行工具调用。工具按目录分为 `communication`、`information`、`moderation`、`music`（后端见 `tools/music/`：`ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`，默认注册表在 `DEFAULT_TOOLS`。
 
 ## 层级规范
 
@@ -61,7 +61,7 @@ flowchart TD
     er --> llm["LlmEngine"]
     ncr --> llm
     vr --> llm
-    llm --> skills["SkillRegistry"] --> gate["PermissionGate"]
+    llm --> tools["ToolRegistry"] --> gate["PermissionGate"]
 ```
 
 进一步阅读：开发流程见 [development.md](development.md)，测试约定见 [testing.md](testing.md)，编码反面准则见 [defensive-patterns.md](defensive-patterns.md)，CI/CD 见 [ci-cd.md](ci-cd.md)，决策记录见 [agent-notes.md](agent-notes.md)。

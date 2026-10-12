@@ -13,7 +13,7 @@ use crate::router::{
     ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession,
     TurnSink, UnifiedInboundEvent,
 };
-use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
+use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -28,10 +28,10 @@ pub struct EventRouter {
     adapter: Arc<TsAdapter>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
-    registry: Arc<SkillRegistry>,
+    registry: Arc<ToolRegistry>,
     nc_adapter: Option<Arc<NapCatAdapter>>,
     voice_bridge_state: BridgeReadiness,
-    voice_audio: crate::skills::VoiceAudioHandles,
+    voice_audio: crate::tools::VoiceAudioHandles,
     subscriptions: Arc<Mutex<Option<MainSubscriptions>>>,
 }
 
@@ -119,21 +119,18 @@ impl EventRouter {
 
     fn run_voice_replay_direct(
         &self,
-        command: crate::skills::voice_replay::DirectReplayCommand,
+        command: crate::tools::voice_replay::DirectReplayCommand,
         groups: &[u32],
         channel_group_id: u32,
     ) -> String {
-        if !crate::skills::voice_replay::direct_command_allowed(
-            &self.gate,
-            groups,
-            channel_group_id,
-        ) {
+        if !crate::tools::voice_replay::direct_command_allowed(&self.gate, groups, channel_group_id)
+        {
             return "voice_replay denied by ACL".to_string();
         }
         let Some(runtime) = self.voice_audio.get() else {
             return "voice replay runtime not ready".to_string();
         };
-        match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
+        match crate::tools::voice_replay::execute_direct_command(command, &runtime) {
             Ok(value) => match value.get("status").and_then(|s| s.as_str()) {
                 Some("empty") => value
                     .get("message")
@@ -206,11 +203,11 @@ impl EventRouter {
             &online_clients,
         );
 
-        let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
+        let allowed_tools = self.gate.get_allowed_tools(&groups, channel_group_id);
 
-        // 直呼与技能同一 ACL；bridge 未就绪时由 EventRouter 处理
+        // 直呼与工具同一 ACL；bridge 未就绪时由 EventRouter 处理
         if self.config.voice_replay.enabled {
-            if let Some(command) = crate::skills::voice_replay::parse_direct_command(
+            if let Some(command) = crate::tools::voice_replay::parse_direct_command(
                 msg_content,
                 &self.config.voice_replay.direct_commands,
             ) {
@@ -235,7 +232,7 @@ impl EventRouter {
             registry: &self.registry,
             source: &source,
             user_ctx: user_ctx.as_str(),
-            allowed_skills: &allowed_skills,
+            allowed_tools: &allowed_tools,
             input: TurnInput::Text(msg_content),
             callbacks: None,
             cancel: &cancel,

@@ -1,4 +1,4 @@
-use crate::skills::http::shared_client;
+use crate::tools::http::shared_client;
 use anyhow::Result;
 use serde_json::{json, Value};
 

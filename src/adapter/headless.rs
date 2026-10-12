@@ -15,7 +15,7 @@ use crate::adapter::reconnect::join_or_abort;
 use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::SkillRegistry;
+use crate::tools::ToolRegistry;
 
 pub mod tsbot {
     pub mod voice {
@@ -40,7 +40,7 @@ pub(crate) mod text_util;
 mod voice_service;
 pub mod wakeword;
 
-use crate::skills::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
+use crate::tools::voice_audio::{VoiceAudioHandles, VoiceAudioRuntime};
 use audio_output::{AudioBus, AudioOutput, PcmClipPayload};
 use speaker_ring::ReplayFilter;
 
@@ -378,7 +378,7 @@ impl Runtime {
         config: Arc<AppConfig>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
+        registry: Arc<ToolRegistry>,
         handles: HeadlessStartHandles,
     ) -> Result<Self> {
         let HeadlessStartHandles {
@@ -407,7 +407,7 @@ impl Runtime {
         let shutdown = CancellationToken::new();
         let (failed_tx, _failed_rx) = watch::channel::<Option<&'static str>>(None);
 
-        // 出站/录制在 Runtime 装配：window 来自 voice_replay.window_secs；句柄供技能读取
+        // 出站/录制在 Runtime 装配：window 来自 voice_replay.window_secs；句柄供工具读取
         let window_secs = config.voice_replay.window_secs;
         let speaker_rings = Arc::new(SpeakerRings::new(Duration::from_secs(u64::from(
             window_secs,

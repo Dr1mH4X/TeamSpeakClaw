@@ -6,7 +6,7 @@ mod log;
 mod permission;
 mod prompt;
 mod router;
-mod skills;
+mod tools;
 
 use anyhow::Result;
 use clap::Parser;
@@ -18,7 +18,7 @@ use crate::cli::Args;
 use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::SkillRegistry;
+use crate::tools::ToolRegistry;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,8 +33,8 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(cfg);
     let gate = Arc::new(PermissionGate::new(acl_config));
-    let voice_audio = crate::skills::VoiceAudioHandles::default();
-    let registry = Arc::new(SkillRegistry::with_defaults(
+    let voice_audio = crate::tools::VoiceAudioHandles::default();
+    let registry = Arc::new(ToolRegistry::with_defaults(
         config.clone(),
         voice_audio.clone(),
     ));

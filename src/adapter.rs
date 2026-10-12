@@ -22,7 +22,7 @@ use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{EventRouter, RouterContext, RouterExit};
-use crate::skills::SkillRegistry;
+use crate::tools::ToolRegistry;
 
 const COMPONENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -96,10 +96,10 @@ async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> Con
 pub async fn run(
     config: Arc<AppConfig>,
     gate: Arc<PermissionGate>,
-    registry: Arc<SkillRegistry>,
+    registry: Arc<ToolRegistry>,
     llm: Arc<LlmEngine>,
     shutdown: CancellationToken,
-    voice_audio: crate::skills::VoiceAudioHandles,
+    voice_audio: crate::tools::VoiceAudioHandles,
 ) -> Result<()> {
     let wakeword_models = load_wakeword_models(&config)?;
 
@@ -172,7 +172,7 @@ async fn run_connected_session(
     event_rx: broadcast::Receiver<TsEvent>,
     mut disconnect_rx: watch::Receiver<bool>,
     shutdown: CancellationToken,
-    voice_audio: crate::skills::VoiceAudioHandles,
+    voice_audio: crate::tools::VoiceAudioHandles,
     wakeword_models: Option<Arc<WakewordModels>>,
 ) -> SessionCompletion {
     let napcat_shutdown = shutdown.child_token();

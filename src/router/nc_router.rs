@@ -12,7 +12,7 @@ use crate::permission::PermissionGate;
 use crate::router::{
     strip_trigger_prefix, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
 };
-use crate::skills::{NcCaller, SkillRegistry, UnifiedExecutionContext};
+use crate::tools::{NcCaller, ToolRegistry, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub struct NcRouter {
     adapter: Arc<NapCatAdapter>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
-    registry: Arc<SkillRegistry>,
+    registry: Arc<ToolRegistry>,
     ts_adapter: Option<Arc<TsAdapter>>,
 }
 
@@ -68,7 +68,7 @@ impl NcRouter {
         adapter: Arc<NapCatAdapter>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
+        registry: Arc<ToolRegistry>,
         ts_adapter: Option<Arc<TsAdapter>>,
     ) -> Self {
         Self {
@@ -261,8 +261,8 @@ impl NcRouter {
         };
         let user_ctx = crate::prompt::context::nc_context(&sender_name, user_id, group_id, &online);
 
-        let allowed_skills = self.gate.get_allowed_skills(&caller_groups, 0);
-        debug!("NC allowed skills: {:?}", allowed_skills);
+        let allowed_tools = self.gate.get_allowed_tools(&caller_groups, 0);
+        debug!("NC allowed tools: {:?}", allowed_tools);
 
         let sink = NcReplySink {
             adapter: self.adapter.clone(),
@@ -275,7 +275,7 @@ impl NcRouter {
             registry: &self.registry,
             source: &source,
             user_ctx: user_ctx.as_str(),
-            allowed_skills: &allowed_skills,
+            allowed_tools: &allowed_tools,
             input: TurnInput::Text(&stripped),
             callbacks: None,
             cancel: &cancel,

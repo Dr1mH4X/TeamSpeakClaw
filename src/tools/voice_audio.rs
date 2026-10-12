@@ -1,4 +1,4 @@
-//! 技能侧共享的出站/录制句柄：headless Runtime 启动时 install。
+//! 工具侧共享的出站/录制句柄：headless Runtime 启动时 install。
 
 use std::sync::{Arc, RwLock};
 
