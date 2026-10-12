@@ -112,10 +112,11 @@ impl TurnRequest<'_> {
         // 容量占位与同会话串行锁持有到回复落库完成
         let _session = session;
 
-        // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析
+        // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析。
+        // 装配失败与后端失败同一处理：先尽力送出固定文案，再以 `Failed` 交回调用点
         let system_prompt = match crate::prompt::system_prompt() {
             Ok(system_prompt) => system_prompt,
-            Err(error) => return Err(TurnError::Failed(error)),
+            Err(error) => return Err(self.fail_with_notice(sink, error).await),
         };
         let tools = self.registry.to_tool_schemas(self.allowed_tools);
         let executor = TurnExecutor {
@@ -159,17 +160,20 @@ impl TurnRequest<'_> {
             }
             Ok(_) => Ok(()),
             Err(ToolLoopError::Cancelled) => Err(TurnError::Cancelled),
-            Err(error) => {
-                if let Err(send_error) = sink.send(LLM_ERROR_REPLY).await {
-                    warn!(
-                        session = %self.source,
-                        error = %send_error,
-                        "backend failure notice was not delivered"
-                    );
-                }
-                Err(TurnError::Failed(error.into()))
-            }
+            Err(error) => Err(self.fail_with_notice(sink, error.into()).await),
         }
+    }
+
+    /// 后端失败：先尽力送出固定文案，再以 `Failed` 交回调用点，保证该变体意味着兜底文案已尝试
+    async fn fail_with_notice<S: TurnSink>(&self, sink: &S, error: anyhow::Error) -> TurnError {
+        if let Err(send_error) = sink.send(LLM_ERROR_REPLY).await {
+            warn!(
+                session = %self.source,
+                error = %send_error,
+                "backend failure notice was not delivered"
+            );
+        }
+        TurnError::Failed(error)
     }
 
     /// 送达回复并落上下文：投递失败的内容不入上下文，避免下一轮回放用户没看到的回复

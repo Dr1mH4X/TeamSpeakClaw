@@ -25,8 +25,13 @@ pub struct PromptVariables {
 impl PromptVariables {
     /// 取当前本地日期（`YYYY-MM-DD`）
     pub fn now() -> Self {
+        Self::on(&chrono::Local::now().format("%Y-%m-%d").to_string())
+    }
+
+    /// 指定日期：`now` 与用例共用，用例因此能把渲染与期望值钉在同一天
+    fn on(date: &str) -> Self {
         Self {
-            date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            date: date.to_string(),
         }
     }
 
@@ -62,7 +67,9 @@ pub fn render(sections: &[PromptSection], variables: &PromptVariables) -> Result
     Ok(rendered.join("\n\n"))
 }
 
-/// 解析段落里的 `{{name}}` 引用；替换值不再被扫描
+/// 解析段落里的 `{{name}}` 引用；替换值不再被扫描。
+/// 只有 `{{` 开启引用，引用之外的 `}}` 是普通文本；开引用缺闭合则报错：段落是代码常量，
+/// 残缺引用只可能是笔误，宁可让装配失败也不要发出走样的提示词
 fn interpolate(section: &str, text: &str, variables: &PromptVariables) -> Result<String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -130,7 +137,10 @@ mod tests {
         let prompt = system_prompt().unwrap();
         assert!(!prompt.contains("{{"), "every reference must resolve");
         assert!(prompt.starts_with(sections::SECTIONS[0].text));
-        assert!(prompt.contains(&PromptVariables::now().date));
+
+        // 日期断言用固定变量渲染：跨零点分别取 now() 会让期望值与渲染值不同天
+        let dated = render(sections::SECTIONS, &PromptVariables::on("2024-02-29")).unwrap();
+        assert!(dated.contains("2024-02-29"));
     }
 
     #[test]
@@ -156,5 +166,20 @@ mod tests {
         assert!(render(&[section("bad", 100, "{{Date}}")], &PromptVariables::now()).is_err());
         assert!(render(&[section("bad", 100, "{{}}")], &PromptVariables::now()).is_err());
         assert!(render(&[section("bad", 100, "a {{date")], &PromptVariables::now()).is_err());
+    }
+
+    /// 与参考实现同一规则：扫描只看 `{{`，引用之外的 `}}` 不构成引用
+    #[test]
+    fn a_closing_delimiter_outside_a_reference_is_literal_text() {
+        let rendered = render(
+            &[section(
+                "literal",
+                100,
+                "当前日期 {{date}}，单独写 }} 是普通文本",
+            )],
+            &PromptVariables::on("2024-02-29"),
+        )
+        .unwrap();
+        assert_eq!(rendered, "当前日期 2024-02-29，单独写 }} 是普通文本");
     }
 }
