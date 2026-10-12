@@ -9,8 +9,8 @@ src/
 ├── main.rs                  # 入口：装配 config、适配器、路由器、关闭流程
 ├── cli.rs                   # --log-level
 ├── log.rs                   # 按日轮转文件日志 + tracing 初始化
-├── config.rs                # 加载 config/settings.toml、acl.toml、prompts.toml
-├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, prompts, voice_replay）
+├── config.rs                # 加载 config/settings.toml、acl.toml
+├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, voice_replay）
 ├── router.rs                # 事件路由；组合路由器循环入口
 ├── router/                  # 子模块（ts_router, nc_router, voice_router, voice_turns, voice_feedback, turn, unified, trigger）
 ├── adapter.rs               # 重连循环、会话生命周期、跨适配器协调
@@ -23,6 +23,8 @@ src/
 │   └── napcat/              # (api, ws, event, types)
 ├── llm.rs                   # OpenAI 兼容 LLM 引擎、上下文、工具循环
 ├── llm/                     # (context, engine, provider, tool_loop)
+├── prompt.rs                # 模型可见提示词装配：有序命名段落 + 严格变量 + 运行期上下文快照
+├── prompt/                  # (sections, context)
 ├── permission.rs            # 基于 ACL 的权限门
 ├── permission/              # (gate)
 ├── skills.rs                # Skill trait + 注册表；Skill、UnifiedExecutionContext
@@ -35,7 +37,7 @@ docs/
 ├── AGENTS.md                # 文档标准
 └── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
 examples/
-├── config/                  # 参考配置模板（settings.toml, acl.toml, prompts.toml；Release 打包含此三文件）
+├── config/                  # 参考配置模板（settings.toml, acl.toml；Release 打包含此两文件）
 ├── funasr/                  # FunASR 本地 STT 的 Compose 示例
 ├── whisper/                 # whisper.cpp 本地 STT 的 Compose 示例（CPU / Vulkan / CUDA）
 └── docker-compose.yml       # 基础 Compose 示例（在线 / 多模态 STT）
@@ -82,7 +84,7 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 
 ## LLM / Provider
 
-OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；`omni_model` 标志（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。详见 [docs/architecture.md](docs/architecture.md)。
+OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；system 提示词与 TTS 风格提示是 `prompt/` 的源码常量，由 `TurnRequest::run` 装配，不由用户配置；`omni_model` 标志（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。详见 [docs/architecture.md](docs/architecture.md)。
 
 ## Defensive patterns
 

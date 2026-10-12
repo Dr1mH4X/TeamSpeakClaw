@@ -12,7 +12,7 @@ use crate::adapter::lifecycle::{
     run_retry_loop, AttemptOutcome, BridgeComponent, BridgeReadiness, ReconnectState,
 };
 use crate::adapter::reconnect::join_or_abort;
-use crate::config::{AppConfig, PromptsConfig};
+use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::skills::SkillRegistry;
@@ -376,7 +376,6 @@ pub(crate) struct HeadlessStartHandles {
 impl Runtime {
     pub(crate) async fn start(
         config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
         registry: Arc<SkillRegistry>,
@@ -461,7 +460,6 @@ impl Runtime {
         }));
 
         let bridge_config = config.clone();
-        let bridge_prompts = prompts.clone();
         let bridge_gate = gate.clone();
         let bridge_llm = llm.clone();
         let bridge_registry = registry.clone();
@@ -482,7 +480,6 @@ impl Runtime {
                 || {
                     let handles = crate::router::VoiceRouterHandles {
                         config: bridge_config.clone(),
-                        prompts: bridge_prompts.clone(),
                         gate: bridge_gate.clone(),
                         llm: bridge_llm.clone(),
                         registry: bridge_registry.clone(),

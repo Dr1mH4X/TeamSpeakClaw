@@ -5,7 +5,7 @@ use crate::adapter::headless::{
 use crate::adapter::lifecycle::BridgeReadiness;
 use crate::adapter::napcat::NapCatAdapter;
 use crate::adapter::reconnect::drain_managed_tasks;
-use crate::config::{AppConfig, PromptsConfig};
+use crate::config::AppConfig;
 use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -25,7 +25,6 @@ use tracing::{error, info, warn};
 #[derive(Clone)]
 pub struct EventRouter {
     config: Arc<AppConfig>,
-    prompts: Arc<PromptsConfig>,
     adapter: Arc<TsAdapter>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
@@ -47,7 +46,6 @@ impl EventRouter {
     ) -> Self {
         let RouterContext {
             config,
-            prompts,
             gate,
             llm,
             registry,
@@ -56,7 +54,6 @@ impl EventRouter {
 
         Self {
             config,
-            prompts,
             adapter,
             gate,
             llm,
@@ -199,15 +196,14 @@ impl EventRouter {
         let source = SessionSource::TeamSpeak {
             uid: event.invoker_uid.clone(),
         };
-        let system_prompt = self.prompts.system.content.as_str();
-
         let (online_clients, invoker_channel) =
             self.adapter.list_clients_json(event.invoker_id).await;
 
-        let user_ctx = format!(
-            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
-Online: {}"#,
-            event.invoker_name, event.invoker_id, invoker_channel, online_clients
+        let user_ctx = crate::prompt::context::ts_context(
+            &event.invoker_name,
+            event.invoker_id,
+            invoker_channel,
+            &online_clients,
         );
 
         let allowed_skills = self.gate.get_allowed_skills(&groups, channel_group_id);
@@ -238,7 +234,6 @@ Online: {}"#,
             llm: &self.llm,
             registry: &self.registry,
             source: &source,
-            system_prompt,
             user_ctx: user_ctx.as_str(),
             allowed_skills: &allowed_skills,
             input: TurnInput::Text(msg_content),

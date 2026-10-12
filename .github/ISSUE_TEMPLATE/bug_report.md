@@ -13,7 +13,7 @@ about: 报告可复现或可定位的异常
 - [ ] LLM（OpenAI 兼容接口、上下文、工具调用）
 - [ ] 技能（音乐 / 管理 / 信息查询 / 语音回放 / web_search 等）
 - [ ] 权限 ACL
-- [ ] 配置加载（settings / acl / prompts）
+- [ ] 配置加载（settings / acl）
 - [ ] 其他：
 
 关键路径或报错涉及的文件/函数（若能从日志看出）：
@@ -67,5 +67,5 @@ about: 报告可复现或可定位的异常
 不要上传含密钥的完整文件。只贴与问题相关的结构或键名：
 
 - 相关配置项（名称与非敏感取值）：
-- 若需完整对照，自行脱敏后粘贴 `settings.toml` / `acl.toml` / `prompts.toml` 中相关段落
+- 若需完整对照，自行脱敏后粘贴 `settings.toml` / `acl.toml` 中相关段落
 - 日志：脱敏后摘录 `config` 目录下 `tsclaw-YY-MM-DD.log` 相关时间段

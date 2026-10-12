@@ -90,7 +90,6 @@ pub(crate) struct TurnRequest<'a> {
     pub(crate) llm: &'a LlmEngine,
     pub(crate) registry: &'a SkillRegistry,
     pub(crate) source: &'a SessionSource,
-    pub(crate) system_prompt: &'a str,
     pub(crate) user_ctx: &'a str,
     pub(crate) allowed_skills: &'a [String],
     pub(crate) input: TurnInput<'a>,
@@ -113,6 +112,11 @@ impl TurnRequest<'_> {
         // 容量占位与同会话串行锁持有到回复落库完成
         let _session = session;
 
+        // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析
+        let system_prompt = match crate::prompt::system_prompt() {
+            Ok(system_prompt) => system_prompt,
+            Err(error) => return Err(TurnError::Failed(error)),
+        };
         let tools = self.registry.to_tool_schemas(self.allowed_skills);
         let executor = TurnExecutor {
             registry: self.registry,
@@ -121,7 +125,7 @@ impl TurnRequest<'_> {
         };
         let mut retries = 0usize;
         let result = loop {
-            let mut messages = self.messages();
+            let mut messages = self.messages(&system_prompt);
             match self
                 .llm
                 .run_tool_loop(
@@ -185,15 +189,15 @@ impl TurnRequest<'_> {
         Ok(())
     }
 
-    fn messages(&self) -> Vec<Value> {
+    fn messages(&self, system_prompt: &str) -> Vec<Value> {
         match self.input {
             TurnInput::Text(text) => {
                 self.llm
-                    .build_messages(self.source, self.system_prompt, self.user_ctx, text)
+                    .build_messages(self.source, system_prompt, self.user_ctx, text)
             }
             TurnInput::Audio(wav) => {
                 self.llm
-                    .build_omni_messages(self.source, self.system_prompt, self.user_ctx, wav)
+                    .build_omni_messages(self.source, system_prompt, self.user_ctx, wav)
             }
         }
     }
@@ -379,7 +383,6 @@ mod tests {
             llm,
             registry: &SkillRegistry::default(),
             source,
-            system_prompt: "system",
             user_ctx: "{}",
             allowed_skills: &[],
             input,
@@ -642,7 +645,6 @@ mod tests {
             llm: &llm,
             registry: &SkillRegistry::default(),
             source: &source,
-            system_prompt: "system",
             user_ctx: "{}",
             allowed_skills: &[],
             input: TurnInput::Text("question"),

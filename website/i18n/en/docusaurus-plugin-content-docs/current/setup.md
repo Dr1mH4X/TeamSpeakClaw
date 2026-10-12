@@ -23,7 +23,6 @@ The extracted archive contains a `config/` directory with the following configur
 
 - `settings.toml` — Core settings (Connection, LLM, bot behavior, Headless voice service)
 - `acl.toml` — Permission control rules
-- `prompts.toml` — System prompt and error messages
 
 Modify `config/settings.toml`, filling in your TeamSpeak server connection details, LLM API Key, and other configuration.
 

@@ -5,7 +5,7 @@ use crate::adapter::napcat::{
     NapCatAdapter,
 };
 use crate::adapter::reconnect::drain_managed_tasks;
-use crate::config::{AppConfig, NapCatConfig, PromptsConfig};
+use crate::config::{AppConfig, NapCatConfig};
 use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
@@ -28,7 +28,6 @@ struct NcInboundText {
 
 pub struct NcRouter {
     config: Arc<AppConfig>,
-    prompts: Arc<PromptsConfig>,
     adapter: Arc<NapCatAdapter>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
@@ -66,7 +65,6 @@ impl NcRouter {
 
     pub fn new_with_ts(
         config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
         adapter: Arc<NapCatAdapter>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
@@ -75,7 +73,6 @@ impl NcRouter {
     ) -> Self {
         Self {
             config,
-            prompts,
             adapter,
             gate,
             llm,
@@ -220,7 +217,6 @@ impl NcRouter {
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let config = self.config.clone();
-        let prompts = self.prompts.clone();
         let adapter = self.adapter.clone();
         let gate = self.gate.clone();
         let llm = self.llm.clone();
@@ -237,7 +233,6 @@ impl NcRouter {
             let session = permit.acquire_session(&llm, &source, ticket).await;
             let router = NcRouter {
                 config,
-                prompts,
                 adapter: adapter.clone(),
                 gate,
                 llm,
@@ -260,29 +255,11 @@ impl NcRouter {
             Some(gid) => SessionSource::NapCatGroup { group_id: gid },
             None => SessionSource::NapCatPrivate { user_id },
         };
-        let system_prompt = self.prompts.system.content.as_str();
-
-        let online_suffix = if let Some(ref adapter) = self.ts_adapter {
-            let (online_clients, _) = adapter.list_clients_json(0).await;
-            if online_clients.is_empty() {
-                String::new()
-            } else {
-                format!("\nOnline: {}", online_clients)
-            }
-        } else {
-            String::new()
+        let online = match self.ts_adapter {
+            Some(ref adapter) => adapter.list_clients_json(0).await.0,
+            None => String::new(),
         };
-
-        let user_ctx = match group_id {
-            Some(gid) => format!(
-                "User: {} (QQ: {}, Group: {}){}",
-                sender_name, user_id, gid, online_suffix
-            ),
-            None => format!(
-                "User: {} (QQ: {}, Private Chat){}",
-                sender_name, user_id, online_suffix
-            ),
-        };
+        let user_ctx = crate::prompt::context::nc_context(&sender_name, user_id, group_id, &online);
 
         let allowed_skills = self.gate.get_allowed_skills(&caller_groups, 0);
         debug!("NC allowed skills: {:?}", allowed_skills);
@@ -297,7 +274,6 @@ impl NcRouter {
             llm: &self.llm,
             registry: &self.registry,
             source: &source,
-            system_prompt,
             user_ctx: user_ctx.as_str(),
             allowed_skills: &allowed_skills,
             input: TurnInput::Text(&stripped),

@@ -4,7 +4,7 @@ TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，�
 
 ## 入口流
 
-`main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`、`prompts.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`SkillRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
+`main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`SkillRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
 
 `adapter::run()`（`adapter.rs`）是生命周期主循环：`[headless.wakeword]` 启用时先从 `models_dir()` 加载三个 OpenWakeWord 模型，缺文件或模型非法直接终止启动，不进入连接与重连；随后 `TsAdapter::connect()` 建 TeamSpeak 连接，再 `run_connected_session()` 按需启动 NapCat 适配器（`connect_if_enabled()`，未启用则为 `None`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。TeamSpeak 断线、NapCat supervisor 异常退出或 headless 组件失败都会结束本轮会话并进入重连循环；退避序列与尝试上限、以及失败时的日志措辞都归 `adapter/lifecycle.rs`，`adapter.rs` 只经 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。会话是否进入过路由运行由 `SessionCompletion` 的布尔字段记录，作为重试记账的输入。
 
@@ -28,7 +28,7 @@ voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router
 
 ## LLM 引擎
 
-`llm.rs` 聚合 `llm/` 子模块：`engine` 是 `LlmEngine`（上下文装配与工具循环入口），`provider` 是 OpenAI 兼容 HTTP 客户端，`context` 是上下文窗口与轮次协调（`TurnCoordinator`：每会话串行锁与到达顺序链 + 全局容量钳制），`tool_loop` 是流式工具循环。TS 文本、NapCat 与语音三条入站路径的回合骨架统一在 `router/turn.rs`：`TurnRequest` 提供提示与输入（`TurnInput::{Text, Audio}` 决定消息装配与历史落库的分支）、`TurnSink` 实现各自的回复落点，门禁、工具循环、体积类失败收缩重试与「送达成功才落上下文」由该模块承担。
+`llm.rs` 聚合 `llm/` 子模块：`engine` 是 `LlmEngine`（上下文装配与工具循环入口），`provider` 是 OpenAI 兼容 HTTP 客户端，`context` 是上下文窗口与轮次协调（`TurnCoordinator`：每会话串行锁与到达顺序链 + 全局容量钳制），`tool_loop` 是流式工具循环。TS 文本、NapCat 与语音三条入站路径的回合骨架统一在 `router/turn.rs`：`TurnRequest` 提供输入（`TurnInput::{Text, Audio}` 决定消息装配与历史落库的分支）、`TurnSink` 实现各自的回复落点，门禁、工具循环、体积类失败收缩重试与「送达成功才落上下文」由该模块承担；system 提示词由该模块经 `prompt::system_prompt()` 装配一次后交给引擎。`prompt.rs` + `prompt/` 是模型可见提示词的唯一归属地：`sections` 是按 `(order, name)` 拼接的第一方段落常量，`{{name}}` 变量在装配期严格解析（未注册即失败），`context` 把调用者与在线名单这类易变事实拼成同一回合 user 消息里的运行期上下文快照；TTS 风格提示是同处的常量，引擎只负责把提示词放进 system 角色。
 
 引擎请求任意 `base_url/chat/completions`（流式）；解析流时忽略 `reasoning_content`（不存不转发）。上下文受 `max_context_turns` 与固定常量上限（`MAX_CONTEXT_SESSIONS = 1000`）控制；并发门禁只有 `TurnCoordinator`（容量 4 + 同会话串行锁 + 同会话到达顺序链），由 `router/turn.rs` 的 `TurnPermit::reserve` 与 `LlmEngine::enqueue_turn_ticket`（事件循环里同步占容量、同步发票据）同 `TurnPermit::acquire_session`（任务内先等前一条同会话回合结束再取串行锁，生成 `TurnSession` 并持有到回复落库完成）施加，取锁顺序即事件循环里的到达顺序，不受任务调度影响；TS 文本与 NapCat 在占位与排队之前先过准入同步门（bot 自身与音乐 bot 的消息、桥接文本、未触发文本、空文本、超限文本直接丢弃），语音桥回合在取得会话锁且 TTS 初始化成功后才标记正在产出；超时为常量：连接 10s、流空闲 30s、流总 300s。`omni_model`（`config/llm.rs`）开启时语音输入以 `input_audio` content 送入模型替代 STT，模型输出仍是文本流；该标志同时计入 `voice_features_enabled()`，bridge 就绪时 TS 文本消息随之经 `VoiceRouter` 路由。上下文的历史轮同样可携带音频：音频轮以 WAV 字节存入会话并缓存其 base64 编码，构建请求时按 `input_audio` content 回放；存储层以「一轮对话」（user+assistant 成对）为单位从最早逐轮丢弃，受 `max_context_turns`、单会话 `MAX_AUDIO_HISTORY_BYTES = 8 MiB` 与全局 `MAX_AUDIO_HISTORY_BYTES_TOTAL = 256 MiB` 约束，字节预算至少保留最新一轮、不会清空会话历史；装配层另按 `MAX_WIRE_AUDIO_BYTES = 2 MiB` 裁剪最早的音频轮以约束请求体（`max_context_turns` 管轮数、wire 预算管体积，文本轮不参与裁剪）。发送前按 `MAX_REQUEST_BODY_BYTES = 64 MiB` 预检序列化后的请求体，预检失败与网关 413、带体积文案的 400 归为同一类错误，命中时丢弃该会话最早的音频轮并重试一次；NapCat 会话不存音频，无轮可丢时按原错误失败。
 

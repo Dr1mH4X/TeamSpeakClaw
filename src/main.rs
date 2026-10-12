@@ -4,6 +4,7 @@ mod config;
 mod llm;
 mod log;
 mod permission;
+mod prompt;
 mod router;
 mod skills;
 
@@ -24,7 +25,7 @@ async fn main() -> Result<()> {
     cli::print_banner();
 
     let args = Args::parse();
-    let (cfg, acl_config, prompts_config) = AppConfig::load_all()?;
+    let (cfg, acl_config) = AppConfig::load_all()?;
     let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
@@ -32,7 +33,6 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(cfg);
     let gate = Arc::new(PermissionGate::new(acl_config));
-    let prompts = Arc::new(prompts_config);
     let voice_audio = crate::skills::VoiceAudioHandles::default();
     let registry = Arc::new(SkillRegistry::with_defaults(
         config.clone(),
@@ -41,15 +41,7 @@ async fn main() -> Result<()> {
     let llm = Arc::new(LlmEngine::new(config.clone())?);
 
     let shutdown = CancellationToken::new();
-    let run = crate::adapter::run(
-        config,
-        prompts,
-        gate,
-        registry,
-        llm,
-        shutdown.clone(),
-        voice_audio,
-    );
+    let run = crate::adapter::run(config, gate, registry, llm, shutdown.clone(), voice_audio);
     tokio::pin!(run);
 
     tokio::select! {

@@ -96,11 +96,10 @@ impl LlmEngine {
     }
 
     /// 构建可信系统提示与原始上下文历史（不含最后一条用户消息）。
+    /// `system_prompt` 由调用点（回合骨架）装配完成，引擎只负责放进 system 角色。
     /// 音频轮的历史项按 `input_audio` content 回放；装配按 `MAX_WIRE_AUDIO_BYTES`
     /// 从最早的音频轮逐轮裁剪，文本轮不受影响。
     fn build_context_base(&self, source: &SessionSource, system_prompt: &str) -> Vec<Value> {
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let system_prompt = system_prompt.replace("{date}", &date);
         let mut messages = vec![json!({"role": "system", "content": system_prompt})];
 
         if self.context.is_enabled() {

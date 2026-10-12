@@ -99,6 +99,10 @@ The `[voice_replay]` config section controls TeamSpeak recording-window replay. 
 - Replay works with only this switch on (listen-only); voice NL trigger still needs STT.
 - Syntax and usage: [usage.md](usage.md).
 
+### System Prompt
+
+The system prompt and TTS style prompt are built into the program and are not exposed as configuration.
+
 ## 2. Permission Configuration (acl.toml)
 
 File path: `config/acl.toml`
@@ -140,49 +144,3 @@ NapCat has no TeamSpeak server/channel group concept, so the project uses "virtu
 - `9003`: Members of groups in `trusted_groups`
 
 You can configure rules for these group IDs in `acl.toml` to implement NC-specific permission control.
-
-## 3. Prompt Configuration (prompts.toml)
-
-File path: `config/prompts.toml`
-
-Defines the bot's System Prompt and error messages. Usually no modification is needed unless you want to change the bot's behavior or language.
-
-**View full configuration example**: [prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml)
-
-### System Prompt
-
-| Field | Description |
-|---|---|
-| `content` | System prompt that defines the bot's role, personality, response rules, etc. |
-
-The system prompt supports placeholder substitution:
-- `{date}` — Replaced with the current local date (e.g. `2026-07-09`), used to remind the LLM about information timeliness
-
-Refer to the `[system].content` field in [prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml) for the default value.
-
-### TTS Style Prompt Configuration
-
-| Field | Description |
-|---|---|
-| `style_prompt` | MiMo TTS style prompt, controls voice tone, pace, and emotional expression |
-
-When using MiMo TTS provider, `style_prompt` is sent as the `user` message to the TTS API to guide the voice generation style. Examples:
-- `"Natural, friendly tone, moderate pace."` — Natural and friendly tone
-- `"Bright, bouncy, slightly sing-song tone — like you are bursting with good news."` — Cheerful and excited tone
-- `"Calm, soothing tone, slow pace."` — Calm and soothing tone
-
-### Error Prompt Field Descriptions
-
-| Field | Description |
-|---|---|
-| `permission_denied` | Insufficient permissions |
-| `llm_error` | LLM API unavailable |
-| `ts_error` | TeamSpeak command failed |
-| `skill_error` | Skill execution failed |
-| `skill_not_found` | Skill not found |
-| `self_target` | Operation on self not allowed |
-| `target_permission` | Operation on target not allowed |
-| `empty_message` | Message is empty |
-| `missing_parameter` | Missing required parameter |
-| `invalid_mode` | Invalid mode |
-| `client_offline` | Client not online |
