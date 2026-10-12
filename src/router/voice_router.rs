@@ -19,7 +19,7 @@ use crate::adapter::headless::wakeword::{WakeFrame, WakeVerdict, WakewordGate, W
 use crate::adapter::headless::{parse_server_groups, TsAdapter, INTERNAL_GRPC_ADDR};
 use crate::adapter::lifecycle::{BridgeComponent, BridgeReadiness};
 use crate::adapter::reconnect::{abort_managed_tasks, now_unix_ms};
-use crate::config::{reply_target_mode, AppConfig, PromptsConfig};
+use crate::config::{reply_target_mode, AppConfig};
 use crate::llm::tool_loop::AsyncTokenCallback;
 use crate::llm::{LlmEngine, SessionSource, StreamCallbacks};
 use crate::permission::PermissionGate;
@@ -33,7 +33,7 @@ use crate::router::{
     resolve_ts_inbound, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
 };
 
-use crate::skills::{SkillRegistry, TsCaller, UnifiedExecutionContext};
+use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -269,18 +269,17 @@ impl Drop for VoiceBridgeReadyGuard {
 
 pub struct VoiceRouter {
     config: Arc<AppConfig>,
-    prompts: Arc<PromptsConfig>,
     gate: Arc<PermissionGate>,
     llm: Arc<LlmEngine>,
-    registry: Arc<SkillRegistry>,
+    registry: Arc<ToolRegistry>,
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
     bridge_state: BridgeReadiness,
     /// 统一出站：TTS/clip/外部流 FIFO；并发由 TurnCoordinator + 本层队列承担
     audio_output: AudioOutput,
-    /// 直呼/技能共享的录制与出站句柄
-    voice_audio: crate::skills::VoiceAudioHandles,
+    /// 直呼/工具共享的录制与出站句柄
+    voice_audio: crate::tools::VoiceAudioHandles,
     /// 唤醒门：`[headless.wakeword]` 启用时 Some；per-clid 会话状态（含本条 utterance 的
     /// 命中与命令尾累计）只在事件循环任务里访问（收帧路径喂门、收尾路径取裁决）
     wakeword: Option<Mutex<WakewordGate>>,
@@ -293,14 +292,13 @@ pub struct VoiceRouter {
 /// VoiceRouter 装配句柄（避免构造参数列表过长）
 pub struct VoiceRouterHandles {
     pub(crate) config: Arc<AppConfig>,
-    pub(crate) prompts: Arc<PromptsConfig>,
     pub(crate) gate: Arc<PermissionGate>,
     pub(crate) llm: Arc<LlmEngine>,
-    pub(crate) registry: Arc<SkillRegistry>,
+    pub(crate) registry: Arc<ToolRegistry>,
     pub(crate) ts_adapter: Arc<TsAdapter>,
     pub(crate) bridge_state: BridgeReadiness,
     pub(crate) audio_output: AudioOutput,
-    pub(crate) voice_audio: crate::skills::VoiceAudioHandles,
+    pub(crate) voice_audio: crate::tools::VoiceAudioHandles,
     /// 已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
     pub(crate) wakeword: Option<Arc<WakewordModels>>,
 }
@@ -382,7 +380,6 @@ impl VoiceRouter {
     pub fn new(handles: VoiceRouterHandles) -> Self {
         let VoiceRouterHandles {
             config,
-            prompts,
             gate,
             llm,
             registry,
@@ -393,7 +390,7 @@ impl VoiceRouter {
             wakeword,
         } = handles;
         let speech_provider =
-            OpenAiSpeechProvider::new(config.clone(), prompts.tts.style_prompt.clone())
+            OpenAiSpeechProvider::new(config.clone(), crate::prompt::TTS_STYLE_PROMPT.to_string())
                 .ok()
                 .map(Arc::new);
         // 短反馈短语的合成走同一 provider：STT 也用它，故 provider 不随 tts.enabled 关掉；
@@ -412,7 +409,6 @@ impl VoiceRouter {
         Self {
             audio_pipeline: Mutex::new(need_audio_pipeline.then(OpusSttPipeline::new)),
             config,
-            prompts,
             gate,
             llm,
             registry,
@@ -776,7 +772,7 @@ impl VoiceRouter {
             .await
     }
 
-    /// 直呼：与技能同一 ACL（voice_replay）；成功处理返回 true
+    /// 直呼：与工具同一 ACL（voice_replay）；成功处理返回 true
     async fn try_handle_direct_replay(
         &self,
         channel: &VoiceChannel,
@@ -786,13 +782,13 @@ impl VoiceRouter {
         if !self.config.voice_replay.enabled {
             return Ok(false);
         }
-        let Some(command) = crate::skills::voice_replay::parse_direct_command(
+        let Some(command) = crate::tools::voice_replay::parse_direct_command(
             text,
             &self.config.voice_replay.direct_commands,
         ) else {
             return Ok(false);
         };
-        if !crate::skills::voice_replay::direct_command_allowed(
+        if !crate::tools::voice_replay::direct_command_allowed(
             &self.gate,
             &ctx.groups,
             ctx.channel_group_id,
@@ -806,7 +802,7 @@ impl VoiceRouter {
                 .await?;
             return Ok(true);
         };
-        match crate::skills::voice_replay::execute_direct_command(command, &runtime) {
+        match crate::tools::voice_replay::execute_direct_command(command, &runtime) {
             Ok(value) => {
                 let msg = match value.get("status").and_then(|s| s.as_str()) {
                     Some("empty") => value
@@ -1124,8 +1120,7 @@ impl VoiceRouter {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
 
         // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
-        let (system_prompt, user_ctx, allowed_skills, session_source) =
-            self.build_llm_request(&ctx).await;
+        let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
         let Ok(permit) = TurnPermit::reserve(&self.llm) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
@@ -1152,9 +1147,8 @@ impl VoiceRouter {
             llm: &self.llm,
             registry: &self.registry,
             source: &session_source,
-            system_prompt: &system_prompt,
             user_ctx: &user_ctx,
-            allowed_skills: &allowed_skills,
+            allowed_tools: &allowed_tools,
             input: TurnInput::Audio(&wav_bytes),
             callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             cancel: &active.cancel,
@@ -1222,8 +1216,7 @@ impl VoiceRouter {
             warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
             return Ok(());
         }
-        let (system_prompt, user_ctx, allowed_skills, session_source) =
-            self.build_llm_request(&ctx).await;
+        let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
         let Ok(permit) = TurnPermit::reserve(&self.llm) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
@@ -1250,9 +1243,8 @@ impl VoiceRouter {
             llm: &self.llm,
             registry: &self.registry,
             source: &session_source,
-            system_prompt: &system_prompt,
             user_ctx: &user_ctx,
-            allowed_skills: &allowed_skills,
+            allowed_tools: &allowed_tools,
             input: TurnInput::Text(&user_msg),
             callbacks: tts_runtime.as_ref().and_then(TtsTurnRuntime::callbacks),
             cancel: &active.cancel,
@@ -1405,7 +1397,7 @@ impl VoiceRouter {
                         }
                     }
                 }
-                // 含 tool_calls：先关当前流（synth finish 会话）再执行 tool，
+                // 含 tool_calls：先关当前流（synth finish 会话）再执行工具，
                 // 工具提示音与新的一条流（最终回复）都排在它后面
                 state.close_stream();
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -1424,31 +1416,27 @@ impl VoiceRouter {
         })
     }
 
-    async fn build_llm_base_context(&self, ctx: &CallerContext) -> (String, String, Vec<String>) {
-        let system_prompt = self.prompts.system.content.clone();
-
+    async fn build_llm_base_context(&self, ctx: &CallerContext) -> (String, Vec<String>) {
         let (online_clients, _) = self.ts_adapter.list_clients_json(0).await;
 
-        let user_ctx = format!(
-            r#"invoker: {{"name":"{}","clid":{},"channel_id":{}}}
-Online: {}"#,
-            ctx.caller_name, ctx.caller_id, ctx.channel_id, online_clients
+        let user_ctx = crate::prompt::context::ts_context(
+            &ctx.caller_name,
+            ctx.caller_id,
+            ctx.channel_id,
+            &online_clients,
         );
-        let allowed_skills = self
+        let allowed_tools = self
             .gate
-            .get_allowed_skills(&ctx.groups, ctx.channel_group_id);
-        (system_prompt, user_ctx, allowed_skills)
+            .get_allowed_tools(&ctx.groups, ctx.channel_group_id);
+        (user_ctx, allowed_tools)
     }
 
-    async fn build_llm_request(
-        &self,
-        ctx: &CallerContext,
-    ) -> (String, String, Vec<String>, SessionSource) {
-        let (system_prompt, user_ctx, allowed_skills) = self.build_llm_base_context(ctx).await;
+    async fn build_llm_request(&self, ctx: &CallerContext) -> (String, Vec<String>, SessionSource) {
+        let (user_ctx, allowed_tools) = self.build_llm_base_context(ctx).await;
         let source = SessionSource::TeamSpeak {
             uid: ctx.caller_uid.clone(),
         };
-        (system_prompt, user_ctx, allowed_skills, source)
+        (user_ctx, allowed_tools, source)
     }
 
     async fn send_reply(

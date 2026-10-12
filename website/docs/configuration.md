@@ -99,6 +99,10 @@ sidebar_position: 3
 - 无 STT/TTS 仅开本开关时也可录制与回放（只听不说）；语音自然语言触发仍需 STT。
 - 语法与用法见 [usage.md](usage.md)。
 
+### 系统提示词
+
+系统提示词与 TTS 风格提示内置于程序，不作为配置项提供。
+
 ## 2. 权限配置 (acl.toml)
 
 文件路径: `config/acl.toml`
@@ -140,49 +144,3 @@ NapCat 不存在 TeamSpeak 的服务器组/频道组概念，因此项目在权�
 - `9003`：`trusted_groups` 中群成员
 
 您可以在 `acl.toml` 中为这些组配置规则，实现 NC 专用权限控制。
-
-## 3. 提示词配置 (prompts.toml)
-
-文件路径: `config/prompts.toml`
-
-定义机器人的系统提示词 (System Prompt) 和错误消息。通常不需要修改，除非您想改变机器人的行为或语言。
-
-**查看完整配置示例**：[prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml)
-
-### 系统提示词
-
-| 字段 | 说明 |
-|---|---|
-| `content` | 系统提示词，定义机器人的角色、个性、回复规则等 |
-
-系统提示词支持占位符替换：
-- `{date}` — 会被替换为当前本地日期（如 `2026-07-09`），用于提示 LLM 注意信息时效性
-
-默认值请参考 [prompts.toml](https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/examples/config/prompts.toml) 的 `[system].content` 字段。
-
-### TTS 风格提示配置
-
-| 字段 | 说明 |
-|---|---|
-| `style_prompt` | MiMo TTS 风格提示，控制语音的语调、语速、情感表达等 |
-
-当使用 MiMo TTS provider 时，`style_prompt` 会作为 `user` 消息发送给 TTS API，用于指导语音生成的风格。例如：
-- `"Natural, friendly tone, moderate pace."` — 自然友好的语调
-- `"Bright, bouncy, slightly sing-song tone — like you are bursting with good news."` — 欢快激动的语调
-- `"Calm, soothing tone, slow pace."` — 平静舒缓的语调
-
-### 错误提示字段说明
-
-| 字段 | 说明 |
-|---|---|
-| `permission_denied` | 权限不足 |
-| `llm_error` | LLM API 不可用 |
-| `ts_error` | TeamSpeak 命令失败 |
-| `skill_error` | 技能执行失败 |
-| `skill_not_found` | 未找到技能 |
-| `self_target` | 不允许对自己操作 |
-| `target_permission` | 不允许对该目标操作 |
-| `empty_message` | 消息为空 |
-| `missing_parameter` | 缺少必要参数 |
-| `invalid_mode` | 无效模式 |
-| `client_offline` | 客户端不在线 |

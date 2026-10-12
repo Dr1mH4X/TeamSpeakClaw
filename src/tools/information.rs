@@ -1,5 +1,5 @@
-use crate::skills::{
-    required_u32, resolve_ts_client, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext,
+use crate::tools::{
+    required_u32, resolve_ts_client, unified_ts_adapter, Platform, Tool, UnifiedExecutionContext,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,7 +9,7 @@ use tracing::debug;
 pub struct GetClientInfo;
 
 #[async_trait]
-impl Skill for GetClientInfo {
+impl Tool for GetClientInfo {
     fn name(&self) -> &'static str {
         "get_client_info"
     }

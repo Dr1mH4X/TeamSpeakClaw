@@ -18,11 +18,11 @@ use crate::adapter::lifecycle::{
     retry_after_failure, FailureKind, ReconnectState, RetryAction, SessionCompletion,
 };
 use crate::adapter::reconnect::wait_with_timeout;
-use crate::config::{AppConfig, PromptsConfig};
+use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{EventRouter, RouterContext, RouterExit};
-use crate::skills::SkillRegistry;
+use crate::tools::ToolRegistry;
 
 const COMPONENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,17 +95,16 @@ async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> Con
 
 pub async fn run(
     config: Arc<AppConfig>,
-    prompts: Arc<PromptsConfig>,
     gate: Arc<PermissionGate>,
-    registry: Arc<SkillRegistry>,
+    registry: Arc<ToolRegistry>,
     llm: Arc<LlmEngine>,
     shutdown: CancellationToken,
-    voice_audio: crate::skills::VoiceAudioHandles,
+    voice_audio: crate::tools::VoiceAudioHandles,
 ) -> Result<()> {
     let wakeword_models = load_wakeword_models(&config)?;
 
     let mut reconnect = ReconnectState::default();
-    let context = RouterContext::new(config, prompts, gate, llm, registry, voice_audio.clone());
+    let context = RouterContext::new(config, gate, llm, registry, voice_audio.clone());
 
     loop {
         // 连接阶段的失败与运行阶段的结果都汇成 (类别, 失败原因)，
@@ -173,7 +172,7 @@ async fn run_connected_session(
     event_rx: broadcast::Receiver<TsEvent>,
     mut disconnect_rx: watch::Receiver<bool>,
     shutdown: CancellationToken,
-    voice_audio: crate::skills::VoiceAudioHandles,
+    voice_audio: crate::tools::VoiceAudioHandles,
     wakeword_models: Option<Arc<WakewordModels>>,
 ) -> SessionCompletion {
     let napcat_shutdown = shutdown.child_token();
@@ -219,7 +218,6 @@ async fn run_connected_session(
 
     let headless_runtime = match headless::Runtime::start(
         context.config.clone(),
-        context.prompts.clone(),
         context.gate.clone(),
         context.llm.clone(),
         context.registry.clone(),

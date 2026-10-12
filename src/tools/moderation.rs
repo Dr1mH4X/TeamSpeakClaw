@@ -1,14 +1,14 @@
-use crate::skills::{required_u32, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext};
+use crate::tools::{required_u32, unified_ts_adapter, Platform, Tool, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 /// TS-only 管理操作：NapCat 调用者没有 TS clid，自操作保护与目标语义均不成立
-fn require_ts_platform(ctx: &UnifiedExecutionContext, skill: &str) -> Result<()> {
+fn require_ts_platform(ctx: &UnifiedExecutionContext, tool: &str) -> Result<()> {
     if ctx.platform == Platform::NapCat {
         return Err(anyhow::anyhow!(
-            "Skill '{}' does not support the NapCat platform",
-            skill
+            "Tool '{}' does not support the NapCat platform",
+            tool
         ));
     }
     Ok(())
@@ -61,7 +61,7 @@ async fn validate_channel_exists(ctx: &UnifiedExecutionContext, channel_id: u32)
 pub struct KickClient;
 
 #[async_trait]
-impl Skill for KickClient {
+impl Tool for KickClient {
     fn name(&self) -> &'static str {
         "kick_client"
     }
@@ -93,7 +93,7 @@ impl Skill for KickClient {
 pub struct BanClient;
 
 #[async_trait]
-impl Skill for BanClient {
+impl Tool for BanClient {
     fn name(&self) -> &'static str {
         "ban_client"
     }
@@ -129,7 +129,7 @@ impl Skill for BanClient {
 pub struct MoveClient;
 
 #[async_trait]
-impl Skill for MoveClient {
+impl Tool for MoveClient {
     fn name(&self) -> &'static str {
         "move_client"
     }
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moderation_skills_reject_napcat_callers() {
+    async fn moderation_tools_reject_napcat_callers() {
         let ctx = nc_ctx();
         let err = KickClient
             .execute(json!({"clid": 1}), &ctx)

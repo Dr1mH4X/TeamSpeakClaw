@@ -32,8 +32,8 @@ pub(crate) fn required_u32(args: &Value, name: &str) -> Result<u32> {
         .map_err(|_| anyhow::anyhow!("Parameter '{}' exceeds the supported range", name))
 }
 
-pub(crate) fn is_skill_allowed(name: &str, allowed_skills: &[String]) -> bool {
-    allowed_skills
+pub(crate) fn is_tool_allowed(name: &str, allowed_tools: &[String]) -> bool {
+    allowed_tools
         .iter()
         .any(|allowed| allowed == "*" || allowed == name)
 }
@@ -143,132 +143,128 @@ impl UnifiedExecutionContext {
 }
 
 // ─────────────────────────────────────────────
-// SkillContext：skill 构造依赖的统一来源
+// ToolContext：工具构造依赖的统一来源
 // ─────────────────────────────────────────────
 
-pub struct SkillContext {
+pub struct ToolContext {
     pub config: Arc<AppConfig>,
     pub voice_audio: VoiceAudioHandles,
 }
 
-impl SkillContext {
+impl ToolContext {
     pub fn music_backend_config(&self) -> Option<&MusicBackendConfig> {
         self.config.music_backend.as_ref()
     }
 }
 
-/// Skill 工厂函数类型
-pub type SkillFactory = fn(&SkillContext) -> Box<dyn Skill>;
+/// Tool 工厂函数类型
+pub type ToolFactory = fn(&ToolContext) -> Box<dyn Tool>;
 
 // ─────────────────────────────────────────────
-// Skill trait
+// Tool trait
 // ─────────────────────────────────────────────
 
 #[async_trait]
-pub trait Skill: Send + Sync {
+pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
 
     async fn execute(&self, args: Value, ctx: &UnifiedExecutionContext) -> Result<Value>;
 
-    /// 是否应该注册此 skill，默认 true。覆盖返回 false 可阻止注册。
+    /// 是否应该注册此工具，默认 true。覆盖返回 false 可阻止注册。
     fn should_register(&self) -> bool {
         true
     }
 }
 
 // ─────────────────────────────────────────────
-// SkillRegistry
+// ToolRegistry
 // ─────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct SkillRegistry {
-    skills: DashMap<String, Box<dyn Skill>>,
+pub struct ToolRegistry {
+    tools: DashMap<String, Box<dyn Tool>>,
 }
 
-impl SkillRegistry {
+impl ToolRegistry {
     pub fn with_defaults(config: Arc<AppConfig>, voice_audio: VoiceAudioHandles) -> Self {
-        let ctx = SkillContext {
+        let ctx = ToolContext {
             config,
             voice_audio,
         };
         let reg = Self::default();
-        for (_, factory) in DEFAULT_SKILLS.iter() {
+        for (_, factory) in DEFAULT_TOOLS.iter() {
             reg.register(factory(&ctx));
         }
-        info!("Skills registered: {:?}", reg.list_skills());
+        info!("Tools registered: {:?}", reg.list_tools());
         reg
     }
 
-    pub fn register(&self, skill: Box<dyn Skill>) {
-        if !skill.should_register() {
-            info!("Skill '{}' disabled, skipping", skill.name());
+    pub fn register(&self, tool: Box<dyn Tool>) {
+        if !tool.should_register() {
+            info!("Tool '{}' disabled, skipping", tool.name());
             return;
         }
-        self.skills.insert(skill.name().to_string(), skill);
+        self.tools.insert(tool.name().to_string(), tool);
     }
 
-    pub fn get(&self, name: &str) -> Option<impl std::ops::Deref<Target = Box<dyn Skill>> + '_> {
-        self.skills.get(name)
+    pub fn get(&self, name: &str) -> Option<impl std::ops::Deref<Target = Box<dyn Tool>> + '_> {
+        self.tools.get(name)
     }
 
-    pub fn list_skills(&self) -> Vec<String> {
-        let mut skills: Vec<_> = self
-            .skills
-            .iter()
-            .map(|skill| skill.key().clone())
-            .collect();
-        skills.sort_unstable();
-        skills
+    pub fn list_tools(&self) -> Vec<String> {
+        let mut tools: Vec<_> = self.tools.iter().map(|tool| tool.key().clone()).collect();
+        tools.sort_unstable();
+        tools
     }
 
-    /// 统一技能执行入口：ACL 检查 → 取技能 → 执行 → 结果/错误格式化。
-    pub async fn execute_skill(
+    /// 统一工具执行入口：ACL 检查 → 取工具 → 执行 → 结果/错误格式化。
+    pub async fn execute_tool(
         &self,
         call: &ToolCall,
         ctx: UnifiedExecutionContext,
-        allowed_skills: &[String],
+        allowed_tools: &[String],
     ) -> String {
-        if !is_skill_allowed(&call.name, allowed_skills) {
-            warn!(skill = %call.name, platform = ?ctx.platform, "Skill execution denied by ACL");
-            return "Skill execution denied".to_string();
+        if !is_tool_allowed(&call.name, allowed_tools) {
+            warn!(tool = %call.name, platform = ?ctx.platform, "Tool execution denied by ACL");
+            return "Tool execution denied".to_string();
         }
 
-        if let Some(skill) = self.get(&call.name) {
-            match skill.execute(call.arguments.clone(), &ctx).await {
+        if let Some(tool) = self.get(&call.name) {
+            match tool.execute(call.arguments.clone(), &ctx).await {
                 Ok(val) => {
                     info!(
-                        skill = %call.name,
+                        tool = %call.name,
                         platform = ?ctx.platform,
                         caller = %ctx.caller_name,
-                        "Skill executed"
+                        "Tool executed"
                     );
                     val.to_string()
                 }
                 Err(e) => {
-                    error!(skill = %call.name, platform = ?ctx.platform, error = %e, "Skill failed");
-                    format!("Skill execution failed: {}", e)
+                    error!(tool = %call.name, platform = ?ctx.platform, error = %e, "Tool failed");
+                    format!("Tool execution failed: {}", e)
                 }
             }
         } else {
-            warn!(skill = %call.name, platform = ?ctx.platform, "Skill not found");
-            "Skill not found".to_string()
+            warn!(tool = %call.name, platform = ?ctx.platform, "Tool not found");
+            "Tool not found".to_string()
         }
     }
 
-    pub fn to_tool_schemas(&self, allowed_skills: &[String]) -> Vec<Value> {
+    pub fn to_tool_schemas(&self, allowed_tools: &[String]) -> Vec<Value> {
         let mut schemas: Vec<_> = self
-            .skills
+            .tools
             .iter()
-            .filter(|skill| is_skill_allowed(skill.key(), allowed_skills))
-            .map(|skill| {
+            .filter(|tool| is_tool_allowed(tool.key(), allowed_tools))
+            .map(|tool| {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": skill.name(),
-                        "description": skill.description(),
-                        "parameters": skill.parameters()
+                        "name": tool.name(),
+                        "description": tool.description(),
+                        "parameters": tool.parameters()
                     }
                 })
             })
@@ -283,39 +279,39 @@ impl SkillRegistry {
 }
 
 // ─────────────────────────────────────────────
-// 声明式工厂表：新增 skill = 加一行
+// 声明式工厂表：新增工具 = 加一行
 // ─────────────────────────────────────────────
 
-static DEFAULT_SKILLS: &[(&str, SkillFactory)] = &[
+static DEFAULT_TOOLS: &[(&str, ToolFactory)] = &[
     ("poke_client", |_| {
-        Box::new(communication::PokeClient) as Box<dyn Skill>
+        Box::new(communication::PokeClient) as Box<dyn Tool>
     }),
     ("send_message", |_| {
-        Box::new(communication::SendMessage) as Box<dyn Skill>
+        Box::new(communication::SendMessage) as Box<dyn Tool>
     }),
     ("kick_client", |_| {
-        Box::new(moderation::KickClient) as Box<dyn Skill>
+        Box::new(moderation::KickClient) as Box<dyn Tool>
     }),
     ("ban_client", |_| {
-        Box::new(moderation::BanClient) as Box<dyn Skill>
+        Box::new(moderation::BanClient) as Box<dyn Tool>
     }),
     ("move_client", |_| {
-        Box::new(moderation::MoveClient) as Box<dyn Skill>
+        Box::new(moderation::MoveClient) as Box<dyn Tool>
     }),
     ("get_client_info", |_| {
-        Box::new(information::GetClientInfo) as Box<dyn Skill>
+        Box::new(information::GetClientInfo) as Box<dyn Tool>
     }),
     ("web_search", |_| {
-        Box::new(web_search::WebSearch) as Box<dyn Skill>
+        Box::new(web_search::WebSearch) as Box<dyn Tool>
     }),
     ("music_control", |ctx| {
-        Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Skill>
+        Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Tool>
     }),
     ("voice_replay", |ctx| {
         Box::new(voice_replay::VoiceReplay::new(
             ctx.config.clone(),
             ctx.voice_audio.clone(),
-        )) as Box<dyn Skill>
+        )) as Box<dyn Tool>
     }),
 ];
 
@@ -325,10 +321,10 @@ mod tests {
     use crate::config::AclConfig;
     use serde_json::json;
 
-    struct TestSkill(&'static str);
+    struct TestTool(&'static str);
 
     #[async_trait]
-    impl Skill for TestSkill {
+    impl Tool for TestTool {
         fn name(&self) -> &'static str {
             self.0
         }
@@ -370,9 +366,9 @@ mod tests {
 
     #[test]
     fn tool_schemas_are_filtered_and_sorted() {
-        let registry = SkillRegistry::default();
-        registry.register(Box::new(TestSkill("zeta")));
-        registry.register(Box::new(TestSkill("alpha")));
+        let registry = ToolRegistry::default();
+        registry.register(Box::new(TestTool("zeta")));
+        registry.register(Box::new(TestTool("alpha")));
 
         let schemas = registry.to_tool_schemas(&["*".to_string()]);
         let names: Vec<_> = schemas
@@ -384,21 +380,21 @@ mod tests {
         let schemas = registry.to_tool_schemas(&["zeta".to_string()]);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0]["function"]["name"], "zeta");
-        assert!(is_skill_allowed("zeta", &["zeta".to_string()]));
-        assert!(!is_skill_allowed("alpha", &["zeta".to_string()]));
+        assert!(is_tool_allowed("zeta", &["zeta".to_string()]));
+        assert!(!is_tool_allowed("alpha", &["zeta".to_string()]));
     }
 
     #[tokio::test]
-    async fn skill_execution_receives_unified_context() {
-        let skill = TestSkill("test");
+    async fn tool_execution_receives_unified_context() {
+        let tool = TestTool("test");
 
-        let ts_ok = skill
+        let ts_ok = tool
             .execute(json!({}), &unified_context(Platform::TeamSpeak))
             .await
             .unwrap();
         assert_eq!(ts_ok, json!("ts"));
 
-        let nc_ok = skill
+        let nc_ok = tool
             .execute(json!({}), &unified_context(Platform::NapCat))
             .await
             .unwrap();

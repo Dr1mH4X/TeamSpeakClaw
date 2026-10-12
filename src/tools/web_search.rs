@@ -1,5 +1,5 @@
-use crate::skills::http::shared_client;
-use crate::skills::{Skill, UnifiedExecutionContext};
+use crate::tools::http::shared_client;
+use crate::tools::{Tool, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -74,7 +74,7 @@ fn parse_payload(payload: &str) -> Option<String> {
 pub struct WebSearch;
 
 #[async_trait]
-impl Skill for WebSearch {
+impl Tool for WebSearch {
     fn name(&self) -> &'static str {
         "web_search"
     }

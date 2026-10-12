@@ -23,7 +23,6 @@ TeamSpeakClaw 是一个独立的二进制应用程序，无需复杂的安装过
 
 - `settings.toml` — 核心设置（连接、LLM、机器人行为、Headless 语音服务）
 - `acl.toml` — 权限控制规则
-- `prompts.toml` — 系统提示词与错误消息
 
 修改 `config/settings.toml`，填入您的 TeamSpeak 服务器连接信息以及 LLM API Key 等配置。
 

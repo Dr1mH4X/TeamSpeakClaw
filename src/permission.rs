@@ -33,23 +33,23 @@ impl PermissionGate {
         match_server_group && match_channel_group
     }
 
-    pub fn get_allowed_skills(
+    pub fn get_allowed_tools(
         &self,
         caller_groups: &[u32],
         caller_channel_group_id: u32,
     ) -> Vec<String> {
-        let mut skills = Vec::new();
+        let mut tools = Vec::new();
         for rule in &self.config.rules {
             if self.matches_rule(rule, caller_groups, caller_channel_group_id) {
-                if rule.allowed_skills.iter().any(|s| s == "*") {
+                if rule.allowed_tools.iter().any(|s| s == "*") {
                     return vec!["*".to_string()];
                 }
-                skills.extend(rule.allowed_skills.clone());
+                tools.extend(rule.allowed_tools.clone());
             }
         }
-        skills.sort();
-        skills.dedup();
-        skills
+        tools.sort();
+        tools.dedup();
+        tools
     }
 
     pub fn can_target(
@@ -81,7 +81,7 @@ mod tests {
         AclRule {
             server_group_ids,
             channel_group_ids: Vec::new(),
-            allowed_skills: Vec::new(),
+            allowed_tools: Vec::new(),
             can_target_admins,
         }
     }
@@ -111,12 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_channel_group_controls_skills_and_protected_targets() {
+    fn nonzero_channel_group_controls_tools_and_protected_targets() {
         let gate = PermissionGate::new(AclConfig {
             rules: vec![AclRule {
                 server_group_ids: Vec::new(),
                 channel_group_ids: vec![42],
-                allowed_skills: vec!["move_client".to_string()],
+                allowed_tools: vec!["move_client".to_string()],
                 can_target_admins: true,
             }],
             acl: AclSettings {
@@ -125,10 +125,10 @@ mod tests {
         });
 
         assert_eq!(
-            gate.get_allowed_skills(&[], 42),
+            gate.get_allowed_tools(&[], 42),
             vec!["move_client".to_string()]
         );
-        assert!(gate.get_allowed_skills(&[], 0).is_empty());
+        assert!(gate.get_allowed_tools(&[], 0).is_empty());
         assert!(gate.can_target(&[], 42, &[6]));
         assert!(!gate.can_target(&[], 0, &[6]));
     }

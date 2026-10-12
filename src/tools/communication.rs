@@ -1,4 +1,4 @@
-use crate::skills::{required_u32, unified_ts_adapter, Platform, Skill, UnifiedExecutionContext};
+use crate::tools::{required_u32, unified_ts_adapter, Platform, Tool, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -17,7 +17,7 @@ fn required_message<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
 pub struct PokeClient;
 
 #[async_trait]
-impl Skill for PokeClient {
+impl Tool for PokeClient {
     fn name(&self) -> &'static str {
         "poke_client"
     }
@@ -58,7 +58,7 @@ impl Skill for PokeClient {
 pub struct SendMessage;
 
 #[async_trait]
-impl Skill for SendMessage {
+impl Tool for SendMessage {
     fn name(&self) -> &'static str {
         "send_message"
     }

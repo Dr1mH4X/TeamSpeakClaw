@@ -5,7 +5,7 @@ pub mod tsmusicbot;
 
 use crate::config::music_backend::VALID_BACKENDS;
 use crate::config::MusicBackendConfig;
-use crate::skills::{Platform, Skill, UnifiedExecutionContext};
+use crate::tools::{Platform, Tool, UnifiedExecutionContext};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -25,7 +25,7 @@ impl MusicControl {
 }
 
 #[async_trait]
-impl Skill for MusicControl {
+impl Tool for MusicControl {
     fn name(&self) -> &'static str {
         "music_control"
     }

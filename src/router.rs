@@ -25,10 +25,10 @@ use tracing::{error, info, warn};
 
 use crate::adapter::headless::TsAdapter;
 use crate::adapter::napcat::NapCatAdapter;
-use crate::config::{AppConfig, PromptsConfig};
+use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
-use crate::skills::{SkillRegistry, VoiceAudioHandles};
+use crate::tools::{ToolRegistry, VoiceAudioHandles};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterExit {
@@ -39,25 +39,22 @@ pub(crate) enum RouterExit {
 #[derive(Clone)]
 pub(crate) struct RouterContext {
     pub(crate) config: Arc<AppConfig>,
-    pub(crate) prompts: Arc<PromptsConfig>,
     pub(crate) gate: Arc<PermissionGate>,
     pub(crate) llm: Arc<LlmEngine>,
-    pub(crate) registry: Arc<SkillRegistry>,
+    pub(crate) registry: Arc<ToolRegistry>,
     pub(crate) voice_audio: VoiceAudioHandles,
 }
 
 impl RouterContext {
     pub(crate) fn new(
         config: Arc<AppConfig>,
-        prompts: Arc<PromptsConfig>,
         gate: Arc<PermissionGate>,
         llm: Arc<LlmEngine>,
-        registry: Arc<SkillRegistry>,
+        registry: Arc<ToolRegistry>,
         voice_audio: VoiceAudioHandles,
     ) -> Self {
         Self {
             config,
-            prompts,
             gate,
             llm,
             registry,
@@ -75,7 +72,6 @@ pub(crate) async fn run_routers(
 ) -> Result<RouterExit> {
     let RouterContext {
         config,
-        prompts,
         gate,
         llm,
         registry,
@@ -103,15 +99,8 @@ pub(crate) async fn run_routers(
     info!("{bot_ctx}");
 
     if let Some(nc_adapter) = nc_adapter {
-        let nc_router = NcRouter::new_with_ts(
-            config,
-            prompts,
-            nc_adapter,
-            gate,
-            llm,
-            registry,
-            Some(adapter),
-        );
+        let nc_router =
+            NcRouter::new_with_ts(config, nc_adapter, gate, llm, registry, Some(adapter));
 
         tokio::select! {
             biased;

@@ -1,6 +1,6 @@
 use super::chat::send_and_await_reply;
 use crate::adapter::headless::TextMessageTarget;
-use crate::skills::UnifiedExecutionContext;
+use crate::tools::UnifiedExecutionContext;
 use anyhow::Result;
 use serde_json::Value;
 

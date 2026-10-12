@@ -5,7 +5,6 @@ pub mod llm;
 pub mod logging;
 pub mod music_backend;
 pub mod napcat;
-pub mod prompts;
 pub mod voice_replay;
 pub use acl::AclConfig;
 pub use bot::BotConfig;
@@ -14,7 +13,6 @@ pub use llm::LlmConfig;
 pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use napcat::NapCatConfig;
-pub use prompts::PromptsConfig;
 pub use voice_replay::VoiceReplayConfig;
 
 use anyhow::{Context, Result};
@@ -71,12 +69,11 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn load_all() -> Result<(Self, AclConfig, PromptsConfig)> {
+    pub fn load_all() -> Result<(Self, AclConfig)> {
         let dir = config_dir();
         Ok((
             Self::load(dir.join("settings.toml"))?,
             AclConfig::load(dir.join("acl.toml"))?,
-            PromptsConfig::load(dir.join("prompts.toml"))?,
         ))
     }
 

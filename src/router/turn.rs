@@ -16,7 +16,7 @@ use crate::llm::context::{
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
-use crate::skills::{SkillRegistry, UnifiedExecutionContext};
+use crate::tools::{ToolRegistry, UnifiedExecutionContext};
 
 /// LLM 后端不可用时的固定回复文案（ts/nc/voice 调用点共用）
 pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
@@ -88,11 +88,10 @@ pub(crate) struct TurnSession {
 /// 一回合 LLM 请求：提示与输入由调用点准备，门禁、循环与回复策略由本 module 承担
 pub(crate) struct TurnRequest<'a> {
     pub(crate) llm: &'a LlmEngine,
-    pub(crate) registry: &'a SkillRegistry,
+    pub(crate) registry: &'a ToolRegistry,
     pub(crate) source: &'a SessionSource,
-    pub(crate) system_prompt: &'a str,
     pub(crate) user_ctx: &'a str,
-    pub(crate) allowed_skills: &'a [String],
+    pub(crate) allowed_tools: &'a [String],
     pub(crate) input: TurnInput<'a>,
     pub(crate) callbacks: Option<&'a StreamCallbacks>,
     pub(crate) cancel: &'a CancellationToken,
@@ -113,15 +112,21 @@ impl TurnRequest<'_> {
         // 容量占位与同会话串行锁持有到回复落库完成
         let _session = session;
 
-        let tools = self.registry.to_tool_schemas(self.allowed_skills);
+        // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析。
+        // 装配失败与后端失败同一处理：先尽力送出固定文案，再以 `Failed` 交回调用点
+        let system_prompt = match crate::prompt::system_prompt() {
+            Ok(system_prompt) => system_prompt,
+            Err(error) => return Err(self.fail_with_notice(sink, error).await),
+        };
+        let tools = self.registry.to_tool_schemas(self.allowed_tools);
         let executor = TurnExecutor {
             registry: self.registry,
-            allowed_skills: self.allowed_skills,
+            allowed_tools: self.allowed_tools,
             build_exec_ctx,
         };
         let mut retries = 0usize;
         let result = loop {
-            let mut messages = self.messages();
+            let mut messages = self.messages(&system_prompt);
             match self
                 .llm
                 .run_tool_loop(
@@ -155,17 +160,20 @@ impl TurnRequest<'_> {
             }
             Ok(_) => Ok(()),
             Err(ToolLoopError::Cancelled) => Err(TurnError::Cancelled),
-            Err(error) => {
-                if let Err(send_error) = sink.send(LLM_ERROR_REPLY).await {
-                    warn!(
-                        session = %self.source,
-                        error = %send_error,
-                        "backend failure notice was not delivered"
-                    );
-                }
-                Err(TurnError::Failed(error.into()))
-            }
+            Err(error) => Err(self.fail_with_notice(sink, error.into()).await),
         }
+    }
+
+    /// 后端失败：先尽力送出固定文案，再以 `Failed` 交回调用点，保证该变体意味着兜底文案已尝试
+    async fn fail_with_notice<S: TurnSink>(&self, sink: &S, error: anyhow::Error) -> TurnError {
+        if let Err(send_error) = sink.send(LLM_ERROR_REPLY).await {
+            warn!(
+                session = %self.source,
+                error = %send_error,
+                "backend failure notice was not delivered"
+            );
+        }
+        TurnError::Failed(error)
     }
 
     /// 送达回复并落上下文：投递失败的内容不入上下文，避免下一轮回放用户没看到的回复
@@ -185,15 +193,15 @@ impl TurnRequest<'_> {
         Ok(())
     }
 
-    fn messages(&self) -> Vec<Value> {
+    fn messages(&self, system_prompt: &str) -> Vec<Value> {
         match self.input {
             TurnInput::Text(text) => {
                 self.llm
-                    .build_messages(self.source, self.system_prompt, self.user_ctx, text)
+                    .build_messages(self.source, system_prompt, self.user_ctx, text)
             }
             TurnInput::Audio(wav) => {
                 self.llm
-                    .build_omni_messages(self.source, self.system_prompt, self.user_ctx, wav)
+                    .build_omni_messages(self.source, system_prompt, self.user_ctx, wav)
             }
         }
     }
@@ -201,8 +209,8 @@ impl TurnRequest<'_> {
 
 /// 工具循环执行器：调用点注入 UnifiedExecutionContext 构造闭包
 struct TurnExecutor<'a, F> {
-    registry: &'a SkillRegistry,
-    allowed_skills: &'a [String],
+    registry: &'a ToolRegistry,
+    allowed_tools: &'a [String],
     build_exec_ctx: F,
 }
 
@@ -213,7 +221,7 @@ where
 {
     async fn execute(&self, call: &ToolCall) -> String {
         self.registry
-            .execute_skill(call, (self.build_exec_ctx)(), self.allowed_skills)
+            .execute_tool(call, (self.build_exec_ctx)(), self.allowed_tools)
             .await
     }
 }
@@ -377,11 +385,10 @@ mod tests {
         let cancel = CancellationToken::new();
         TurnRequest {
             llm,
-            registry: &SkillRegistry::default(),
+            registry: &ToolRegistry::default(),
             source,
-            system_prompt: "system",
             user_ctx: "{}",
-            allowed_skills: &[],
+            allowed_tools: &[],
             input,
             callbacks: None,
             cancel: &cancel,
@@ -640,11 +647,10 @@ mod tests {
 
         let result = TurnRequest {
             llm: &llm,
-            registry: &SkillRegistry::default(),
+            registry: &ToolRegistry::default(),
             source: &source,
-            system_prompt: "system",
             user_ctx: "{}",
-            allowed_skills: &[],
+            allowed_tools: &[],
             input: TurnInput::Text("question"),
             callbacks: None,
             cancel: &cancel,
