@@ -1,4 +1,4 @@
-//! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、体积自愈与回复策略。
+//! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、请求被拒后的收缩自愈与回复策略。
 //!
 //! 调用点只提供回合请求（会话、提示、输入、回调、取消）与回复落点 `TurnSink`：
 //! 容量占位（`TurnPermit::reserve`）与到达顺序票据（`LlmEngine::enqueue_turn_ticket`）
@@ -13,13 +13,10 @@ use tracing::{info, warn};
 use crate::llm::context::{
     ContextTurn, SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
 };
-use crate::llm::provider::PayloadTooLarge;
+use crate::llm::provider::LlmFailure;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::tools::{ToolRegistry, UnifiedExecutionContext};
-
-/// LLM 后端不可用时的固定回复文案（ts/nc/voice 调用点共用）
-pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
 
 /// clid 回退键：clid 会被复用，只在拿不到真实 UID 时使用
 pub(crate) fn ts_caller_clid_uid(clid: u32) -> String {
@@ -47,8 +44,8 @@ pub(crate) fn ts_caller_session_uid(resolved_uid: &str, admission_uid: &str) -> 
     }
 }
 
-/// 体积类失败后最多重试的次数：只防放大，不保证保留内容
-const MAX_PAYLOAD_RETRIES: usize = 1;
+/// 可收缩失败后最多重试的次数：只防放大，不保证保留内容
+const MAX_SHRINK_RETRIES: usize = 1;
 
 /// 回合输入：文本走 `build_messages`，音频走 `build_omni_messages`；
 /// 成功落上下文时按同一分支选择 `save_turn` / `save_omni_turn`
@@ -67,7 +64,7 @@ pub(crate) trait TurnSink: Send + Sync {
 pub(crate) enum TurnError {
     /// 插话取消：未回复、未落上下文
     Cancelled,
-    /// 后端失败：固定文案已尽力回复，未落上下文
+    /// 后端失败：失败说明已尽力送达，未落上下文
     Failed(anyhow::Error),
     /// 回复投递失败：内容未送达用户，未落上下文
     ReplyFailed(anyhow::Error),
@@ -139,7 +136,7 @@ impl TurnRequest<'_> {
         let _session = session;
 
         // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析。
-        // 装配失败与后端失败同一处理：先尽力送出固定文案，再以 `Failed` 交回调用点
+        // 装配失败与后端失败同一处理：先尽力送出失败说明，再以 `Failed` 交回调用点
         let system_prompt = match crate::prompt::system_prompt() {
             Ok(system_prompt) => system_prompt,
             Err(error) => return Err(self.fail_with_notice(sink, error).await),
@@ -166,11 +163,18 @@ impl TurnRequest<'_> {
                 )
                 .await
             {
-                Err(error) if retries < MAX_PAYLOAD_RETRIES && is_payload_too_large(&error) => {
+                Err(error)
+                    if retries < MAX_SHRINK_RETRIES && shrinkable_failure(&error).is_some() =>
+                {
                     // 没有可收缩的会话（NapCat）或已无音频可丢时原样返回，不做无意义的重试
-                    let Some(history) = self.llm.shrink_for_payload_retry(self.source) else {
+                    let Some(history) = self.llm.shrink_for_rejection_retry(self.source) else {
                         break Err(error);
                     };
+                    warn!(
+                        session = %self.source,
+                        error = %error,
+                        "LLM rejected the request; retrying with a smaller history"
+                    );
                     undo = Some(history);
                     retries += 1;
                 }
@@ -187,6 +191,7 @@ impl TurnRequest<'_> {
                 );
                 self.deliver(sink, result.content).await
             }
+            // provider 未归类的空回复：防御分支，既不送达也不落库
             Ok(_) => Ok(()),
             Err(ToolLoopError::Cancelled) => {
                 // 取消的回合不回复也不落库：把收缩掉的历史放回，别让一次插话永久丢上下文
@@ -199,9 +204,9 @@ impl TurnRequest<'_> {
         }
     }
 
-    /// 后端失败：先尽力送出固定文案，再以 `Failed` 交回调用点，保证该变体意味着兜底文案已尝试
+    /// 后端失败：先尽力把失败原因作为文本送达用户，再以 `Failed` 交回调用点
     async fn fail_with_notice<S: TurnSink>(&self, sink: &S, error: anyhow::Error) -> TurnError {
-        if let Err(send_error) = sink.send(LLM_ERROR_REPLY).await {
+        if let Err(send_error) = sink.send(&failure_text(&error)).await {
             warn!(
                 session = %self.source,
                 error = %send_error,
@@ -261,10 +266,37 @@ where
     }
 }
 
-/// 体积类失败判定：`PayloadTooLarge` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
-/// 只允许尚未执行工具的 `Other` 触发重试，避免重放已经发生的操作。
-fn is_payload_too_large(error: &ToolLoopError) -> bool {
-    matches!(error, ToolLoopError::Other(inner) if inner.downcast_ref::<PayloadTooLarge>().is_some())
+/// 用户可见的失败文案：分类给出稳定的类别名，未分类的失败退回原始错误链。
+/// 两类文案都不含网关响应体正文——正文只作归类判据，可能携带凭据
+fn failure_text(error: &anyhow::Error) -> String {
+    match classified_failure(error) {
+        Some(failure) => format!("AI backend failure: {}", failure.user_text()),
+        None => format!("AI backend failure: {error:#}"),
+    }
+}
+
+/// 分类提取：模型调用错误可能被工具循环包进 `Other` 或 `AfterToolExecution`，两种包装下类别都不变
+fn classified_failure(error: &anyhow::Error) -> Option<&LlmFailure> {
+    if let Some(failure) = error.downcast_ref::<LlmFailure>() {
+        return Some(failure);
+    }
+    match error.downcast_ref::<ToolLoopError>() {
+        Some(ToolLoopError::Other(inner) | ToolLoopError::AfterToolExecution(inner)) => {
+            inner.downcast_ref::<LlmFailure>()
+        }
+        _ => None,
+    }
+}
+
+/// 可收缩失败判定：`LlmFailure` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
+/// 只允许尚未执行工具的 `Other` 触发收缩重试，避免重放已经发生的操作。
+fn shrinkable_failure(error: &ToolLoopError) -> Option<&LlmFailure> {
+    match error {
+        ToolLoopError::Other(inner) => inner
+            .downcast_ref::<LlmFailure>()
+            .filter(|failure| failure.is_shrinkable()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -293,12 +325,16 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum FakeOutcome {
         PayloadTooLarge,
+        /// 网关按模型上下文窗口拒绝：与体积类共用收缩恢复
+        ContextWindowExceeded,
         HttpError,
         Success,
         /// 固定文本回复：让「哪条回复先送达」可断言，顺序类用例用它
         Reply(&'static str),
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
+        /// 真实 provider 对空完成的分类形态：以 `LlmFailure` 交回回合骨架
+        EmptyResponse,
         Action,
         /// 重试期间插话取消：置位令牌并挂起流，让取消分支胜出
         CancelRetry,
@@ -306,6 +342,15 @@ mod tests {
 
     /// 脚本化的假 provider：记录调用次数与每次 messages 的序列化体积，
     /// 按脚本顺序返回结果，让回合策略不依赖真实网络
+    /// 未分类失败的原始错误链文案（假 provider 的 `HttpError`）
+    const BACKEND_FAILURE_TEXT: &str = "AI backend failure: LLM API error: HTTP 500";
+    /// 体积类失败的用户文案
+    const PAYLOAD_FAILURE_TEXT: &str =
+        "AI backend failure: payload too large: oversized test payload";
+    /// 分类空完成的用户文案
+    const EMPTY_COMPLETION_TEXT: &str =
+        "AI backend failure: no content in the model completion (finish reason 'stop')";
+
     struct FakeProvider {
         outcomes: Mutex<Vec<FakeOutcome>>,
         calls: AtomicUsize,
@@ -353,9 +398,18 @@ mod tests {
                 .unwrap()
                 .push(serde_json::to_vec(&messages).unwrap().len());
             match self.outcomes.lock().unwrap().remove(0) {
-                FakeOutcome::PayloadTooLarge => {
-                    Err(PayloadTooLarge::for_test("oversized test payload").into())
+                FakeOutcome::PayloadTooLarge => Err(LlmFailure::PayloadTooLarge {
+                    message: "oversized test payload".to_string(),
                 }
+                .into()),
+                FakeOutcome::ContextWindowExceeded => Err(LlmFailure::ContextWindowExceeded {
+                    message: "context window exceeded".to_string(),
+                }
+                .into()),
+                FakeOutcome::EmptyResponse => Err(LlmFailure::EmptyResponse {
+                    finish_reason: "stop".to_string(),
+                }
+                .into()),
                 FakeOutcome::HttpError => Err(anyhow::anyhow!("LLM API error: HTTP 500")),
                 FakeOutcome::Success => Ok(Box::pin(stream::iter(vec![
                     Ok(LlmStreamEvent::Token("hello".to_string())),
@@ -397,7 +451,7 @@ mod tests {
 
     /// 记录送达文本的落点；`fail` 时模拟投递失败
     /// 记录送达尝试（含失败的尝试）的落点；`fail` 时每次尝试都返回错误。
-    /// 记全部尝试而不只记成功，才能断言「投递失败后不再补发兜底文案」
+    /// 记全部尝试而不只记成功，才能断言「投递失败后没有第二次发送」
     struct RecordingSink {
         sent: Mutex<Vec<String>>,
         fail: bool,
@@ -636,25 +690,41 @@ mod tests {
         let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
 
         assert!(matches!(result, Err(TurnError::ReplyFailed(_))));
-        // 只尝试过正文那一次：投递失败不回退到兜底文案，也不落上下文
+        // 只尝试过正文那一次：投递失败不回退到失败说明，也不落上下文
         assert_eq!(sink.sent(), vec!["hello".to_string()]);
         assert!(llm.stored_history(&source).is_empty());
     }
 
     #[tokio::test]
-    async fn backend_failure_replies_the_fixed_text_and_saves_nothing() {
-        let provider = Arc::new(FakeProvider::new(vec![FakeOutcome::HttpError]));
-        let llm = engine_with(&provider, 8);
-        let source = SessionSource::TeamSpeak {
-            uid: "backend-failure".to_string(),
-        };
-        let sink = RecordingSink::new();
+    async fn backend_failure_sends_the_reason_as_text() {
+        // 失败原因作为文本送达用户：可识别的失败给稳定类别，未分类的失败给原始错误链
+        for (outcome, expected) in [
+            (
+                FakeOutcome::HttpError,
+                "AI backend failure: LLM API error: HTTP 500",
+            ),
+            (
+                FakeOutcome::PayloadTooLarge,
+                "AI backend failure: payload too large: oversized test payload",
+            ),
+            (
+                FakeOutcome::ContextWindowExceeded,
+                "AI backend failure: context window exceeded: context window exceeded",
+            ),
+        ] {
+            let provider = Arc::new(FakeProvider::new(vec![outcome]));
+            let llm = engine_with(&provider, 8);
+            let source = SessionSource::TeamSpeak {
+                uid: format!("reason-{}", expected.len()),
+            };
+            let sink = RecordingSink::new();
 
-        let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
+            let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
 
-        assert!(matches!(result, Err(TurnError::Failed(_))));
-        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
-        assert!(llm.stored_history(&source).is_empty());
+            assert!(matches!(result, Err(TurnError::Failed(_))));
+            assert_eq!(sink.sent(), vec![expected.to_string()]);
+            assert!(llm.stored_history(&source).is_empty());
+        }
     }
 
     #[tokio::test]
@@ -668,9 +738,9 @@ mod tests {
 
         let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
 
-        // 兜底文案送不出去也只记日志：回合仍以 Failed 交给调用点，且不落上下文
+        // 失败文案送不出去也只记日志：回合仍以 Failed 交给调用点，且不落上下文
         assert!(matches!(result, Err(TurnError::Failed(_))));
-        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        assert_eq!(sink.sent(), vec![BACKEND_FAILURE_TEXT.to_string()]);
         assert!(llm.stored_history(&source).is_empty());
     }
 
@@ -687,6 +757,128 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(sink.sent().is_empty());
+        assert!(llm.stored_history(&source).is_empty());
+    }
+
+    #[tokio::test]
+    async fn classified_empty_completion_reports_the_reason() {
+        // 真实 provider 把空完成交回 `LlmFailure::EmptyResponse`：用户拿到零输出的原因，
+        // 回合以 Failed 收尾且不落库
+        let provider = Arc::new(FakeProvider::new(vec![FakeOutcome::EmptyResponse]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "classified-empty".to_string(),
+        };
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
+
+        assert!(matches!(result, Err(TurnError::Failed(_))));
+        assert_eq!(sink.sent(), vec![EMPTY_COMPLETION_TEXT.to_string()]);
+        assert!(llm.stored_history(&source).is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_window_rejection_shrinks_and_retries_like_a_payload_rejection() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::ContextWindowExceeded,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "context-window".to_string(),
+        };
+        for _ in 0..3 {
+            llm.save_omni_turn(&source, vec![0u8; 2048], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(result.is_ok());
+        let bodies = provider.body_lengths();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[1] < bodies[0]);
+        assert_eq!(sink.sent(), vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn empty_completion_does_not_shrink_the_history() {
+        // 空完成不是可收缩拒绝：不得因为一次零输出就丢掉会话历史
+        let provider = Arc::new(FakeProvider::new(vec![FakeOutcome::EmptyResponse]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "empty-no-shrink".to_string(),
+        };
+        for _ in 0..3 {
+            llm.save_omni_turn(&source, vec![0u8; 1024], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(matches!(result, Err(TurnError::Failed(_))));
+        assert_eq!(provider.calls(), 1);
+        assert_eq!(sink.sent(), vec![EMPTY_COMPLETION_TEXT.to_string()]);
+        assert_eq!(llm.stored_history(&source).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_completion_after_a_tool_call_reports_the_reason() {
+        // 工具执行后的空完成被包进 `AfterToolExecution`，但类别不变：用户拿到同样的原因
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::Action,
+            FakeOutcome::EmptyResponse,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "empty-after-action".to_string(),
+        };
+        let actions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::default();
+        registry.register(Box::new(RecordedAction(actions.clone())));
+        let sink = RecordingSink::new();
+        let cancel = CancellationToken::new();
+        let permit = TurnPermit::reserve(&llm).unwrap();
+        let ticket = llm.enqueue_turn_ticket(&source);
+        let session = permit.acquire_session(&llm, &source, ticket).await;
+        let allowed = vec!["record_action".to_string()];
+        let request = TurnRequest {
+            llm: &llm,
+            registry: &registry,
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &allowed,
+            input: TurnInput::Text("perform the action"),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        let result = request
+            .run(
+                session,
+                || UnifiedExecutionContext {
+                    platform: crate::tools::Platform::TeamSpeak,
+                    ts_adapter: None,
+                    nc_adapter: None,
+                    caller_id: 1,
+                    caller_id_nc: 0,
+                    caller_name: "test".to_string(),
+                    caller_groups: Vec::new(),
+                    caller_channel_group_id: 0,
+                    nc_group_id: None,
+                    gate: Arc::new(crate::permission::PermissionGate::new(
+                        crate::config::AclConfig::default(),
+                    )),
+                    config: Arc::new(crate::config::AppConfig::default()),
+                },
+                &sink,
+            )
+            .await;
+
+        assert!(matches!(result, Err(TurnError::Failed(_))));
+        assert_eq!(actions.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls(), 2);
+        assert_eq!(sink.sent(), vec![EMPTY_COMPLETION_TEXT.to_string()]);
         assert!(llm.stored_history(&source).is_empty());
     }
 
@@ -908,7 +1100,7 @@ mod tests {
 
         assert!(matches!(result, Err(TurnError::Failed(_))));
         assert_eq!(provider.calls(), 2);
-        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        assert_eq!(sink.sent(), vec![PAYLOAD_FAILURE_TEXT.to_string()]);
         // 收缩已丢掉最早一轮，失败回合本身不落上下文
         assert_eq!(llm.stored_history(&source).len(), 2);
     }
@@ -1019,7 +1211,7 @@ mod tests {
             "completed action was replayed by the context retry"
         );
         assert_eq!(provider.calls(), 2);
-        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        assert_eq!(sink.sent(), vec![PAYLOAD_FAILURE_TEXT.to_string()]);
         assert_eq!(llm.stored_history(&source).len(), 2);
     }
 }

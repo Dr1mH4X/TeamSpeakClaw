@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-工具循环把「已执行工具后」的模型错误收进 `ToolLoopError::AfterToolExecution`，`is_payload_too_large` 只认尚未执行工具的 `Other`，因此只有执行前的体积失败才会收缩并重试；取消错误原样保留，不误分类。
+工具循环把「已执行工具后」的模型错误收进 `ToolLoopError::AfterToolExecution`，`shrinkable_failure` 只认尚未执行工具的 `Other`，因此只有执行前的可收缩失败才会收缩并重试；取消错误原样保留，不误分类。
 
 收缩与装配共用 `wire_keep_from`（可见后缀起点），删除「最早可删的可见音频 + 整个不可见前缀」。前缀必须一起删：只丢一轮可见音频时，释放出来的音频预算会让更旧的音频重新进入可见后缀，重试请求不会变小。只剩一条可见音频时返回 `None`，不动历史、不重试。
 
@@ -27,4 +27,4 @@ Status: implemented
 - 代价：体积失败触发收缩后，不可见前缀里的旧文本会从存储历史中永久消失（[LLM 引擎与上下文](../../../../docs/subsystems/llm.md) 已明确）；非取消类失败保留收缩，会话上下文会比失败前小。
 - 验证：反向验证 —— 退回 `tool_loop` 分类后 `regression_payload_retry_must_not_repeat_completed_action` 报 `action ran 2 times, provider calls 4`；退回收缩语义后 `regression_retry_shrinks_already_clipped_wire_view` 报 `1641402 -> 1641402 bytes`；删掉取消还原后 `cancelled_retry_restores_the_history_the_shrink_removed` 报 `left: 2, right: 8`。`cargo test --all-targets --offline --locked` 400 passed，`cargo fmt --check` 与 `cargo clippy --all-targets --offline --locked -- -D warnings` 全绿。
 
-相关：[LLM 回合模块](../../implemented/architecture/2026-10-03-llm-turn-module.md) 是回合骨架与体积自愈的归属地；[同会话回合按到达顺序取锁](../../implemented/bug-fix/2026-10-04-turn-arrival-order-tickets.md) 记录了会话锁的位置，收缩与还原都在锁内发生。
+相关：[模型调用失败按分类路由](../../implemented/architecture/2026-10-15-llm-failure-taxonomy.md) 定义 `LlmFailure` 的分类与 `is_shrinkable` 判定；[LLM 回合模块](../../implemented/architecture/2026-10-03-llm-turn-module.md) 是回合骨架与请求被拒后收缩自愈的归属地；[同会话回合按到达顺序取锁](../../implemented/bug-fix/2026-10-04-turn-arrival-order-tickets.md) 记录了会话锁的位置，收缩与还原都在锁内发生。
