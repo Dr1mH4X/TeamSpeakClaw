@@ -16,10 +16,9 @@ website/build/
 .DS_Store
 Thumbs.db
 
-# AI
+# AI（.agents/ 入库：决策记录与技能规范随改动一起提交）
 plan.md
 skills-lock.json
-.agents/
 .claude/
 opencode.json
 

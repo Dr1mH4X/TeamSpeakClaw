@@ -67,17 +67,26 @@ jobs:
       is-stable-release: ${{ needs.meta.outputs.is-stable-release == 'true' }}
     secrets: inherit
 
-  changelog:
-    needs: meta
-    uses: ./.github/workflows/reusable-changelog.yml
-
   release:
     name: Create Release
-    needs: [quality, meta, build, changelog, docker]
+    needs: [quality, meta, build, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate the release log
+        id: release-log
+        run: |
+          path="docs/release/${{ needs.meta.outputs.tag }}.md"
+          if [ ! -f "$path" ]; then
+            echo "::error::missing release log $path; write it in the release PR per docs/release/AGENTS.md"
+            exit 1
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -93,8 +102,7 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: Release ${{ needs.meta.outputs.tag }}
-          body: |
-            ${{ needs.changelog.outputs.release_body }}
+          body_path: ${{ steps.release-log.outputs.path }}
           draft: false
           prerelease: ${{ needs.meta.outputs.is-prerelease == 'true' }}
           files: artifacts/*

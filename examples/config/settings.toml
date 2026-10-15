@@ -14,7 +14,7 @@ api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 omni_model = false    # 多模态模型：true 时跳过 STT，model 需支持音频输入；模型只输出文本，语音回复需另开 [headless.tts]
-max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）
+max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）；omni 音频轮另受体积预算约束，超出时从最早的音频轮开始丢弃
 
 # Headless 语音服务配置
 [headless]

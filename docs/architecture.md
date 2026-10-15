@@ -1,56 +1,51 @@
 # 架构
 
-TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。本文描述系统拓扑与关键代码路径；模块级明细以源码为准，目录级规则只出现在已建立的模块 `AGENTS.md`（当前为 `src/config/AGENTS.md` 与 `website/AGENTS.md`）中。
+TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。
 
-## 入口流
+本文是索引与拓扑：分层规则、入口流、子系统一览与组件图。每个子系统的契约、关键序列与不变量见其专页；取舍的理由与代价见 [.agents/notes/](../.agents/notes/README.md)，目录级规则只出现在模块 `AGENTS.md` 中。
 
-`main.rs` 只做装配：解析 CLI 参数，由 `AppConfig::load_all()` 加载 `config/settings.toml`、`acl.toml`（目录取 `config_dir()` = `exe_dir().join("config")`），初始化 `PermissionGate`、`ToolRegistry`、`LlmEngine`，随后调用 `adapter::run()` 进入主循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
-
-`adapter::run()`（`adapter.rs`）是生命周期主循环：`[headless.wakeword]` 启用时先从 `models_dir()` 加载三个 OpenWakeWord 模型，缺文件或模型非法直接终止启动，不进入连接与重连；随后 `TsAdapter::connect()` 建 TeamSpeak 连接，再 `run_connected_session()` 按需启动 NapCat 适配器（`connect_if_enabled()`，未启用则为 `None`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。TeamSpeak 断线、NapCat supervisor 异常退出或 headless 组件失败都会结束本轮会话并进入重连循环；退避序列与尝试上限、以及失败时的日志措辞都归 `adapter/lifecycle.rs`，`adapter.rs` 只经 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。会话是否进入过路由运行由 `SessionCompletion` 的布尔字段记录，作为重试记账的输入。
-
-## 双入站适配器
-
-TeamSpeak 侧（`adapter/headless.rs`）封装 `tsclient-rs::Client`，提供建连、身份文件（`identity.json`）读写与等级升级、文本/断开事件回调、管理命令与 `send_text_message()` 等发送接口，接入参数与 STT/TTS 开关由 `config/headless.rs` 的 `HeadlessConfig` 控制。子模块 `adapter/headless/`：`actor` 是音频发送（唯一 pacer）与客户端目录（唯一写者，经命令通道）的任务循环，`event` 是事件适配器与 `TsAdapter` 本身，`speech` 是 OPUS/STT/TTS 音频工具，`text_util` 是消息分片工具，`types` 是事件类型，`voice_service` 是 gRPC 服务端实现，`wakeword` 是 OpenWakeWord 唤醒门（推理核心 vendor 自 oww_rs；前端与分类器三个 onnx 均按配置从 `models_dir()` 运行时加载）。
-
-NapCat 侧（`adapter/napcat.rs`）是 OneBot 11 WebSocket 客户端，仅当 `config.napcat.enabled` 才连接。子模块 `adapter/napcat/`：`api` 封装 OneBot 动作调用，`ws` 是连接循环与请求-响应匹配，`event` 解析上行事件，`types` 定义消息段与 `NcApiResponse` 结构；它的两处重试循环留在 `ws` 内，有界与无界语义、耗尽日志与控制流各不相同，不复用 `lifecycle::run_retry_loop`。
-
-## 文本路由与语音桥
-
-voice bridge 就绪时，TS 文本消息经 `VoiceRouter`（`router/voice_router.rs`）路由而非 `EventRouter`。由 `should_route_text_through_bridge(voice_configured, bridge_ready)` 决定：语音已配置（`voice_features_enabled()` = STT/TTS/omni/voice_replay 任一开启）且 `adapter/lifecycle.rs` 的 `BridgeReadiness` 就绪时，`ts_router::handle_message()` 直接跳过文本处理，语音桥接管；就绪以 `BridgeComponent` 的 Service（gRPC 服务）、Stream（事件流订阅）、Actor（actor 事件 handler）三者全 Up 判定，各组件只上报 Up/Down 事件，读取方只调 `is_ready()`。TS 触发策略（私聊直触 / 前缀剥离 / 回复目标）由 `router/trigger.rs:resolve_ts_inbound()` 统一计算；adapter 的 actor 只搬运原始文本。
-
-`VoiceRouter` 以独立任务运行在 headless 运行时内，重试走 `lifecycle::run_retry_loop` 共享驱动（单次尝试失败时置 Stream 组件 Down 触发文本回退；循环预标记会话已建立因而无界，尝试内建立过订阅流时经 `take_stream_established()` 重置退避）。它提供音频 STT/TTS 双流水线：`audio_pipeline`（`OpusSttPipeline`）做音频分段，STT 经 `OpenAiSpeechProvider` 转写（omni 模式下音频以 `input_audio` 直送 LLM），模型回复始终是文本、在 `[headless.tts]` 开启时经流式句段切分器切段，再由 `OpenAiSpeechProvider` 逐段合成、编码后推进出站 FIFO 播放；STT 与 omni 两条语音回合都另挂工具调用提示音（`web_search` 取「我来看看」/「我来搜索下」，其余工具取「我来研究下」），一轮对话只在第一次工具调用开始执行时入队；唤醒确认音取「嗯哼」/「在呢」。短语池由 `router/voice_feedback.rs` 在 TTS 有效开启时于启动期尽力预热并缓存为 48k 立体声 PCM，失败只记日志、首次触发按需实时合成，命中缓存才不再发起 TTS 请求；同一触发点内轮换取用，触发时以 `AudioOutput` 的 PCM 片段入队。出站音频统一经 `AudioOutput` FIFO（唯一持有 `ts3_audio_tx` 写端）；TTS 会话按 LLM 流创建与关闭：首个可播句段到达时开一条流并起它的 synth 任务，`finish_reason` 到达时只关掉该流的句段通道（`close_stream`），synth 任务随后 `finish_drained` 等本流音频播完才结束该 job；工具轮与最终回复因此各占一条会话，工具提示音与最终回复按 FIFO 入队顺序排在工具轮流之后；每条流的 synth 任务独占持有该流的会话，播完本流音频再放掉回合句柄，轮次收尾只关当前流、不等播放；音乐 bot 的音频与聊天按其名字（`musicbot_name`）过滤，不进入 LLM。`[headless.wakeword]` 启用时，音频收帧路径逐帧喂唤醒门（`feed_wakeword_frame`，per-clid 实例池 + `window_secs` 开门窗口；门内部按 80ms 块推理，跨帧余量由 `acc` 携带，帧起点、帧长与 VAD 活跃累计都落进该 clid 的会话），命中即取消当前占用出站音频的回合（LLM 取消令牌 + TTS 播放取消，不分回合归属），插话不必等 utterance 收尾；收尾时门的 `take_utterance_verdict` 一并给出命中、窗口与独占三项，裁决随 utterance 交给 `admit_audio_chunk`，在 caller 解析与 gRPC 查询之前按 `decide_wakeword_action` 调度：关门、或机器人已开始产出而本条未命中唤醒词时丢弃；命中块锚点（`WakeEvent::fire_sample`，命中块在该 clid 时间轴上的绝对起始采样位置）之后活跃语音不足 `WAKE_ONLY_TAIL_MS = 200ms` 的 utterance 判为只有唤醒词，播预生成的确认音并就地登记一个播报回合，不进 STT/LLM；锚点、锚点后活跃毫秒与命中块序号随裁决进 `voice.wakeword.calibration` 与 `voice.wakeword.confirm` 日志。准入只做裁决，回合在独立任务里跑，omni 与 STT 两路走同一道门。聊天与音频事件经 `actor.rs` 广播通道（控制/音频分离）送达，gRPC 定义见 `proto/voice.proto`，`build.rs` 用 `protoc-bin-vendored` + `tonic_build` 生成代码，内部监听地址为 `INTERNAL_GRPC_ADDR = "127.0.0.1:50051"`。
-
-触发 LLM 的语音桥文本在事件循环里先做同步准入、占用轮次容量并按调用者登记到达顺序票据，再派发任务；任务先取得会话锁，随后查询 caller 与在线名单；caller 的身份与频道组出自同一次 `clientinfo` 查询，两次快照里的非空 UID 都必须与事件一致，避免等待期间 clid 被其他用户复用。准入键（轮次票据与会话锁）只能取自事件本身：事件 UID，缺失时退到 `clid:<id>`，因为解析要查服务器、不能挡在事件循环里；会话与历史键用解析出的真实 UID，解析不到才退回准入键——`clid` 会被复用，只当准入键（`router/turn.rs` 的 `ts_caller_admission_uid()`/`ts_caller_session_uid()` 是语音桥文本、纯文本路由与音频三条入口共用的唯一规则）。文本入口与 STT 入口分别取得会话句柄，共用的文本回合执行函数必须接收 `TurnSession`，并持有到回复投递和历史保存完成。
-
-唤醒门用一张最多 262 项的说话人状态表保存开门窗口、绝对采样位置、跨帧余量与在飞语句裁决，另用 LRU 缓存最多 6 个推理模型。模型驱逐不移动或删除语句状态，再次来帧时只重建模型；状态按空闲时间和容量清理，并同步删除对应模型，容量清理先挑已收段的状态、在飞裁决最后丢。
-
-## 关键代码路径
-
-`split_message()`（`adapter/headless/text_util.rs`）把消息按 UTF-8 字节长度切分为不超过 `MAX_MESSAGE_BYTES = 8192` 的分片，这是 TS3 ServerQuery 单行上限；每片在字符边界处截断，优先在空白符处切分（最多回看 256 字节），单字符超限时强制整体成片，分片边界空白符丢弃。
-
-文本发送只有一个实现：`text_util::send_text_message()` 用 `split_message` 把整条消息切分后逐片 `sendTextMessage`。两个调用方是 `event.rs:TsAdapter::send_text_message()`（TS 文本路由与工具回复用）与 `voice_service.rs:VoiceServiceImpl::send_notice()`（语音桥 `send_notice` 的落地端，先把目标模式归一为 1/2/3 再复用该实现）。
-
-## LLM 引擎
-
-`llm.rs` 聚合 `llm/` 子模块：`engine` 是 `LlmEngine`（上下文装配与工具循环入口），`provider` 是 OpenAI 兼容 HTTP 客户端，`context` 是上下文窗口与轮次协调（`TurnCoordinator`：每会话串行锁与到达顺序链 + 全局容量钳制），`tool_loop` 是流式工具循环。TS 文本、NapCat 与语音三条入站路径的回合骨架统一在 `router/turn.rs`：`TurnRequest` 提供输入（`TurnInput::{Text, Audio}` 决定消息装配与历史落库的分支）、`TurnSink` 实现各自的回复落点，门禁、工具循环、体积类失败收缩重试与「送达成功才落上下文」由该模块承担；system 提示词由该模块经 `prompt::system_prompt()` 装配一次后交给引擎。`prompt.rs` + `prompt/` 是模型可见提示词的唯一归属地：`sections` 是按 `(order, name)` 拼接的第一方段落常量，`{{name}}` 变量在装配期严格解析（未注册即失败），`context` 把调用者与在线名单这类易变事实拼成同一回合 user 消息里的运行期上下文快照；TTS 风格提示是同处的常量，引擎只负责把提示词放进 system 角色。
-
-引擎请求任意 `base_url/chat/completions`（流式）；解析流时忽略 `reasoning_content`（不存不转发）。上下文受 `max_context_turns` 与固定常量上限（`MAX_CONTEXT_SESSIONS = 1000`）控制；LLM 并发门禁为 `TurnCoordinator`（容量 4 + 同会话串行锁 + 同会话到达顺序链），由 `router/turn.rs` 的 `TurnPermit::reserve` 与 `LlmEngine::enqueue_turn_ticket`（事件循环里同步占容量、同步发票据）同 `TurnPermit::acquire_session`（任务内先等前一条同会话回合结束再取串行锁，生成 `TurnSession` 并持有到回复落库完成）施加，取锁顺序即事件循环里的到达顺序，不受任务调度影响；TS 文本与 NapCat 在占位与排队之前先过准入同步门（bot 自身与音乐 bot 的消息、桥接文本、未触发文本、空文本、超限文本直接丢弃），语音桥回合在取得会话锁且 TTS 初始化成功后才标记正在产出；超时为常量：连接 10s、流空闲 30s、流总 300s。`omni_model`（`config/llm.rs`）开启时语音输入以 `input_audio` content 送入模型替代 STT，模型输出仍是文本流；该标志同时计入 `voice_features_enabled()`，bridge 就绪时 TS 文本消息随之经 `VoiceRouter` 路由。上下文的历史轮同样可携带音频：音频轮以 WAV 字节存入会话并缓存其 base64 编码，构建请求时按 `input_audio` content 回放；存储层以「一轮对话」（user+assistant 成对）为单位从最早逐轮丢弃，受 `max_context_turns`、单会话 `MAX_AUDIO_HISTORY_BYTES = 8 MiB` 与全局 `MAX_AUDIO_HISTORY_BYTES_TOTAL = 256 MiB` 约束，字节预算至少保留最新一轮、不会清空会话历史；装配层另按 `MAX_WIRE_AUDIO_BYTES = 2 MiB` 裁剪最早的音频轮以约束请求体（`max_context_turns` 管轮数、wire 预算管体积，文本轮不参与裁剪）。发送前按 `MAX_REQUEST_BODY_BYTES = 64 MiB` 预检序列化后的请求体，预检失败与网关 413、带体积文案的 400 归为同一类错误，仅在本轮尚未执行工具时，体积错误允许收缩历史并重试一次：删除实际请求历史中最早可删的音频轮及被裁剪隐藏的旧前缀，保留原请求中可见的文本与最新音频，保证重试请求变小；只剩一轮可见音频时按原错误失败；重试被取消时把删掉的轮次放回（取消的回合不回复也不落库，不该因此永久丢上下文），其他失败保留收缩，否则下一回合会重复同样的体积错误。工具执行后的模型错误直接结束本轮，避免重放已发生的操作。NapCat 会话不存音频，无轮可丢时按原错误失败。
-
-语音 API 在派发语音回合前占用最多 8 个在飞名额，覆盖 caller 查询、STT、等待 LLM 容量与会话锁以及回合本身；名额先于任何取消与顶替取得，满额就丢弃新段且不动旧回合。取消只丢弃必须立刻放下的等待（caller 查询、STT 请求、等锁），回合其余部分保持协作式取消，工具调用与「送达成功才落库」因此仍是原子的，TTS 收尾也一定跑到——回合 future 若在收尾前被丢弃，由 `TtsTurnRuntime` 的 Drop 兜底中止 synth 任务。TTS 播放尾（合成与出播放）不再占名额，它由单路 AudioOutput FIFO 串行化。STT 响应上限为 64 KiB，TTS 音频上限为 8 MiB，MiMo 同时限制 JSON/base64 与解码后的音频长度；HTTP 错误仅保留状态码。模型 API 只读取最多 64 KiB 的 400 响应体以判定体积错误，超限时保留已缓冲前缀继续分类；读取受既有空闲与总时限约束，413 直接归为体积错误，其他错误状态不读取正文。
-
-## 权限体系
-
-`permission.rs` 提供基于 `acl.toml`（`AclConfig`）的 `PermissionGate`：`get_allowed_tools()` 按服务组与频道组匹配规则求工具白名单（`*` 通配，配置键 `allowed_tools`，旧的 `allowed_skills` 仍可解析），`can_target()` 对受保护组（`protected_group_ids`）的交互须有 `can_target_admins` 授权。
-
-## 工具系统
-
-`tools.rs` 定义 `Tool` trait 与 `ToolRegistry` 注册表；每个 Tool 就是一个模型可调用的函数（`name` / `description` / `parameters` 直接生成 `tools` 字段的 schema），因此代码侧一律用工具一词，用户配置里的技能名保持不变。跨平台统一用 `UnifiedExecutionContext`（构造器 `for_ts` / `for_nc`）；工具实现 `execute`，按 `ctx.platform` 分支或使用 `unified_ts_adapter` 取 TS 适配器。注册表按 ACL 白名单生成工具 schema 并执行工具调用。工具按目录分为 `communication`、`information`、`moderation`、`music`（后端见 `tools/music/`：`ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`，默认注册表在 `DEFAULT_TOOLS`。
-
-## 层级规范
+## 分层规范
 
 - `main.rs` 只做初始化与装配，不含业务逻辑。
 - 适配器层（`adapter/`）负责连接生命周期：建连、断连检测、重连。
 - 路由层（`router/`）只做事件路由，不感知连接状态。
+
+## 入口流
+
+`main.rs` 装配 `AppConfig`、`PermissionGate`、`ToolRegistry` 与 `LlmEngine`，随后调用 `adapter::run()` 进入会话循环并监听 Ctrl-C / SIGTERM 优雅关闭。
+
+`adapter::run()` 先按需加载唤醒模型，再建 TeamSpeak 连接，按需启动 NapCat 与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。
+
+voice bridge 就绪时 TS 文本经 `VoiceRouter` 而非 `EventRouter` 路由；三条入站路径的回合最终都由 `LlmEngine` 处理，工具调用经 `ToolRegistry` 过 `PermissionGate`。细节见[会话生命周期与重连](subsystems/lifecycle.md)、[事件路由与回合准入](subsystems/routing.md)。
+
+## 子系统
+
+| 子系统 | 拥有 | 代码入口 |
+|---|---|---|
+| [会话生命周期与重连](subsystems/lifecycle.md) | 装配、连接生命周期、重连退避、就绪与关闭 | `main.rs`、`adapter.rs`、`adapter/lifecycle.rs` |
+| [TeamSpeak 无头客户端](subsystems/ts-client.md) | 客户端封装、身份、事件、音频发送、文本分片 | `adapter/headless.rs`、`adapter/headless/` |
+| [gRPC 语音桥](subsystems/voice-bridge.md) | 进程内语音服务、事件广播、bridge 就绪 | `adapter/headless/voice_service.rs`、`proto/voice.proto` |
+| [唤醒门](subsystems/wakeword.md) | OpenWakeWord 判定、说话人状态、插话触发 | `adapter/headless/wakeword.rs`、`adapter/headless/wakeword/` |
+| [语音回合](subsystems/voice-turns.md) | STT/TTS 流水线、回合准入与取消、出站音频 | `router/voice_router.rs`、`router/voice_turns.rs` |
+| [NapCat OneBot 11 适配器](subsystems/napcat.md) | WebSocket 连接、动作调用、上行事件解析 | `adapter/napcat.rs`、`adapter/napcat/` |
+| [事件路由与回合准入](subsystems/routing.md) | 路由循环、触发策略、回合骨架与门禁 | `router.rs`、`router/turn.rs`、`router/trigger.rs` |
+| [LLM 引擎与上下文](subsystems/llm.md) | provider、上下文与音频预算、工具循环 | `llm.rs`、`llm/` |
+| [模型可见提示词装配](subsystems/prompt.md) | 有序段落、变量解析、运行期上下文快照 | `prompt.rs`、`prompt/` |
+| [工具系统与权限门](subsystems/tools.md) | Tool 注册表、执行上下文、ACL 判定 | `tools.rs`、`tools/`、`permission.rs` |
+| [配置加载与日志](subsystems/config.md) | 配置文件与目录约定、日志初始化 | `config.rs`、`config/`、`log.rs` |
+
+## 新行为放哪里
+
+| 目标 | 归属 |
+|---|---|
+| 新增或修改模型可调用的工具 | `tools/` 下对应分组，注册表在 `tools.rs` |
+| 新增模型可见的提示词内容 | `prompt/sections.rs` 的段落常量 |
+| 新增配置项 | `config/` 下对应子模块，示例同步 `examples/config/` |
+| 新增 TeamSpeak 侧行为 | `adapter/headless/` 的对应子模块 |
+| 新增 QQ 侧动作或事件 | `adapter/napcat/` 的 `api` / `event` |
+| 改动回合的准入、取消或落库 | `router/turn.rs` 与 `llm/context.rs` |
+| 改动唤醒判定 | `adapter/headless/wakeword.rs` 与唤醒门的说话人状态 |
+| 新增跨适配器的协调逻辑 | `adapter/lifecycle.rs` |
 
 ## 组件图
 
@@ -69,5 +64,3 @@ flowchart TD
     vr --> llm
     llm --> tools["ToolRegistry"] --> gate["PermissionGate"]
 ```
-
-进一步阅读：开发流程见 [development.md](development.md)，测试约定见 [testing.md](testing.md)，编码反面准则见 [defensive-patterns.md](defensive-patterns.md)，CI/CD 见 [ci-cd.md](ci-cd.md)，决策记录见 [agent-notes.md](agent-notes.md)。

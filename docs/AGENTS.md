@@ -1,6 +1,6 @@
 # AGENTS.md — 文档标准
 
-本文定义 docs/ 文档体系的分层归属、写作规则与字数预算。写或改 docs/ 下任何文档前先读本文件；超限事实按「字数预算」的两步流程处理。
+本文定义 docs/ 文档体系的分层归属与写作规则。写或改 docs/ 下任何文档前先读本文件。
 
 ## 分层归属：一事实一归属
 
@@ -9,24 +9,27 @@
 | 层级 | 职责 | 不该放这里 |
 |---|---|---|
 | 根 `AGENTS.md` | 全局 standing orders：每个 session 都必须知道的规则与拓扑，每条一两行并链向归属地 | 展开细节、步骤式流程、任何从归属地重复的内容 |
-| `docs/architecture.md` | 有序拓扑：布局含义、入口流、关键代码路径、路由/适配器组成、LLM 引擎 | 逐模块明细（→ 源码）、开发流程、决策理由 |
+| `docs/architecture.md` | 索引与拓扑：分层规则、入口流、子系统一览、「新行为放哪里」与组件图 | 子系统契约与序列（→ `docs/subsystems/`）、逐模块明细（→ 源码）、决策理由 |
+| `docs/subsystems/` | 每个子系统一篇：契约、关键序列、不变量；规则见其 `AGENTS.md` | 决策理由（→ `.agents/notes/`）、用户可见配置与步骤（→ `website/`）、逐行实现细节（→ 源码） |
 | `docs/development.md` | 开发流程与环境：构建依赖、日常操作、git 约定、子代理与输出规范 | 架构图、测试约定、决策理由 |
 | `docs/testing.md` | 测试约定：单测摆放、`#[test]`/`#[tokio::test]` 标注、命名与断言、CI 测试门 | 测试用例誊写 |
 | `docs/defensive-patterns.md` | 编码反面与替代：FAILFAST、YAGNI、警告压制处置、类型安全优先 | 常规开发流程 |
 | `docs/ci-cd.md` | 各 GitHub Actions workflow 的触发条件与职责 | 架构决策 |
-| `docs/agent-notes.md` | 决策记录：为什么这么做、放弃了什么、如何验证；已落地条目用现在时描述现状 | 迁移计划、验收清单、spec 语气 |
+| `docs/release/` | 发版日志：每个 tag 的 Release 正文，按 git 提交归纳这一版面向读者的变化；格式与生命周期见其 `AGENTS.md` | 当前机制的说明（→ docs 各归属地）、下一版的计划 |
+| `.agents/notes/` | 决策记录：为什么这么做、放弃了什么、如何验证；路径编码生命周期与类目，已落地条目用现在时描述现状，规则见其 `README.md` | 迁移计划、验收清单、spec 语气 |
+| `.agents/skills/` | agent 侧复用工作流与判定标准（`SKILL.md`） | 产品与运行期契约（→ docs 或源码） |
 | 模块内 `AGENTS.md` | 目录级规则，如 `docs/AGENTS.md`、`src/config/AGENTS.md`、`website/AGENTS.md` | 仓库级规则（→ 根 AGENTS.md） |
 | `website/` | 面向最终用户的文档 | 内部实现、引用目录、决策历史 |
 
-放置速查：standing orders → 根 `AGENTS.md`；拓扑/关键路径 → `architecture.md`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；决策理由 → `agent-notes.md`；模块规则 → 模块内 `AGENTS.md`；用户文档 → `website/`。
+放置速查：standing orders → 根 `AGENTS.md`；拓扑与子系统索引 → `architecture.md`；子系统契约 → `subsystems/`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；发版日志 → `docs/release/`；决策理由 → `.agents/notes/`；复用流程 → `.agents/skills/`；模块规则 → 模块内 `AGENTS.md`；用户文档 → `website/`。
 
 ## 写作规则
 
-- **只写当前状态，不写变更史。** 不用「之前/现在/不再/曾改名/已迁移」等说法，不写 PR 或 commit 编号，只写当前机制本身；变更故事归 commit、PR 与 agent-notes。
+- **只写当前状态，不写变更史。** 不用「之前/现在/不再/曾改名/已迁移」等说法，不写 PR 或 commit 编号，只写当前机制本身；变更故事归 commit、PR、`.agents/notes/` 与 `docs/release/` 的发版日志。
 
 - **一段一物理行。** Markdown 每段只占一行，用编辑器软换行；代码块、表格、列表结构保持原格式。
 
-- **相对 Markdown 链接。** 引用其他文档用仓库内相对路径，禁用绝对路径与纯文件名参引。
+- **相对 Markdown 链接。** 引用其他文档用仓库内相对路径，禁用绝对路径与纯文件名参引；引用代码写模块路径与符号名（如 `src/router/turn.rs` 的 `TurnPermit::reserve`），不写 `file:line` 行号，行号漂移后没有门禁能发现。
 
 - **禁 emoji**，禁叙述历史与变更叙事（不写「我们后来发现…」这类过程性文字）。
 
