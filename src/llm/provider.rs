@@ -16,6 +16,7 @@ pub(crate) const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 pub(crate) const MAX_TOOL_ARGUMENT_BYTES_TOTAL: usize = 64 * 1024;
 const MAX_SSE_LINE_BYTES: usize = 256 * 1024;
 const MAX_SSE_STREAM_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 30;
 const STREAM_TOTAL_TIMEOUT_SECS: u64 = 300;
@@ -66,6 +67,25 @@ impl fmt::Display for PayloadTooLarge {
 }
 
 impl std::error::Error for PayloadTooLarge {}
+
+/// 超过读取上限的 400 错误体：只保留已缓冲的前缀供体积分类，正文本身不进错误文案。
+///
+/// 超限不等于放弃分类：体积文案落在已读取的前缀里时，仍要走体积错误这条自愈路径。
+#[derive(Debug)]
+struct OversizedErrorBody {
+    prefix: String,
+}
+
+impl fmt::Display for OversizedErrorBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "error response body exceeds the {MAX_ERROR_BODY_BYTES}-byte limit"
+        )
+    }
+}
+
+impl std::error::Error for OversizedErrorBody {}
 
 /// 发送前预检：序列化后的请求体超过上限就不发请求
 fn ensure_payload_within_limit(body_bytes: usize, limit: usize) -> Result<(), PayloadTooLarge> {
@@ -363,6 +383,72 @@ where
     }
 }
 
+async fn read_error_body<S, B, E>(
+    stream: &mut S,
+    idle_timeout: Duration,
+    total_deadline: tokio::time::Instant,
+) -> Result<String>
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    let mut body = Vec::new();
+    loop {
+        match poll_stream(stream, idle_timeout, total_deadline).await {
+            StreamPoll::Item(Ok(chunk)) => {
+                let chunk = chunk.as_ref();
+                if chunk.len() > MAX_ERROR_BODY_BYTES - body.len() {
+                    return Err(OversizedErrorBody {
+                        prefix: String::from_utf8_lossy(&body).into_owned(),
+                    }
+                    .into());
+                }
+                body.extend_from_slice(chunk);
+            }
+            StreamPoll::Item(Err(_)) => anyhow::bail!("failed to read error response body"),
+            StreamPoll::End => return Ok(String::from_utf8_lossy(&body).into_owned()),
+            StreamPoll::IdleTimeout => {
+                anyhow::bail!("error response body reached the idle timeout")
+            }
+            StreamPoll::TotalTimeout => {
+                anyhow::bail!("error response body reached the total timeout")
+            }
+        }
+    }
+}
+
+async fn http_response_error(
+    response: reqwest::Response,
+    idle_timeout: Duration,
+    total_deadline: tokio::time::Instant,
+) -> anyhow::Error {
+    let status = response.status();
+    if let Some(error) = classify_payload_too_large(status, "") {
+        return error.into();
+    }
+    // 仅 400 需要读取响应体辨认体积错误，其他状态立即释放连接。
+    if status == StatusCode::BAD_REQUEST {
+        match read_error_body(&mut response.bytes_stream(), idle_timeout, total_deadline).await {
+            Ok(body) => {
+                if let Some(error) = classify_payload_too_large(status, &body) {
+                    return error.into();
+                }
+            }
+            Err(error) => {
+                // 正文超限时仍用已缓冲前缀判定体积错误，不让收缩重试被截断白白跳过
+                if let Some(oversized) = error.downcast_ref::<OversizedErrorBody>() {
+                    if let Some(classified) = classify_payload_too_large(status, &oversized.prefix)
+                    {
+                        return classified.into();
+                    }
+                }
+                return error.context(format!("LLM API error: HTTP {status}"));
+            }
+        }
+    }
+    anyhow::anyhow!("LLM API error: HTTP {status}")
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn chat_completion_stream(
@@ -414,13 +500,7 @@ impl LlmProvider for OpenAiProvider {
         };
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            // 响应体只用于体积类归类，读不到就按状态码处理
-            let body = resp.text().await.unwrap_or_default();
-            if let Some(error) = classify_payload_too_large(status, &body) {
-                return Err(error.into());
-            }
-            return Err(anyhow::anyhow!("LLM API error: HTTP {status}"));
+            return Err(http_response_error(resp, stream_idle_timeout, total_deadline).await);
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -605,6 +685,171 @@ fn finalize_tool_calls(builders: &mut BTreeMap<usize, ToolCallBuilder>) -> Resul
 mod tests {
     use super::*;
     use reqwest::header::AUTHORIZATION;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn error_response(status: u16, body: &[u8]) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_vec();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(socket.read_u8().await.unwrap());
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        let response = Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn error_body_stops_at_idle_deadline() {
+        let mut stream = futures_util::stream::iter([Ok::<_, ()>(b"partial".to_vec())])
+            .chain(futures_util::stream::pending());
+        let error = read_error_body(
+            &mut stream,
+            Duration::from_millis(20),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("idle timeout"));
+        assert!(!error.to_string().contains("partial"));
+    }
+
+    #[tokio::test]
+    async fn error_body_stops_at_total_deadline() {
+        let mut stream = Box::pin(futures_util::stream::unfold((), |()| async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Some((Ok::<_, ()>(vec![b'x']), ()))
+        }));
+        let error = read_error_body(
+            &mut stream,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("total timeout"));
+    }
+
+    #[tokio::test]
+    async fn error_body_rejects_chunked_overflow_without_waiting_for_end() {
+        let mut stream = futures_util::stream::iter([
+            Ok::<_, ()>(vec![b'x'; MAX_ERROR_BODY_BYTES / 2]),
+            Ok(vec![b'x'; MAX_ERROR_BODY_BYTES / 2 + 1]),
+        ])
+        .chain(futures_util::stream::pending());
+        let error = read_error_body(
+            &mut stream,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("65536-byte limit"));
+    }
+
+    #[tokio::test]
+    async fn error_body_accepts_exact_limit() {
+        let mut stream =
+            futures_util::stream::iter([Ok::<_, ()>(vec![b'x'; MAX_ERROR_BODY_BYTES])]);
+        let body = read_error_body(
+            &mut stream,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body.len(), MAX_ERROR_BODY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn http_400_body_preserves_payload_classification_without_disclosure() {
+        for (body, payload_error) in [
+            ("request entity too large; secret-value", true),
+            ("invalid model; secret-value", false),
+        ] {
+            let response = error_response(400, body.as_bytes()).await;
+            let error = http_response_error(
+                response,
+                Duration::from_secs(5),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await;
+
+            assert_eq!(
+                error.downcast_ref::<PayloadTooLarge>().is_some(),
+                payload_error
+            );
+            assert!(error.to_string().contains("400"));
+            assert!(!format!("{error:#}").contains("secret-value"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_413_needs_no_body_or_remaining_deadline_for_classification() {
+        let response = error_response(413, b"secret-value").await;
+        let error =
+            http_response_error(response, Duration::ZERO, tokio::time::Instant::now()).await;
+
+        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(!format!("{error:#}").contains("secret-value"));
+    }
+
+    #[tokio::test]
+    async fn http_400_rejects_oversized_body_without_disclosure() {
+        let response = error_response(400, &vec![b'x'; MAX_ERROR_BODY_BYTES + 1]).await;
+        let error = http_response_error(
+            response,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(error.to_string().contains("400"));
+        assert!(format!("{error:#}").contains("65536-byte limit"));
+        assert!(error.downcast_ref::<PayloadTooLarge>().is_none());
+    }
+
+    #[tokio::test]
+    async fn http_400_oversized_body_still_classifies_the_buffered_prefix() {
+        // 体积文案落在前 64 KiB，正文其余部分超限：分类不能因为截断而丢失
+        let mut body = b"request entity too large".to_vec();
+        body.resize(MAX_ERROR_BODY_BYTES + 1, b'x');
+        let response = error_response(400, &body).await;
+        let error = http_response_error(
+            response,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(error.to_string().contains("400"));
+        assert!(!format!("{error:#}").contains("request entity too large"));
+    }
 
     #[test]
     fn omits_authorization_header_for_empty_api_key() {

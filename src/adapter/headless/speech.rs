@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use audiopus::coder::Decoder;
 use audiopus::{Channels, SampleRate};
 use reqwest::multipart::{Form, Part};
-use reqwest::Client;
+use reqwest::{Client, Response};
 use serde_json::Value;
 use tracing::{debug, error};
 
@@ -253,6 +253,39 @@ impl OpusSttPipeline {
     }
 }
 
+// STT 输入最长 12 秒；64 KiB 已容纳远超正常转写长度的 JSON 元数据。
+const MAX_STT_RESPONSE_BYTES: usize = 64 * 1024;
+// TTS 按最多 28 字句段请求；8 MiB 可容纳约 43 秒 48 kHz 双声道 PCM WAV。
+const MAX_TTS_AUDIO_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TTS_BASE64_BYTES: usize = MAX_TTS_AUDIO_BYTES.div_ceil(3) * 4;
+const MAX_MIMO_RESPONSE_BYTES: usize = MAX_TTS_BASE64_BYTES + 64 * 1024;
+
+/// 不信任 Content-Length：在每块加入缓冲之前检查累计大小。
+/// `api` 只进错误文案：三类语音请求共用这条读取路径，失败时要能分辨是谁
+async fn read_speech_response(
+    mut response: Response,
+    max_bytes: usize,
+    api: &str,
+) -> Result<Vec<u8>> {
+    if !response.status().is_success() {
+        anyhow::bail!("{api} request failed: status {}", response.status());
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        anyhow::bail!("{api} response exceeds {max_bytes} byte limit");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > max_bytes - body.len() {
+            anyhow::bail!("{api} response exceeds {max_bytes} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 pub struct OpenAiSpeechProvider {
     client: Client,
     config: std::sync::Arc<AppConfig>,
@@ -314,12 +347,8 @@ impl OpenAiSpeechProvider {
             request = request.bearer_auth(api_key);
         }
         let resp = request.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("stt request failed: {status} {err}"));
-        }
-        let body = resp.text().await?;
+        let body = read_speech_response(resp, MAX_STT_RESPONSE_BYTES, "stt").await?;
+        let body = String::from_utf8(body).context("STT response is not UTF-8")?;
         let text = parse_stt_text(&body);
         if text.is_empty() {
             return Err(anyhow!("stt returned empty text"));
@@ -366,17 +395,7 @@ impl OpenAiSpeechProvider {
             request = request.bearer_auth(api_key);
         }
         let resp = request.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err = resp.text().await.unwrap_or_default();
-            error!(
-                "tts unavailable: request failed with status {}: {}",
-                status, err
-            );
-            return Err(anyhow!("tts request failed: status {} - {}", status, err));
-        }
-
-        Ok(resp.bytes().await?.to_vec())
+        read_speech_response(resp, MAX_TTS_AUDIO_BYTES, "tts").await
     }
 
     /// MiMo TTS：使用 /chat/completions 的 messages + audio 字段
@@ -415,21 +434,10 @@ impl OpenAiSpeechProvider {
         }
         let resp = request.send().await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err = resp.text().await.unwrap_or_default();
-            error!("mimo tts request failed with status {}: {}", status, err);
-            return Err(anyhow!(
-                "mimo tts request failed: status {} - {}",
-                status,
-                err
-            ));
-        }
-
-        // MiMo TTS 返回含 base64 编码音频数据的 JSON 响应
-        let resp_text = resp.text().await?;
-        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
-            .context("Failed to parse MiMo TTS response as JSON")?;
+        // MiMo TTS 返回含 base64 编码音频数据的 JSON 响应。
+        let body = read_speech_response(resp, MAX_MIMO_RESPONSE_BYTES, "mimo tts").await?;
+        let resp_json: serde_json::Value =
+            serde_json::from_slice(&body).context("Failed to parse MiMo TTS response as JSON")?;
 
         // 从 choices[0].message.audio.data 提取 base64 音频数据
         let audio_data = resp_json
@@ -441,11 +449,17 @@ impl OpenAiSpeechProvider {
             .and_then(|d| d.as_str())
             .context("MiMo TTS response missing audio data field")?;
 
-        // 将 base64 解码为原始音频字节
+        if audio_data.len() > MAX_TTS_BASE64_BYTES {
+            anyhow::bail!("MiMo TTS audio exceeds {MAX_TTS_AUDIO_BYTES} byte limit");
+        }
+        // 将 base64 解码为原始音频字节。
         let audio_bytes = base64::prelude::BASE64_STANDARD
             .decode(audio_data)
             .context("Failed to decode base64 audio data")?;
 
+        if audio_bytes.len() > MAX_TTS_AUDIO_BYTES {
+            anyhow::bail!("MiMo TTS audio exceeds {MAX_TTS_AUDIO_BYTES} byte limit");
+        }
         Ok(audio_bytes)
     }
 }
@@ -671,6 +685,154 @@ mod tests {
     use audiopus::{Channels, SampleRate};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    async fn mock_speech_server(
+        status: &str,
+        chunk: Vec<u8>,
+        count: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let received = socket.read(&mut buffer).await.unwrap();
+                assert!(received > 0);
+                request.extend_from_slice(&buffer[..received]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let headers = format!(
+                "HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            for _ in 0..count {
+                if socket
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn speech_provider(base_url: String, provider: &str) -> super::OpenAiSpeechProvider {
+        let mut config = crate::config::AppConfig::default();
+        config.headless.stt.enabled = true;
+        config.headless.stt.base_url = base_url.clone();
+        config.headless.tts.enabled = true;
+        config.headless.tts.base_url = base_url;
+        config.headless.tts.provider = provider.to_string();
+        super::OpenAiSpeechProvider {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            config: std::sync::Arc::new(config),
+            tts_style_prompt: "style".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_apis_reject_chunked_responses_over_their_byte_limits() {
+        for (api, limit) in [
+            ("stt", super::MAX_STT_RESPONSE_BYTES),
+            ("openai", super::MAX_TTS_AUDIO_BYTES),
+            ("mimo", super::MAX_MIMO_RESPONSE_BYTES),
+        ] {
+            let chunk = vec![b'x'; 16 * 1024];
+            let (url, server) =
+                mock_speech_server("200 OK", chunk.clone(), limit / chunk.len() + 1).await;
+            let provider = speech_provider(url, if api == "mimo" { "mimo" } else { "openai" });
+            let error = if api == "stt" {
+                provider.transcribe_wav(vec![0; 44]).await.unwrap_err()
+            } else {
+                provider.synthesize("hello").await.unwrap_err()
+            };
+            assert!(error.to_string().contains("byte limit"), "{api}: {error}");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mimo_rejects_decoded_audio_over_the_limit_at_base64_boundary() {
+        use base64::Engine;
+        // 上限和上限 + 1 的 base64 长度相同，仍须校验实际解码长度。
+        let encoded =
+            base64::prelude::BASE64_STANDARD.encode(vec![0u8; super::MAX_TTS_AUDIO_BYTES + 1]);
+        assert_eq!(encoded.len(), super::MAX_TTS_BASE64_BYTES);
+        let body = serde_json::json!({
+            "choices": [{"message": {"audio": {"data": encoded}}}]
+        })
+        .to_string()
+        .into_bytes();
+        let (url, server) = mock_speech_server("200 OK", body, 1).await;
+        let error = speech_provider(url, "mimo")
+            .synthesize("hello")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("audio exceeds"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn speech_api_errors_do_not_expose_response_bodies() {
+        for api in ["stt", "openai", "mimo"] {
+            let (url, server) = mock_speech_server(
+                "401 Unauthorized",
+                b"secret-provider-diagnostic".to_vec(),
+                1,
+            )
+            .await;
+            let provider = speech_provider(url, if api == "mimo" { "mimo" } else { "openai" });
+            let error = if api == "stt" {
+                provider.transcribe_wav(vec![0; 44]).await.unwrap_err()
+            } else {
+                provider.synthesize("hello").await.unwrap_err()
+            };
+            assert!(error.to_string().contains("401"), "{api}: {error}");
+            assert!(!format!("{error:#}").contains("secret-provider-diagnostic"));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_apis_preserve_valid_responses() {
+        for api in ["stt", "openai", "mimo"] {
+            let body = match api {
+                "stt" => br#"{"text":"hello"}"#.to_vec(),
+                "mimo" => br#"{"choices":[{"message":{"audio":{"data":"UklGRg=="}}}]}"#.to_vec(),
+                _ => b"RIFF".to_vec(),
+            };
+            let (url, server) = mock_speech_server("200 OK", body, 1).await;
+            let provider = speech_provider(url, if api == "mimo" { "mimo" } else { "openai" });
+            if api == "stt" {
+                assert_eq!(provider.transcribe_wav(vec![0; 44]).await.unwrap(), "hello");
+            } else {
+                assert_eq!(provider.synthesize("hello").await.unwrap(), b"RIFF");
+            }
+            server.await.unwrap();
+        }
+    }
 
     #[test]
     fn explicit_speech_endpoint_does_not_inherit_llm_key() {

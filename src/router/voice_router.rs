@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
@@ -215,6 +215,9 @@ struct TtsTurnRuntime {
     /// 本回合各流音频 job 的播放取消位（回合创建即持有）：abort 先置位，
     /// 已交给消费者播放的音频同样停声
     playback_cancel: Arc<AtomicBool>,
+    /// 正常收尾标记：`finish` 置位后剩余合成与播放交给 synth 任务自己跑完，
+    /// Drop 不再中止它们
+    detached: bool,
 }
 
 impl TtsTurnRuntime {
@@ -226,12 +229,14 @@ impl TtsTurnRuntime {
     ///
     /// synth 的 `push_encoded` 受播放实时性背压，等待任务结束等于等待剩余音频播完；
     /// 任务在句段通道关闭后 finish 本流会话（不置 cancel），消费者播完已入队音频后自然收尾。
-    fn finish(self) {
+    fn finish(mut self) {
+        self.detached = true;
         self.state.close_stream();
     }
 
     /// 取消：先置播放取消位，再 abort 全部 synth 任务；未收尾的会话随任务 future 一起 drop
-    async fn abort(self) {
+    async fn abort(mut self) {
+        self.detached = true;
         self.playback_cancel.store(true, Ordering::SeqCst);
         self.state.close_stream();
         let tasks: Vec<_> = self
@@ -246,6 +251,31 @@ impl TtsTurnRuntime {
         }
         for task in tasks {
             let _ = task.await;
+        }
+    }
+}
+
+impl Drop for TtsTurnRuntime {
+    /// 兜底收尾：回合 future 在 `finish`/`abort` 之前被丢弃（JoinSet 收尾、任务被中止）时，
+    /// 不留游离的 synth 任务与播放会话。
+    ///
+    /// 没有这一步，synth 任务会停在句段通道上继续持有会话与回合句柄，
+    /// 出站 job 只能等段间空闲超时收敛，回合名额也随任务一起滞留。
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        self.playback_cancel.store(true, Ordering::SeqCst);
+        self.state.close_stream();
+        let tasks: Vec<_> = self
+            .state
+            .tasks
+            .lock()
+            .expect("tts tasks poisoned")
+            .drain(..)
+            .collect();
+        for task in tasks {
+            task.abort();
         }
     }
 }
@@ -275,6 +305,8 @@ pub struct VoiceRouter {
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
+    /// 完整语音回合在飞上限，覆盖 caller 查询与 STT，不只限制待处理队列
+    audio_turn_slots: Arc<Semaphore>,
     bridge_state: BridgeReadiness,
     /// 统一出站：TTS/clip/外部流 FIFO；并发由 TurnCoordinator + 本层队列承担
     audio_output: AudioOutput,
@@ -310,6 +342,42 @@ fn cancel_turn(turns: &TurnRegistry, turn: &Arc<ActiveTurn>) {
     turn.cancel.cancel();
     turn.playback_cancel().store(true, Ordering::SeqCst);
     turns.remove_turn(turn);
+}
+
+/// 占一个在飞名额：满额返回 None，调用点据此只丢新段。
+///
+/// 必须先于任何取消/顶替调用：先取消再占名额会出现「旧回合已取消、新段又被拒」，
+/// 两条回合一起丢。
+fn try_reserve_audio_slot(slots: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    slots.clone().try_acquire_owned().ok()
+}
+
+/// 派发已占名额的回合任务；名额随任务结束（正常返回或被取消）释放
+fn spawn_audio_turn(
+    tasks: &mut JoinSet<()>,
+    permit: OwnedSemaphorePermit,
+    turn: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    tasks.spawn(async move {
+        let _permit = permit;
+        turn.await;
+    });
+}
+
+/// 可取消的等待：取消时丢弃内层 future，连同它持有的 HTTP 请求、回合占位或会话锁一起释放。
+///
+/// 只用在必须立刻放下的等待上（caller 查询、STT、等会话锁）；回合其余部分保持协作式取消，
+/// 让工具调用与「送达成功才落库」各自保持原子，也保证 TTS 收尾（`TtsTurnRuntime::abort`）
+/// 一定跑到，不会留下仍在发请求的 synth 任务。
+async fn cancellable_turn_step<T>(
+    cancel: &CancellationToken,
+    step: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        value = step => Some(value),
+    }
 }
 
 /// 新回合顶替同 clid 旧回合时的取消分工（`begin_turn` 返回旧条目后调用）。
@@ -414,6 +482,7 @@ impl VoiceRouter {
             registry,
             ts_adapter,
             speech_provider,
+            audio_turn_slots: Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT)),
             bridge_state,
             audio_output,
             voice_audio,
@@ -938,6 +1007,12 @@ impl VoiceRouter {
         // 唤醒门开启 = 存在插话机制：收帧路径的命中插话与第一道 busy 闸都由它提供。
         // 第二道闸据此决定产出中的旧回合交给谁取消，所以求值一次、两处共用
         let barge_in_available = self.wakeword.is_some();
+        // 名额先于任何取消与插话：满额时既不取消产出中的旧回合，也不顶替未产出的旧回合，
+        // 只丢这一条新段。先取消再占名额会出现「旧回合已取消、新段又被拒」两条一起丢
+        let Some(permit) = try_reserve_audio_slot(&self.audio_turn_slots) else {
+            warn!(clid, "voice API capacity full; dropping audio chunk");
+            return Ok(());
+        };
         // 唤醒门先于 gRPC 解析：关门丢弃不产生解析/查询开销
         if barge_in_available {
             // 「忙」与插话取消目标取自同一次快照：出站音频只有一路，产出中的回合就是通道持有者。
@@ -1007,15 +1082,11 @@ impl VoiceRouter {
         let active = Arc::new(ActiveTurn::new());
         // 第二道闸：同说话人可能还有尚未进入产出的旧回合（正在解析/STT）。它不在「忙」的视野里，
         // 第一道闸看不到它，却已持有回合状态与播放取消句柄；取消与保留的分工见
-        // `cancel_displaced_turns`
-        cancel_displaced_turns(
-            &self.turns,
-            self.turns.begin_turn(clid, &active),
-            barge_in_available,
-        );
+        // `cancel_displaced_turns`。先登记拿到旧条目，等名额到手（上面已占）再决定取消
+        let displaced = self.turns.begin_turn(clid, &active);
         let router = self.clone();
         let channel = channel.clone();
-        turn_tasks.spawn(async move {
+        spawn_audio_turn(turn_tasks, permit, async move {
             if let Err(error) = router
                 .run_admitted_utterance(channel, active, audio, chunk)
                 .await
@@ -1023,6 +1094,7 @@ impl VoiceRouter {
                 error!("Voice turn failed: {error}");
             }
         });
+        cancel_displaced_turns(&self.turns, displaced, barge_in_available);
         Ok(())
     }
 
@@ -1076,9 +1148,21 @@ impl VoiceRouter {
         audio: voicev1::AudioFrameEvent,
         chunk: SpeechChunk,
     ) -> Result<()> {
-        let ctx = self
-            .resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name)
-            .await?;
+        let ctx = match cancellable_turn_step(
+            &active.cancel,
+            self.resolve_audio_chunk_caller(&audio, chunk.speaker_client_id, &chunk.speaker_name),
+        )
+        .await
+        {
+            Some(ctx) => ctx?,
+            None => {
+                debug!(
+                    clid = chunk.speaker_client_id,
+                    "voice turn cancelled during caller lookup"
+                );
+                return Ok(());
+            }
+        };
         if self.config.is_music_bot_name(&ctx.caller_name) {
             return Ok(());
         }
@@ -1093,7 +1177,17 @@ impl VoiceRouter {
             return Ok(());
         };
         let wav = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
-        let raw_text = match speech_provider.transcribe_wav(wav).await {
+        // 取消即丢弃 STT 请求 future：不让在飞转写占着名额空转
+        let Some(transcription) =
+            cancellable_turn_step(&active.cancel, speech_provider.transcribe_wav(wav)).await
+        else {
+            debug!(
+                clid = chunk.speaker_client_id,
+                "voice turn cancelled during stt; dropping the request"
+            );
+            return Ok(());
+        };
+        let raw_text = match transcription {
             Ok(t) => t,
             Err(e) => {
                 warn!("stt failed for {}: {}", chunk.speaker_name, e);
@@ -1129,7 +1223,19 @@ impl VoiceRouter {
             return Ok(());
         };
         let ticket = self.llm.enqueue_turn_ticket(&session_source);
-        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await;
+        // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
+        let Some(session) = cancellable_turn_step(
+            &active.cancel,
+            acquire_voice_turn_session(permit, &self.llm, &session_source, ticket),
+        )
+        .await
+        else {
+            debug!(
+                caller_uid = %ctx.caller_uid,
+                "voice turn cancelled while waiting for the LLM slot"
+            );
+            return Ok(());
+        };
         let tts_runtime = if self.is_tts_effectively_enabled() {
             // omni 与 STT 同属语音回合：挂工具调用提示音，走 STT 路径同一块反馈基建
             Some(self.build_tts_callbacks(active, true).await?)
@@ -1226,7 +1332,19 @@ impl VoiceRouter {
         };
 
         let ticket = self.llm.enqueue_turn_ticket(&session_source);
-        let session = acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await;
+        // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
+        let Some(session) = cancellable_turn_step(
+            &active.cancel,
+            acquire_voice_turn_session(permit, &self.llm, &session_source, ticket),
+        )
+        .await
+        else {
+            debug!(
+                caller_uid = %ctx.caller_uid,
+                "voice turn cancelled while waiting for the LLM slot"
+            );
+            return Ok(());
+        };
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
         } else {
@@ -1413,6 +1531,7 @@ impl VoiceRouter {
             },
             state,
             playback_cancel,
+            detached: false,
         })
     }
 
@@ -1574,6 +1693,161 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn audio_api_capacity_rejects_excess_work_before_polling() {
+        let slots = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
+        let mut tasks = JoinSet::new();
+        for _ in 0..AUDIO_MAX_IN_FLIGHT {
+            let permit = try_reserve_audio_slot(&slots).expect("slot");
+            spawn_audio_turn(&mut tasks, permit, std::future::pending());
+        }
+        assert!(try_reserve_audio_slot(&slots).is_none());
+        // 被拒的新段连 future 都不会被 poll
+        let polled = Arc::new(AtomicBool::new(false));
+        let attempted = polled.clone();
+        if let Some(permit) = try_reserve_audio_slot(&slots) {
+            spawn_audio_turn(&mut tasks, permit, async move {
+                attempted.store(true, Ordering::SeqCst)
+            });
+        }
+        assert!(!polled.load(Ordering::SeqCst));
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        assert_eq!(slots.available_permits(), AUDIO_MAX_IN_FLIGHT);
+    }
+
+    #[tokio::test]
+    async fn cancelling_slow_audio_api_work_drops_request_and_releases_capacity() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut tasks = JoinSet::new();
+        let cancel = CancellationToken::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let request = DropMarker(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let permit = try_reserve_audio_slot(&slots).expect("slot");
+        let step_cancel = cancel.clone();
+        let cleanup = cleaned.clone();
+        spawn_audio_turn(&mut tasks, permit, async move {
+            started.send(()).unwrap();
+            let _ = cancellable_turn_step(&step_cancel, async move {
+                let _request = request;
+                std::future::pending::<()>().await;
+            })
+            .await;
+            // 回合自己的收尾（TTS abort、放行后继票据之类）必须照常跑到：
+            // 取消只丢等待中的那个 future，不能把整条回合任务砍掉
+            cleanup.store(true, Ordering::SeqCst);
+        });
+        ready.await.unwrap();
+        assert_eq!(slots.available_permits(), 0);
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the in-flight request future must be dropped on cancel"
+        );
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "cancellation must unwind the turn, not drop it"
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    /// 满额时新段连登记都不做，更不取消旧回合：否则旧回合被取消、新段又被拒，两条一起丢
+    #[tokio::test]
+    async fn full_capacity_drops_the_new_segment_without_touching_the_old_turn() {
+        let slots = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
+        let held: Vec<_> = (0..AUDIO_MAX_IN_FLIGHT)
+            .map(|_| try_reserve_audio_slot(&slots).expect("slot"))
+            .collect();
+        let turns = TurnRegistry::default();
+        let old = Arc::new(ActiveTurn::new());
+        old.mark_producing();
+        turns.begin_turn(7, &old);
+
+        // admit_audio_chunk 的第一步：占不到名额就直接丢段，displaced 仍是未处理状态
+        assert!(try_reserve_audio_slot(&slots).is_none());
+        assert!(
+            !old.cancel.is_cancelled(),
+            "the producing turn must keep the floor"
+        );
+        assert_eq!(turns.producing_turns().len(), 1);
+
+        // 名额归还后同一 clid 的新段照常顶替旧回合
+        drop(held);
+        let permit = try_reserve_audio_slot(&slots).expect("slot after release");
+        let new = Arc::new(ActiveTurn::new());
+        assert_eq!(turns.begin_turn(7, &new).len(), 1);
+        drop(permit);
+    }
+
+    /// 造一份能开流的 TTS 运行时：消费者随测试任务活着，会话才入得了队
+    fn tts_runtime_for_test() -> (TtsTurnRuntime, mpsc::Sender<(Vec<u8>, i32)>) {
+        let bus = crate::adapter::headless::audio_output::AudioBus::new();
+        let (sink_tx, sink_rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        let keepalive_sink = sink_tx.clone();
+        let consumer = bus.consumer;
+        tokio::spawn(async move { consumer.run(sink_tx).await });
+        let keepalive = Arc::new(ActiveTurn::new());
+        let playback_cancel = keepalive.playback_cancel();
+        let state = test_tts_state(bus.output, keepalive, playback_cancel.clone());
+        let runtime = TtsTurnRuntime {
+            callbacks: StreamCallbacks::default(),
+            playback_cancel,
+            state,
+            detached: false,
+        };
+        drop(sink_rx);
+        (runtime, keepalive_sink)
+    }
+
+    /// 兜底：回合 future 被丢弃（JoinSet 收尾、任务中止）时必须中止 synth 任务并停声，
+    /// 否则任务停在句段通道上，会话与出站 job 只能等空闲超时收敛
+    #[tokio::test]
+    async fn dropping_the_tts_runtime_tears_down_its_synth_tasks() {
+        let (runtime, _sink) = tts_runtime_for_test();
+        let state = runtime.state.clone();
+        state.ensure_stream().await;
+        assert_eq!(
+            state.tasks.lock().unwrap().len(),
+            1,
+            "setup: one synth task"
+        );
+        drop(runtime);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&state) > 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the synth task must be aborted on drop");
+        assert!(state.playback_cancel.load(Ordering::SeqCst));
+    }
+
+    /// 正常收尾相反：`finish` 只关流，synth 任务自己收尾（不是被 abort），也不置播放取消位
+    #[tokio::test]
+    async fn finishing_the_tts_runtime_lets_the_synth_task_end_on_its_own() {
+        let (runtime, _sink) = tts_runtime_for_test();
+        let state = runtime.state.clone();
+        state.ensure_stream().await;
+        let task = state.tasks.lock().unwrap().pop().expect("synth task");
+
+        runtime.finish();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("finish must close the stream so the synth task can end");
+        assert!(result.is_ok(), "finish must not abort the synth task");
+        assert!(!state.playback_cancel.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1944,6 +2218,7 @@ mod tests {
             callbacks: StreamCallbacks::default(),
             state: state.clone(),
             playback_cancel: playback_cancel.clone(),
+            detached: false,
         };
         runtime.finish();
 
@@ -1973,6 +2248,7 @@ mod tests {
             callbacks: StreamCallbacks::default(),
             state: state.clone(),
             playback_cancel: playback_cancel.clone(),
+            detached: false,
         };
         runtime.abort().await;
 
