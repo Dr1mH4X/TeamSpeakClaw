@@ -53,6 +53,8 @@ const EMBEDDING_MODEL_FILE: &str = "embedding_model.onnx";
 
 /// 说话人会话池上限：超出按最久未见驱逐（对齐 voice_replay 的 LRU 上限）
 const MAX_SPEAKERS: usize = 6;
+/// 被模型池驱逐后的轻量状态上限，保留在飞裁决与开门窗口
+const MAX_RETAINED_SPEAKERS: usize = 256;
 /// 空闲驱逐下限：无音频的会话移除，重连后自然重建
 const MIN_IDLE_EVICT_AFTER: Duration = Duration::from_secs(300);
 /// 驱逐余量：空闲驱逐不得早于开门窗口结束后 60s，避免 `window_secs` 取上限时窗口尾被截断
@@ -247,12 +249,19 @@ pub struct WakewordGate {
     /// 空闲驱逐阈值：`MIN_IDLE_EVICT_AFTER` 与 `window + IDLE_EVICT_MARGIN` 取大
     idle_evict_after: Duration,
     speakers: HashMap<u32, SpeakerSession>,
+    retained: HashMap<u32, SpeakerState>,
     make_detector: DetectorFactory,
 }
 
 /// per-clid 会话：一条推理链与它上面累计的开门窗口、本条 utterance 的命中状态
 struct SpeakerSession {
     detector: Box<dyn Detector>,
+    chunk_offset: u64,
+    state: SpeakerState,
+}
+
+/// 推理实例被驱逐后仍须保留的时间轴、窗口与在飞语句
+struct SpeakerState {
     /// 不足一块 1280 采样的余量，跨 utterance 携带
     acc: Vec<f32>,
     last_wake: Option<Instant>,
@@ -263,7 +272,7 @@ struct SpeakerSession {
     utterance: UtteranceState,
 }
 
-impl SpeakerSession {
+impl SpeakerState {
     /// 最近一次命中还在 `window` 内
     fn window_open(&self, now: Instant, window: Duration) -> bool {
         self.last_wake
@@ -365,6 +374,7 @@ impl WakewordGate {
             window,
             idle_evict_after: MIN_IDLE_EVICT_AFTER.max(window + IDLE_EVICT_MARGIN),
             speakers: HashMap::new(),
+            retained: HashMap::new(),
             make_detector: Box::new(make_detector),
         }
     }
@@ -379,7 +389,11 @@ impl WakewordGate {
         let window = self.window;
         let frame_ms = frame.pcm16.len() as u64 * 1000 / SAMPLE_RATE_16K_HZ;
         self.evict_idle(now);
-        let session = self.session_for(clid, now);
+        let SpeakerSession {
+            detector,
+            chunk_offset,
+            state: session,
+        } = self.session_for(clid, now);
         if frame.utterance_started {
             // 新的 utterance：清掉上一段的命中累计，避免独占判定串到新一段；开门窗口不受影响
             session.utterance = UtteranceState::default();
@@ -409,7 +423,7 @@ impl WakewordGate {
             let chunk_abs_start = fed_samples_before - carry + consumed;
             let chunk: Vec<f32> = session.acc.drain(..CHUNK_SIZE).collect();
             consumed += CHUNK_SIZE;
-            let detection = session.detector.detect(chunk);
+            let detection = detector.detect(chunk);
             if detection.detected {
                 detected = true;
                 probability = detection.probability;
@@ -434,7 +448,8 @@ impl WakewordGate {
             .utterance
             .note_frame(fed_samples_before, frame.voiced, frame_ms);
         let open = detected || session.window_open(now, window);
-        let calibration = calibration_stats(&session.detector.score_history());
+        let mut calibration = calibration_stats(&detector.score_history());
+        calibration.first_chunk_index += *chunk_offset;
         WakeEvent {
             verdict: GateVerdict {
                 open,
@@ -456,7 +471,7 @@ impl WakewordGate {
     pub fn take_utterance_verdict(&mut self, clid: u32, now: Instant) -> WakeVerdict {
         let window = self.window;
         self.evict_idle(now);
-        let Some(session) = self.speakers.get_mut(&clid) else {
+        let Some(session) = self.speaker_state_mut(clid) else {
             return WakeVerdict::absent();
         };
         let window_open = session.window_open(now, window);
@@ -475,40 +490,67 @@ impl WakewordGate {
     /// 从确认时刻续上开门窗口：确认音代表「我在听」，用户接话不必抢在原窗口到期前。
     /// 只刷新已存在的会话——能播确认音意味着该 clid 刚被喂过，不在此新建状态
     pub fn refresh_window(&mut self, clid: u32, now: Instant) {
-        if let Some(session) = self.speakers.get_mut(&clid) {
+        if let Some(session) = self.speaker_state_mut(clid) {
             session.last_seen = now;
             session.last_wake = Some(now);
         }
     }
 
+    fn speaker_state_mut(&mut self, clid: u32) -> Option<&mut SpeakerState> {
+        self.speakers
+            .get_mut(&clid)
+            .map(|session| &mut session.state)
+            .or_else(|| self.retained.get_mut(&clid))
+    }
+
     fn evict_idle(&mut self, now: Instant) {
         let idle_evict_after = self.idle_evict_after;
         self.speakers
-            .retain(|_, session| now.duration_since(session.last_seen) < idle_evict_after);
+            .retain(|_, session| now.duration_since(session.state.last_seen) < idle_evict_after);
+        self.retained
+            .retain(|_, state| now.duration_since(state.last_seen) < idle_evict_after);
     }
 
-    /// 取得或创建 clid 会话；池满时驱逐最久未见者
+    /// 模型池驱逐只释放推理实例；轻量状态有界保存，供收段与后续来帧使用
     fn session_for(&mut self, clid: u32, now: Instant) -> &mut SpeakerSession {
         if !self.speakers.contains_key(&clid) {
-            while self.speakers.len() >= MAX_SPEAKERS {
+            let state = self.retained.remove(&clid).unwrap_or_else(|| SpeakerState {
+                acc: Vec::new(),
+                last_wake: None,
+                last_seen: now,
+                fed_samples: 0,
+                utterance: UtteranceState::default(),
+            });
+            if self.speakers.len() >= MAX_SPEAKERS {
                 let oldest = self
                     .speakers
                     .iter()
-                    .min_by_key(|(_, session)| session.last_seen)
+                    .min_by_key(|(_, session)| session.state.last_seen)
                     .map(|(id, _)| *id)
                     .expect("speaker pool non-empty");
-                self.speakers.remove(&oldest);
+                let evicted = self
+                    .speakers
+                    .remove(&oldest)
+                    .expect("oldest speaker exists");
+                if self.retained.len() >= MAX_RETAINED_SPEAKERS {
+                    let oldest_retained = self
+                        .retained
+                        .iter()
+                        .min_by_key(|(_, state)| state.last_seen)
+                        .map(|(id, _)| *id)
+                        .expect("retained pool non-empty");
+                    self.retained.remove(&oldest_retained);
+                }
+                self.retained.insert(oldest, evicted.state);
             }
             let detector = (self.make_detector)(clid);
+            let chunk_offset = ((state.fed_samples - state.acc.len()) / CHUNK_SIZE) as u64;
             self.speakers.insert(
                 clid,
                 SpeakerSession {
                     detector,
-                    acc: Vec::new(),
-                    last_wake: None,
-                    last_seen: now,
-                    fed_samples: 0,
-                    utterance: UtteranceState::default(),
+                    chunk_offset,
+                    state,
                 },
             );
         }
@@ -516,7 +558,7 @@ impl WakewordGate {
             .speakers
             .get_mut(&clid)
             .expect("speaker session just created");
-        session.last_seen = now;
+        session.state.last_seen = now;
         session
     }
 }
@@ -1055,6 +1097,152 @@ mod tests {
         assert!(!inside.verdict.detected);
         assert!(inside.verdict.open);
         assert!(inside.window_open_before_feed);
+    }
+
+    #[test]
+    fn regression_pr96_eviction_preserves_detected_utterance() {
+        let mut gate = hit_gate();
+        let base = Instant::now();
+        // A 松开 PTT 后，语音管线等待 1200ms 才收段。
+        let hit = gate.feed(
+            1,
+            WakeFrame {
+                pcm16: &[0i16; CHUNK_SIZE * 4],
+                voiced: true,
+                utterance_started: true,
+            },
+            base,
+        );
+        assert!(hit.verdict.detected);
+        assert!(hit.anchor_active_ms >= WAKE_ONLY_TAIL_MS);
+        // 其余六位说话人在收段之前各发送一帧。
+        for clid in 2u32..=7 {
+            feed_320_frame(
+                &mut gate,
+                clid,
+                false,
+                false,
+                base + Duration::from_millis(u64::from(clid) * 100),
+            );
+        }
+        assert!(!gate.speakers.contains_key(&1));
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_millis(1200));
+        assert!(
+            verdict.detected,
+            "model eviction must preserve the detected in-flight utterance"
+        );
+        assert!(verdict.open, "a detected command must remain admitted");
+    }
+
+    /// 模型驱逐后的来帧沿用余量和时间轴，收段后窗口仍可续说，新段不继承命中
+    #[test]
+    fn evicted_speaker_resumes_frames_and_starts_a_new_utterance() {
+        let mut gate = hit_gate();
+        let base = Instant::now();
+        let hit = gate.feed(1, WakeFrame::pcm(&[0i16; CHUNK_SIZE + 320]), base);
+        assert!(hit.verdict.detected);
+        for clid in 2u32..=7 {
+            feed_320_frame(
+                &mut gate,
+                clid,
+                false,
+                false,
+                base + Duration::from_millis(u64::from(clid) * 100),
+            );
+        }
+        let resumed = feed_320_frame(&mut gate, 1, true, false, base + Duration::from_millis(800));
+        assert_eq!(resumed.fed_samples, CHUNK_SIZE + 640);
+        assert!(resumed.window_open_before_feed);
+        assert_eq!(gate.speakers[&1].state.acc.len(), 640);
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_millis(1200));
+        assert!(verdict.detected && verdict.wakeword_only);
+        assert_eq!(verdict.anchor_active_ms, 20);
+        let fresh = feed_320_frame(&mut gate, 1, true, true, base + Duration::from_millis(1300));
+        assert!(fresh.window_open_before_feed);
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_millis(1400));
+        assert!(verdict.open && !verdict.detected && !verdict.wakeword_only);
+    }
+
+    /// 重建模型不影响旧命中的命令尾累计，达到边界时放行整句
+    #[test]
+    fn resumed_command_tail_crosses_threshold_after_model_eviction() {
+        let first = Arc::new(Mutex::new(true));
+        let mut gate = WakewordGate::with_factory(15, move |clid| {
+            let mut first = first.lock().expect("stub lock");
+            let fire_after_blocks = if clid == 1 && *first {
+                *first = false;
+                1
+            } else {
+                usize::MAX
+            };
+            Box::new(NthBlockStub {
+                seen: 0,
+                fire_after_blocks,
+            })
+        });
+        let base = Instant::now();
+        for index in 0..4 {
+            feed_320_frame(&mut gate, 1, true, index == 0, base);
+        }
+        for clid in 2u32..=7 {
+            feed_320_frame(
+                &mut gate,
+                clid,
+                false,
+                false,
+                base + Duration::from_millis(u64::from(clid) * 100),
+            );
+        }
+        for index in 0..6 {
+            let event = feed_320_frame(
+                &mut gate,
+                1,
+                true,
+                false,
+                base + Duration::from_millis(800 + index * 20),
+            );
+            assert!(!event.verdict.detected);
+            assert_eq!(event.anchor_active_ms, 100 + index * 20);
+        }
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_millis(1200));
+        assert!(verdict.open && verdict.detected && !verdict.wakeword_only);
+        assert_eq!(verdict.anchor_sample, Some(0));
+        assert_eq!(verdict.anchor_active_ms, WAKE_ONLY_TAIL_MS);
+    }
+
+    /// 保留状态也支持确认音续窗、独占裁决和闲置清理，并有独立容量上限
+    #[test]
+    fn retained_verdict_preserves_wake_only_window_and_stays_bounded() {
+        let mut gate = hit_gate();
+        let base = Instant::now();
+        feed_320_frame(&mut gate, 1, true, true, base);
+        let hit = gate.feed(1, WakeFrame::pcm(&[0i16; CHUNK_SIZE - 320]), base);
+        assert!(hit.verdict.detected);
+        for clid in 2u32..=7 {
+            feed_320_frame(
+                &mut gate,
+                clid,
+                false,
+                false,
+                base + Duration::from_millis(u64::from(clid) * 100),
+            );
+        }
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_secs(1));
+        assert!(verdict.open && verdict.detected && verdict.wakeword_only);
+        let refreshed = base + Duration::from_secs(10);
+        gate.refresh_window(1, refreshed);
+        let verdict = gate.take_utterance_verdict(1, refreshed + gate.window / 2);
+        assert!(verdict.open && !verdict.detected && !verdict.wakeword_only);
+        let verdict = gate.take_utterance_verdict(1, refreshed + gate.window);
+        assert!(!verdict.open);
+        for clid in 8u32..=(MAX_RETAINED_SPEAKERS + MAX_SPEAKERS + 8) as u32 {
+            gate.feed(clid, WakeFrame::pcm(&[]), refreshed + gate.window);
+        }
+        assert_eq!(gate.speakers.len(), MAX_SPEAKERS);
+        assert_eq!(gate.retained.len(), MAX_RETAINED_SPEAKERS);
+        assert!(!gate.retained.contains_key(&1));
+        gate.evict_idle(refreshed + gate.window + gate.idle_evict_after);
+        assert!(gate.speakers.is_empty() && gate.retained.is_empty());
     }
 
     #[test]

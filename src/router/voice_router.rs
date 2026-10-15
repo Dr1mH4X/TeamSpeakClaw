@@ -41,6 +41,109 @@ const AUDIO_MAX_IN_FLIGHT: usize = 8;
 /// 单条 TTS 流的句段通道容量
 const TTS_SENTENCE_CAPACITY: usize = 128;
 
+struct ChatTurnAdmission {
+    source: SessionSource,
+    permit: TurnPermit,
+    ticket: crate::llm::context::TurnTicket,
+}
+
+impl ChatTurnAdmission {
+    async fn prepare<F, T>(self, llm: &LlmEngine, prepare: F) -> Result<(TurnSession, T)>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let session = self
+            .permit
+            .acquire_session(llm, &self.source, self.ticket)
+            .await;
+        let prepared = prepare.await?;
+        Ok((session, prepared))
+    }
+}
+
+struct PreparedChat {
+    text: String,
+    reply_mode: i32,
+    reply_target: u32,
+    admission: Option<ChatTurnAdmission>,
+}
+
+fn chat_caller_uid(chat: &voicev1::ChatEvent) -> String {
+    if chat.invoker_unique_id.is_empty() {
+        format!("clid:{}", chat.invoker_client_id)
+    } else {
+        chat.invoker_unique_id.clone()
+    }
+}
+
+fn check_chat_caller_identity(chat: &voicev1::ChatEvent, online_uid: &str) -> Result<()> {
+    if !chat.invoker_unique_id.is_empty() && chat.invoker_unique_id != online_uid {
+        anyhow::bail!(
+            "chat caller {} identity changed while queued",
+            chat.invoker_client_id
+        );
+    }
+    Ok(())
+}
+
+// 在事件循环内登记票据，caller 与在线名单查询必须在取得会话锁后执行。
+fn prepare_chat(
+    config: &AppConfig,
+    llm: &LlmEngine,
+    bot_clid: u32,
+    chat: &voicev1::ChatEvent,
+) -> Option<PreparedChat> {
+    if chat.invoker_name == config.bot.nickname
+        || config.is_music_bot_name(&chat.invoker_name)
+        || (bot_clid != 0 && chat.invoker_client_id == bot_clid)
+    {
+        return None;
+    }
+    let decision = resolve_ts_inbound(
+        &chat.message,
+        chat.target_mode as u8,
+        chat.invoker_client_id,
+        &config.bot,
+    )?;
+    if !decision.should_trigger_llm {
+        return None;
+    }
+    let text = preprocess_text_message(&decision.text)?;
+    if let Err(error) = llm.check_user_text_bounds(&text) {
+        warn!(error = %error, "voice chat dropped for exceeding size limit");
+        return None;
+    }
+    let direct_replay = config.voice_replay.enabled
+        && crate::tools::voice_replay::parse_direct_command(
+            &text,
+            &config.voice_replay.direct_commands,
+        )
+        .is_some();
+    let admission = if direct_replay {
+        None
+    } else {
+        let Ok(permit) = TurnPermit::reserve(llm) else {
+            warn!("Voice LLM turn queue full; dropping message");
+            return None;
+        };
+        let source = SessionSource::TeamSpeak {
+            uid: chat_caller_uid(chat),
+        };
+        let ticket = llm.enqueue_turn_ticket(&source);
+        Some(ChatTurnAdmission {
+            source,
+            permit,
+            ticket,
+        })
+    };
+    Some(PreparedChat {
+        text,
+        reply_mode: i32::from(decision.reply_target_mode),
+        reply_target: decision.reply_target,
+        admission,
+    })
+}
+
 /// 出站 gRPC 通道持有者：`Channel` clone 共享同一条连接，准入路径与各回合任务共用。
 /// 传输失败时后台重连替换通道，避免单个回合的失败拖住后续通知。
 #[derive(Clone)]
@@ -575,10 +678,18 @@ impl VoiceRouter {
                     };
                     match payload {
                         voicev1::event::Payload::Chat(chat) => {
+                            let Some(prepared) = prepare_chat(
+                                &router.config,
+                                &router.llm,
+                                router.ts_adapter.get_bot_clid(),
+                                &chat,
+                            ) else {
+                                continue;
+                            };
                             let router = router.clone();
                             let channel = channel.clone();
                             tasks.spawn(async move {
-                                if let Err(error) = router.handle_chat_event(&channel, chat).await {
+                                if let Err(error) = router.handle_chat_event(&channel, chat, prepared).await {
                                     error!("Voice router chat handling failed: {error}");
                                 }
                             });
@@ -669,11 +780,7 @@ impl VoiceRouter {
         reply_target_mode: i32,
         reply_target_client_id: u32,
     ) -> Result<CallerContext> {
-        let caller_uid = if chat.invoker_unique_id.is_empty() {
-            format!("clid:{}", chat.invoker_client_id)
-        } else {
-            chat.invoker_unique_id.clone()
-        };
+        let caller_uid = chat_caller_uid(chat);
         let clients = self
             .ts_adapter
             .list_clients()
@@ -688,6 +795,7 @@ impl VoiceRouter {
                     chat.invoker_client_id
                 )
             })?;
+        check_chat_caller_identity(chat, &caller.uid)?;
         let channel_group_id = self
             .ts_adapter
             .get_client_channel_group_id(chat.invoker_client_id)
@@ -766,16 +874,6 @@ impl VoiceRouter {
         })
     }
 
-    fn should_ignore_chat(&self, chat: &voicev1::ChatEvent, caller_id: u32) -> bool {
-        if chat.invoker_name == self.config.bot.nickname
-            || self.config.is_music_bot_name(&chat.invoker_name)
-        {
-            return true;
-        }
-        let bot_clid = self.ts_adapter.get_bot_clid();
-        bot_clid != 0 && caller_id == bot_clid
-    }
-
     async fn resolve_audio_chunk_caller(
         &self,
         audio: &voicev1::AudioFrameEvent,
@@ -800,44 +898,31 @@ impl VoiceRouter {
         &self,
         channel: &VoiceChannel,
         chat: voicev1::ChatEvent,
+        prepared: PreparedChat,
     ) -> Result<()> {
-        let Some(decision) = resolve_ts_inbound(
-            &chat.message,
-            chat.target_mode as u8,
-            chat.invoker_client_id,
-            &self.config.bot,
-        ) else {
-            return Ok(());
-        };
-        if !decision.should_trigger_llm {
-            return Ok(());
-        }
-        let ctx = self
-            .resolve_caller_from_chat(
-                &chat,
-                i32::from(decision.reply_target_mode),
-                decision.reply_target,
-            )
-            .await?;
-        if self.should_ignore_chat(&chat, ctx.caller_id) {
-            return Ok(());
-        }
-        let Some(clean_text) = preprocess_text_message(&decision.text) else {
-            return Ok(());
+        let resolve =
+            self.resolve_caller_from_chat(&chat, prepared.reply_mode, prepared.reply_target);
+        let (session, ctx) = match prepared.admission {
+            Some(admission) => {
+                let (session, ctx) = admission.prepare(&self.llm, resolve).await?;
+                (Some(session), ctx)
+            }
+            None => (None, resolve.await?),
         };
         if self
-            .try_handle_direct_replay(channel, &ctx, &clean_text)
+            .try_handle_direct_replay(channel, &ctx, &prepared.text)
             .await?
         {
             return Ok(());
         }
+        let session = session.ok_or_else(|| anyhow::anyhow!("chat turn was not admitted"))?;
         // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
         // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
         // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消
         let active = Arc::new(ActiveTurn::new());
         self.turns.begin_turn(ctx.caller_id, &active);
         // 桥接文本不是 STT 路径：不挂工具调用提示音
-        self.handle_user_input(channel, ctx, clean_text, &active, false)
+        self.handle_user_input(channel, ctx, prepared.text, &active, false, Some(session))
             .await
     }
 
@@ -1200,7 +1285,7 @@ impl VoiceRouter {
         };
 
         // STT 语音回合：挂工具调用提示音
-        self.handle_user_input(&channel, ctx, text, &active, true)
+        self.handle_user_input(&channel, ctx, text, &active, true, None)
             .await
     }
 
@@ -1310,6 +1395,7 @@ impl VoiceRouter {
         user_msg: String,
         active: &Arc<ActiveTurn>,
         tool_feedback: bool,
+        session: Option<TurnSession>,
     ) -> Result<()> {
         info!(
             event = "voice.user_message",
@@ -1323,27 +1409,16 @@ impl VoiceRouter {
             return Ok(());
         }
         let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
-        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
-            warn!(
-                caller_uid = %ctx.caller_uid,
-                "Voice LLM turn queue full; dropping message"
-            );
-            return Ok(());
-        };
-
-        let ticket = self.llm.enqueue_turn_ticket(&session_source);
-        // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
-        let Some(session) = cancellable_turn_step(
-            &active.cancel,
-            acquire_voice_turn_session(permit, &self.llm, &session_source, ticket),
-        )
-        .await
-        else {
-            debug!(
-                caller_uid = %ctx.caller_uid,
-                "voice turn cancelled while waiting for the LLM slot"
-            );
-            return Ok(());
+        let session = match session {
+            Some(session) => session,
+            None => {
+                let Ok(permit) = TurnPermit::reserve(&self.llm) else {
+                    warn!(caller_uid = %ctx.caller_uid, "Voice LLM turn queue full; dropping message");
+                    return Ok(());
+                };
+                let ticket = self.llm.enqueue_turn_ticket(&session_source);
+                acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await
+            }
         };
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
@@ -1685,7 +1760,200 @@ impl StreamingSentenceChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::provider::{LlmProvider, LlmStreamEvent};
+    use futures_util::stream::BoxStream;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct ChatOrderProvider {
+        messages: StdMutex<Vec<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Arc<ChatOrderProvider> {
+        async fn chat_completion_stream(
+            &self,
+            messages: Vec<Value>,
+            _tools: Vec<Value>,
+        ) -> Result<BoxStream<'static, Result<LlmStreamEvent>>> {
+            let input: Value =
+                serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap())?;
+            let reply = format!("r-{}", input["user_message"].as_str().unwrap());
+            self.messages.lock().unwrap().push(messages);
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(LlmStreamEvent::Token(reply)),
+                Ok(LlmStreamEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    tool_calls: Vec::new(),
+                }),
+            ])))
+        }
+    }
+
+    #[derive(Default)]
+    struct ChatOrderSink(StdMutex<Vec<String>>);
+
+    #[async_trait]
+    impl TurnSink for ChatOrderSink {
+        async fn send(&self, text: &str) -> Result<()> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+    }
+
+    fn chat_event(text: &str) -> voicev1::ChatEvent {
+        voicev1::ChatEvent {
+            target_mode: 1,
+            invoker_unique_id: "chat-user".to_string(),
+            invoker_name: "caller".to_string(),
+            message: text.to_string(),
+            invoker_client_id: 7,
+        }
+    }
+
+    async fn finish_prepared_chat(
+        llm: &LlmEngine,
+        text: &str,
+        session: TurnSession,
+        sink: &ChatOrderSink,
+    ) {
+        let source = SessionSource::TeamSpeak {
+            uid: "chat-user".to_string(),
+        };
+        let cancel = CancellationToken::new();
+        let registry = ToolRegistry::default();
+        let request = TurnRequest {
+            llm,
+            registry: &registry,
+            source: &source,
+            user_ctx: "prepared caller",
+            allowed_tools: &[],
+            input: TurnInput::Text(text),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        assert!(request
+            .run(session, || panic!("no tools expected"), sink)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn chat_admission_orders_slow_caller_preparation_and_reverse_task_polling() {
+        let config = AppConfig::default();
+        let provider = Arc::new(ChatOrderProvider::default());
+        let llm = LlmEngine::with_provider(Box::new(provider.clone()), 8);
+        let first = prepare_chat(&config, &llm, 99, &chat_event("first")).unwrap();
+        let second = prepare_chat(&config, &llm, 99, &chat_event("second")).unwrap();
+        let sink = ChatOrderSink::default();
+        let second_prepared = AtomicBool::new(false);
+        let (release_caller, caller_ready) = tokio::sync::oneshot::channel();
+        let first_task = async {
+            let (session, ()) = first
+                .admission
+                .unwrap()
+                .prepare(&llm, async {
+                    caller_ready.await.unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            finish_prepared_chat(&llm, &first.text, session, &sink).await;
+        };
+        let second_task = async {
+            let (session, ()) = second
+                .admission
+                .unwrap()
+                .prepare(&llm, async {
+                    second_prepared.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            finish_prepared_chat(&llm, &second.text, session, &sink).await;
+        };
+        tokio::pin!(first_task, second_task);
+        assert!(futures_util::poll!(&mut second_task).is_pending());
+        assert!(!second_prepared.load(Ordering::SeqCst));
+        assert!(futures_util::poll!(&mut first_task).is_pending());
+        assert!(futures_util::poll!(&mut second_task).is_pending());
+        assert!(provider.messages.lock().unwrap().is_empty());
+        release_caller.send(()).unwrap();
+        first_task.await;
+        second_task.await;
+
+        assert_eq!(*sink.0.lock().unwrap(), vec!["r-first", "r-second"]);
+        let messages = provider.messages.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        let first_input: Value =
+            serde_json::from_str(messages[0].last().unwrap()["content"].as_str().unwrap()).unwrap();
+        let second_input: Value =
+            serde_json::from_str(messages[1].last().unwrap()["content"].as_str().unwrap()).unwrap();
+        assert_eq!(first_input["user_message"], "first");
+        assert_eq!(second_input["user_message"], "second");
+        assert_eq!(messages[1][1]["content"], "first");
+        assert_eq!(messages[1][2]["content"], "r-first");
+        let history = llm.stored_history(&SessionSource::TeamSpeak {
+            uid: "chat-user".to_string(),
+        });
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].user.as_text(), Some("first"));
+        assert_eq!(history[1].user.as_text(), Some("second"));
+    }
+
+    #[test]
+    fn chat_admission_ignores_invalid_input_before_capacity_reservation() {
+        let config = AppConfig::default();
+        let llm = LlmEngine::new(Arc::new(config.clone())).unwrap();
+        for chat in [
+            chat_event("   "),
+            chat_event(&"x".repeat(crate::llm::engine::MAX_USER_TEXT_BYTES + 1)),
+            voicev1::ChatEvent {
+                invoker_name: config.bot.nickname.clone(),
+                ..chat_event("hello")
+            },
+            voicev1::ChatEvent {
+                invoker_client_id: 99,
+                ..chat_event("hello")
+            },
+            voicev1::ChatEvent {
+                target_mode: 2,
+                ..chat_event("not triggered")
+            },
+        ] {
+            assert!(prepare_chat(&config, &llm, 99, &chat).is_none());
+        }
+        let admissions: Vec<_> = (0..4)
+            .map(|_| prepare_chat(&config, &llm, 99, &chat_event("hello")).unwrap())
+            .collect();
+        assert_eq!(admissions.len(), 4);
+        assert!(prepare_chat(&config, &llm, 99, &chat_event("hello")).is_none());
+        let replay = prepare_chat(&config, &llm, 99, &chat_event("!replay")).unwrap();
+        assert!(replay.admission.is_none());
+    }
+
+    #[test]
+    fn chat_admission_and_caller_resolution_share_fallback_uid() {
+        let config = AppConfig::default();
+        let llm = LlmEngine::new(Arc::new(config.clone())).unwrap();
+        let chat = voicev1::ChatEvent {
+            invoker_unique_id: String::new(),
+            ..chat_event("hello")
+        };
+        let prepared = prepare_chat(&config, &llm, 99, &chat).unwrap();
+        assert_eq!(chat_caller_uid(&chat), "clid:7");
+        assert_eq!(prepared.admission.unwrap().source.to_string(), "sq:clid:7");
+    }
+
+    #[test]
+    fn queued_chat_rejects_client_id_reuse_by_a_different_user() {
+        let mut chat = chat_event("hello");
+        assert!(check_chat_caller_identity(&chat, "chat-user").is_ok());
+        assert!(check_chat_caller_identity(&chat, "replacement-user").is_err());
+        chat.invoker_unique_id.clear();
+        assert!(check_chat_caller_identity(&chat, "replacement-user").is_ok());
+    }
 
     struct DropMarker(Arc<AtomicBool>);
 
