@@ -909,18 +909,33 @@ impl VoiceRouter {
     ) -> Result<()> {
         let resolve =
             self.resolve_caller_from_chat(&chat, prepared.reply_mode, prepared.reply_target);
-        let (session, ctx) = match prepared.admission {
-            ChatAdmission::Llm(admission) => admission.prepare(&self.llm, resolve).await?,
+        let (session, ctx, active) = match prepared.admission {
+            ChatAdmission::Llm(admission) => {
+                // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
+                // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
+                // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消。
+                // 登记先于等待：等 LLM 容量与会话锁期间，同 clid 的新语音顶替或唤醒确认音
+                // 夺权都要能取消这条排队中的文本回合，丢弃等待 future 并释放占位与票据
+                let active = Arc::new(ActiveTurn::new());
+                self.turns.begin_turn(chat.invoker_client_id, &active);
+                let Some(admitted) =
+                    cancellable_turn_step(&active.cancel, admission.prepare(&self.llm, resolve))
+                        .await
+                else {
+                    debug!(
+                        caller_uid = %chat_caller_uid(&chat),
+                        "voice text turn cancelled while waiting for the LLM slot"
+                    );
+                    return Ok(());
+                };
+                let (session, ctx) = admitted?;
+                (session, ctx, active)
+            }
             ChatAdmission::DirectReplay(command) => {
                 let ctx = resolve.await?;
                 return self.handle_direct_replay(channel, &ctx, command).await;
             }
         };
-        // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
-        // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
-        // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消
-        let active = Arc::new(ActiveTurn::new());
-        self.turns.begin_turn(ctx.caller_id, &active);
         // 桥接文本不是 STT 路径：不挂工具调用提示音
         self.handle_user_input(channel, ctx, prepared.text, &active, false, session)
             .await
@@ -1287,7 +1302,19 @@ impl VoiceRouter {
             return Ok(());
         };
         let ticket = self.llm.enqueue_turn_ticket(&source);
-        let session = acquire_voice_turn_session(permit, &self.llm, &source, ticket).await;
+        // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
+        let Some(session) = cancellable_turn_step(
+            &active.cancel,
+            acquire_voice_turn_session(permit, &self.llm, &source, ticket),
+        )
+        .await
+        else {
+            debug!(
+                caller_uid = %ctx.caller_uid,
+                "voice turn cancelled while waiting for the LLM slot"
+            );
+            return Ok(());
+        };
         // STT 语音回合：挂工具调用提示音
         self.handle_user_input(&channel, ctx, text, &active, true, session)
             .await
