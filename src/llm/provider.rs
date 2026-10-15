@@ -21,7 +21,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 30;
 const STREAM_TOTAL_TIMEOUT_SECS: u64 = 300;
 
-/// 序列化后请求体的绝对上限（64 MiB）。超过就不发请求，直接返回 `PayloadTooLarge`。
+/// 序列化后请求体的绝对上限（64 MiB）。超过就不发请求，直接返回 `LlmFailure::PayloadTooLarge`。
 ///
 /// 它与装配层的 `MAX_WIRE_AUDIO_BYTES`（2 MiB，只约束历史音频）是两层预算：
 /// 正常装配出的 omni 请求体 ≤ wire 预算加当前轮（约 2.6 MiB），远在此值之下，
@@ -29,48 +29,96 @@ const STREAM_TOTAL_TIMEOUT_SECS: u64 = 300;
 /// 把「发出去再被网关拒绝」变成发送前可识别、可自愈的体积类失败。
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
-/// 网关按体积拒绝或发送前预检失败时可识别的错误类型。
+/// 一次模型调用中可识别的失败分类。
 ///
-/// 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，调用点用
-/// `downcast_ref::<PayloadTooLarge>()` 判定，据此收缩音频历史后重试一次。
+/// 归类由 `OpenAiProvider` 产出、由调用点消费：失败经 `anyhow::Error` →
+/// `ToolLoopError::Other` 原样透传，调用点用 `downcast_ref::<LlmFailure>()` 取变体
+/// 决定动作，不解析错误文案。变体是闭集合，新增一类必须同时有消费它的恢复动作。
+///
+/// 文案只带状态码与分类事实，不带网关响应体：正文可能含凭据等敏感内容，
+/// 归类只把正文当作判据。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PayloadTooLarge {
-    message: String,
+pub enum LlmFailure {
+    /// 请求体过大：发送前预检拒绝，或网关以 413、或 400 带体积文案拒绝。
+    PayloadTooLarge { message: String },
+    /// 请求超出模型的上下文窗口：网关以 400 带窗口文案拒绝。
+    ContextWindowExceeded { message: String },
+    /// 模型以终止原因结束，但既没有文本也没有工具调用，没有可送达的内容。
+    EmptyResponse { finish_reason: String },
 }
 
-impl PayloadTooLarge {
+impl LlmFailure {
+    /// 收缩历史后重试一次可能让请求通过：体积超限与窗口超限都靠丢最早的音频轮变小。
+    pub fn is_shrinkable(&self) -> bool {
+        matches!(
+            self,
+            Self::PayloadTooLarge { .. } | Self::ContextWindowExceeded { .. }
+        )
+    }
+
+    /// 用户可见的失败说明：类别开头加细节，日志里的 `Display` 另有措辞
+    pub fn user_text(&self) -> String {
+        match self {
+            Self::PayloadTooLarge { message } => format!("payload too large: {message}"),
+            Self::ContextWindowExceeded { message } => {
+                format!("context window exceeded: {message}")
+            }
+            Self::EmptyResponse { finish_reason } => {
+                format!("no content in the model completion (finish reason '{finish_reason}')")
+            }
+        }
+    }
+
     fn rejected_body(body_bytes: usize, limit: usize) -> Self {
-        Self {
+        Self::PayloadTooLarge {
             message: format!("request body of {body_bytes} bytes exceeds the {limit}-byte limit"),
         }
     }
 
-    fn from_response(status: StatusCode) -> Self {
-        Self {
+    fn rejected_payload(status: StatusCode) -> Self {
+        Self::PayloadTooLarge {
             message: format!("LLM gateway rejected the request payload with HTTP {status}"),
         }
     }
 
-    /// 测试可见：构造体积类错误，供重试路径的单测使用
-    #[cfg(test)]
-    pub(crate) fn for_test(message: &str) -> Self {
-        Self {
-            message: message.to_string(),
+    fn rejected_context_window() -> Self {
+        Self::ContextWindowExceeded {
+            message:
+                "LLM gateway rejected the request for exceeding the model context window with HTTP 400"
+                    .to_string(),
+        }
+    }
+
+    fn empty_response(finish_reason: &str) -> Self {
+        Self::EmptyResponse {
+            finish_reason: finish_reason.to_string(),
         }
     }
 }
 
-impl fmt::Display for PayloadTooLarge {
+impl fmt::Display for LlmFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LLM payload too large: {}", self.message)
+        match self {
+            Self::PayloadTooLarge { message } => write!(f, "LLM payload too large: {message}"),
+            Self::ContextWindowExceeded { message } => {
+                write!(
+                    f,
+                    "LLM request exceeded the model context window: {message}"
+                )
+            }
+            Self::EmptyResponse { finish_reason } => write!(
+                f,
+                "LLM completion carried no content with finish reason '{finish_reason}'"
+            ),
+        }
     }
 }
 
-impl std::error::Error for PayloadTooLarge {}
+impl std::error::Error for LlmFailure {}
 
-/// 超过读取上限的 400 错误体：只保留已缓冲的前缀供体积分类，正文本身不进错误文案。
+/// 超过读取上限的 400 错误体：只保留已缓冲的前缀供拒绝分类，正文本身不进错误文案。
 ///
-/// 超限不等于放弃分类：体积文案落在已读取的前缀里时，仍要走体积错误这条自愈路径。
+/// 超限不等于放弃分类：体积或窗口文案落在已读取的前缀里时，仍要走可收缩失败这条自愈路径。
 #[derive(Debug)]
 struct OversizedErrorBody {
     prefix: String,
@@ -88,25 +136,65 @@ impl fmt::Display for OversizedErrorBody {
 impl std::error::Error for OversizedErrorBody {}
 
 /// 发送前预检：序列化后的请求体超过上限就不发请求
-fn ensure_payload_within_limit(body_bytes: usize, limit: usize) -> Result<(), PayloadTooLarge> {
+fn ensure_payload_within_limit(body_bytes: usize, limit: usize) -> Result<(), LlmFailure> {
     if body_bytes > limit {
-        return Err(PayloadTooLarge::rejected_body(body_bytes, limit));
+        return Err(LlmFailure::rejected_body(body_bytes, limit));
     }
     Ok(())
 }
 
 /// 归类网关的体积类拒绝：413 一律算；400 需要响应体文案佐证，
 /// 避免把参数错误误判为体积类（自建反代也可能返回自定义页，故归类只作兜底）。
-fn classify_payload_too_large(status: StatusCode, body: &str) -> Option<PayloadTooLarge> {
+fn classify_payload_too_large(status: StatusCode, body: &str) -> Option<LlmFailure> {
     let has_size_marker =
         body.to_ascii_lowercase().contains("too large") || body.contains("请求体过大");
     if status == StatusCode::PAYLOAD_TOO_LARGE
         || (status == StatusCode::BAD_REQUEST && has_size_marker)
     {
-        Some(PayloadTooLarge::from_response(status))
+        Some(LlmFailure::rejected_payload(status))
     } else {
         None
     }
+}
+
+/// 归类网关的上下文窗口拒绝：必须点名模型上下文，再叠加一个越界或上限信号。
+///
+/// 只认「上下文」与越界同时出现的说法，避免把普通的「太长」参数错误也算成可收缩拒绝；
+/// 上限式说法（`maximum context length is …`）本身已点名上下文，无需越界动词。
+fn classify_context_window_exceeded(body: &str) -> Option<LlmFailure> {
+    let lowered = body.to_ascii_lowercase();
+    let names_context_bound = lowered.contains("maximum context")
+        || lowered.contains("max context")
+        || lowered.contains("最大上下文");
+    let names_context = lowered.contains("context length")
+        || lowered.contains("context window")
+        || lowered.contains("context_length")
+        || lowered.contains("context_window")
+        || lowered.contains("model context")
+        || lowered.contains("model's context")
+        || lowered.contains("上下文长度")
+        || lowered.contains("上下文窗口");
+    let signals_overflow = lowered.contains("exceed")
+        || lowered.contains("overflow")
+        || lowered.contains("too long")
+        || lowered.contains("too large")
+        || lowered.contains("reduce the length")
+        || lowered.contains("超出")
+        || lowered.contains("超限")
+        || lowered.contains("超过");
+    if names_context_bound || (names_context && signals_overflow) {
+        Some(LlmFailure::rejected_context_window())
+    } else {
+        None
+    }
+}
+
+/// 400 响应体里的可识别拒绝：先看是否明确点名模型上下文，再看体积文案。
+///
+/// 窗口类说法常同时含「too large」，先判窗口类才能让日志指向真正的成因；
+/// 两类共用同一条收缩恢复，先判哪一类都不影响恢复动作。
+fn classify_rejected_body(status: StatusCode, body: &str) -> Option<LlmFailure> {
+    classify_context_window_exceeded(body).or_else(|| classify_payload_too_large(status, body))
 }
 
 #[async_trait]
@@ -426,19 +514,18 @@ async fn http_response_error(
     if let Some(error) = classify_payload_too_large(status, "") {
         return error.into();
     }
-    // 仅 400 需要读取响应体辨认体积错误，其他状态立即释放连接。
+    // 仅 400 需要读取响应体辨认体积与窗口两类拒绝，其他状态立即释放连接。
     if status == StatusCode::BAD_REQUEST {
         match read_error_body(&mut response.bytes_stream(), idle_timeout, total_deadline).await {
             Ok(body) => {
-                if let Some(error) = classify_payload_too_large(status, &body) {
+                if let Some(error) = classify_rejected_body(status, &body) {
                     return error.into();
                 }
             }
             Err(error) => {
-                // 正文超限时仍用已缓冲前缀判定体积错误，不让收缩重试被截断白白跳过
+                // 正文超限时仍用已缓冲前缀判定两类拒绝，不让收缩重试被截断白白跳过
                 if let Some(oversized) = error.downcast_ref::<OversizedErrorBody>() {
-                    if let Some(classified) = classify_payload_too_large(status, &oversized.prefix)
-                    {
+                    if let Some(classified) = classify_rejected_body(status, &oversized.prefix) {
                         return classified.into();
                     }
                 }
@@ -509,6 +596,8 @@ impl LlmProvider for OpenAiProvider {
             let mut pending: Vec<u8> = Vec::new();
             let mut received_bytes = 0usize;
             let mut tool_call_builders: BTreeMap<usize, ToolCallBuilder> = BTreeMap::new();
+            // 是否送出过可见文本：终止事件据此判定这次完成有没有可送达的内容
+            let mut saw_content = false;
 
             loop {
                 let item = match poll_stream(&mut byte_stream, stream_idle_timeout, total_deadline)
@@ -594,16 +683,18 @@ impl LlmProvider for OpenAiProvider {
                         continue;
                     };
                     if let Some(content) = choice.delta.content {
-                        if !content.is_empty()
-                            && send_output_before_deadline(
+                        if !content.is_empty() {
+                            if send_output_before_deadline(
                                 &tx,
                                 Ok(LlmStreamEvent::Token(content)),
                                 total_deadline,
                             )
                             .await
                                 != OutputSend::Sent
-                        {
-                            return;
+                            {
+                                return;
+                            }
+                            saw_content = true;
                         }
                     }
                     for tool_call in choice.delta.tool_calls {
@@ -629,15 +720,19 @@ impl LlmProvider for OpenAiProvider {
                                     return;
                                 }
                             };
-                            let _ = send_output_before_deadline(
-                                &tx,
-                                Ok(LlmStreamEvent::Done {
+                            let terminal = match classify_terminal_completion(
+                                &finish_reason,
+                                &tool_calls,
+                                saw_content,
+                            ) {
+                                Ok(()) => Ok(LlmStreamEvent::Done {
                                     finish_reason,
                                     tool_calls,
                                 }),
-                                total_deadline,
-                            )
-                            .await;
+                                Err(failure) => Err(anyhow::Error::new(failure)),
+                            };
+                            let _ =
+                                send_output_before_deadline(&tx, terminal, total_deadline).await;
                             return;
                         }
                     }
@@ -657,6 +752,22 @@ impl LlmProvider for OpenAiProvider {
             STREAM_TOTAL_TIMEOUT_SECS,
         )))
     }
+}
+
+/// 终止事件的可送达性判定：以终止原因结束、却既没有可见文本也没有工具调用的完成，
+/// 归类为 `LlmFailure::EmptyResponse`，不让它退化成回合的静默成功。
+///
+/// `finish_reason == "tool_calls"` 却零调用属于协议违约，由工具循环按原样报错，
+/// 不并入空完成分类。
+fn classify_terminal_completion(
+    finish_reason: &str,
+    tool_calls: &[ToolCall],
+    saw_content: bool,
+) -> Result<(), LlmFailure> {
+    if saw_content || !tool_calls.is_empty() || finish_reason == "tool_calls" {
+        return Ok(());
+    }
+    Err(LlmFailure::empty_response(finish_reason))
 }
 
 fn finalize_tool_calls(builders: &mut BTreeMap<usize, ToolCallBuilder>) -> Result<Vec<ToolCall>> {
@@ -786,10 +897,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_400_body_preserves_payload_classification_without_disclosure() {
-        for (body, payload_error) in [
-            ("request entity too large; secret-value", true),
-            ("invalid model; secret-value", false),
+    async fn http_400_body_preserves_rejection_classification_without_disclosure() {
+        for (body, payload, context) in [
+            ("request entity too large; secret-value", true, false),
+            ("maximum context length exceeded; secret-value", false, true),
+            ("invalid model; secret-value", false, false),
         ] {
             let response = error_response(400, body.as_bytes()).await;
             let error = http_response_error(
@@ -799,9 +911,14 @@ mod tests {
             )
             .await;
 
+            let classified = error.downcast_ref::<LlmFailure>();
             assert_eq!(
-                error.downcast_ref::<PayloadTooLarge>().is_some(),
-                payload_error
+                matches!(classified, Some(LlmFailure::PayloadTooLarge { .. })),
+                payload
+            );
+            assert_eq!(
+                matches!(classified, Some(LlmFailure::ContextWindowExceeded { .. })),
+                context
             );
             assert!(error.to_string().contains("400"));
             assert!(!format!("{error:#}").contains("secret-value"));
@@ -814,7 +931,7 @@ mod tests {
         let error =
             http_response_error(response, Duration::ZERO, tokio::time::Instant::now()).await;
 
-        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(error.downcast_ref::<LlmFailure>().is_some());
         assert!(!format!("{error:#}").contains("secret-value"));
     }
 
@@ -830,7 +947,7 @@ mod tests {
 
         assert!(error.to_string().contains("400"));
         assert!(format!("{error:#}").contains("65536-byte limit"));
-        assert!(error.downcast_ref::<PayloadTooLarge>().is_none());
+        assert!(error.downcast_ref::<LlmFailure>().is_none());
     }
 
     #[tokio::test]
@@ -846,7 +963,7 @@ mod tests {
         )
         .await;
 
-        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(error.downcast_ref::<LlmFailure>().is_some());
         assert!(error.to_string().contains("400"));
         assert!(!format!("{error:#}").contains("request entity too large"));
     }
@@ -934,9 +1051,120 @@ mod tests {
 
     #[test]
     fn payload_too_large_keeps_its_type_through_anyhow() {
-        let error: anyhow::Error = PayloadTooLarge::for_test("test payload").into();
+        let error: anyhow::Error = LlmFailure::PayloadTooLarge {
+            message: "test payload".to_string(),
+        }
+        .into();
 
-        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(error.downcast_ref::<LlmFailure>().is_some());
+    }
+
+    #[test]
+    fn user_text_names_the_class_for_every_variant() {
+        let payload = LlmFailure::PayloadTooLarge {
+            message: "request body of 9 bytes exceeds the 8-byte limit".to_string(),
+        };
+        let window = LlmFailure::ContextWindowExceeded {
+            message: "rejected with HTTP 400".to_string(),
+        };
+        let empty = LlmFailure::EmptyResponse {
+            finish_reason: "stop".to_string(),
+        };
+
+        assert_eq!(
+            payload.user_text(),
+            "payload too large: request body of 9 bytes exceeds the 8-byte limit"
+        );
+        assert_eq!(
+            window.user_text(),
+            "context window exceeded: rejected with HTTP 400"
+        );
+        assert_eq!(
+            empty.user_text(),
+            "no content in the model completion (finish reason 'stop')"
+        );
+        // 用户文案与日志文案是两套措辞，类别都稳定出现在各自的开头
+        assert!(payload.to_string().starts_with("LLM payload too large:"));
+        assert!(window
+            .to_string()
+            .starts_with("LLM request exceeded the model context window:"));
+        assert!(empty
+            .to_string()
+            .starts_with("LLM completion carried no content"));
+    }
+
+    #[test]
+    fn classifies_context_window_rejections_by_their_wording() {
+        for body in [
+            "This model's maximum context length is 8192 tokens",
+            "the request exceeded the context window",
+            "input is too long for this model context",
+            "Please reduce the length of the messages; context_length exceeded",
+            "请求超出模型上下文长度",
+            "上下文窗口超限",
+        ] {
+            let classified = classify_context_window_exceeded(body).unwrap_or_else(|| {
+                panic!("body must classify as a context window rejection: {body}")
+            });
+            assert!(classified.is_shrinkable());
+            assert!(classified.to_string().contains("context window"));
+        }
+    }
+
+    #[test]
+    fn keeps_context_lookalikes_out_of_the_context_window_class() {
+        for body in [
+            "invalid model",
+            "message is too long",
+            "the context field is unknown",
+            "请求体过大",
+        ] {
+            assert!(
+                classify_context_window_exceeded(body).is_none(),
+                "body must not classify as a context window rejection: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_wording_wins_over_the_size_marker_it_carries() {
+        let classified = classify_rejected_body(
+            StatusCode::BAD_REQUEST,
+            "request too large for this model context",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            classified,
+            LlmFailure::ContextWindowExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn classifies_an_empty_completion_as_a_failure() {
+        let failure = classify_terminal_completion("stop", &[], false)
+            .expect_err("empty completion must fail");
+
+        assert_eq!(
+            failure,
+            LlmFailure::EmptyResponse {
+                finish_reason: "stop".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_completion_with_text_or_tool_calls_is_not_empty() {
+        let call = ToolCall {
+            id: "call-1".to_string(),
+            name: "lookup".to_string(),
+            arguments: json!({}),
+        };
+
+        assert!(classify_terminal_completion("stop", &[], true).is_ok());
+        assert!(classify_terminal_completion("tool_calls", &[call], false).is_ok());
+        // 零调用的 tool_calls 是协议违约，归工具循环报错，不当作空完成
+        assert!(classify_terminal_completion("tool_calls", &[], false).is_ok());
     }
 
     #[test]

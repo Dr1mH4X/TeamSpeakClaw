@@ -14,7 +14,7 @@ Status: implemented
 - 状态表由纯函数 `decide_wakeword_action(open, detected, busy)` 唯一决定：`open == false` 或（已产出且本条无唤醒词）丢弃；`detected && busy` 插话；其余正常对话。`open` 是门窗口与在飞命中状态合成的裁决（命中即开门），所以表里「关 + 是」进入函数时 `open == true`。
 - `busy` 取回合注册表里是否有回合已开始产出。出站音频只有一路，说话人无法从听觉上分辨当前在播的是谁触发的回复，所以命中唤醒词一律夺回话语权，不分归属取消占用者。
 - 插话展开是同步的：置 `CancellationToken`（LLM 流）与回合持有的 TTS 播放取消位（`ActiveTurn::playback_cancel`）。`ActiveTurn` 同时持两者，注册表只持 `Weak`，回合任务与每条流的 synth 任务各持一份 `Arc`，synth 任务在 `finish_drained` 返回后才放掉——条目因此覆盖播放尾，无需摘除钩子。
-- LLM 取消贯穿 `run_tool_loop`：provider 连接、每次流读取、每轮模型调用、每次工具执行前都检查令牌，取消返回 `ToolLoopError::Cancelled`；语音回合对它不回 `LLM_ERROR_REPLY`、不落上下文，文本路由传一次性令牌保持原行为。
+- LLM 取消贯穿 `run_tool_loop`：provider 连接、每次流读取、每轮模型调用、每次工具执行前都检查令牌，取消返回 `ToolLoopError::Cancelled`；语音回合对它不回失败说明、不落上下文，文本路由传一次性令牌保持原行为。
 - 逐帧取消：`process_encoded_segment` 的读帧循环检查播放取消位，插话不必等当前整句播完；`TtsTurnRuntime::abort` 先置回合播放取消位再中止全部流的 synth 任务，各流的会话随任务 future 一起 drop。
 - 出站通知改经共享 `VoiceChannel`（`Channel` clone 共享同一条连接）持有者，回合任务各自建 client；传输失败后台重连替换通道，本次通知不重试，避免重复发送。
 
