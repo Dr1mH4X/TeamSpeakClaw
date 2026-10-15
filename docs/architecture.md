@@ -2,7 +2,7 @@
 
 TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。
 
-本文只写系统拓扑与关键代码路径：模块级明细以源码为准，取舍的理由与代价见 [.agents/notes/](../.agents/notes/README.md)，目录级规则只出现在模块 `AGENTS.md` 中。
+本文是索引与拓扑：分层规则、入口流、子系统一览与组件图。每个子系统的契约、关键序列与不变量见其专页；取舍的理由与代价见 [.agents/notes/](../.agents/notes/README.md)，目录级规则只出现在模块 `AGENTS.md` 中。
 
 ## 分层规范
 
@@ -12,37 +12,40 @@ TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，�
 
 ## 入口流
 
-`main.rs` 装配 `AppConfig`、`PermissionGate`、`ToolRegistry` 与 `LlmEngine`，随后调用 `adapter::run()` 进入会话循环，并监听 Ctrl-C / SIGTERM 触发优雅关闭。
+`main.rs` 装配 `AppConfig`、`PermissionGate`、`ToolRegistry` 与 `LlmEngine`，随后调用 `adapter::run()` 进入会话循环并监听 Ctrl-C / SIGTERM 优雅关闭。
 
-`adapter::run()` 先按需加载唤醒模型（`[headless.wakeword]`）——缺文件或模型非法直接终止启动、不进入连接——再建 TeamSpeak 连接，按需启动 NapCat（`config.napcat.enabled`）与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。
+`adapter::run()` 先按需加载唤醒模型，再建 TeamSpeak 连接，按需启动 NapCat 与 headless 运行时，最后经 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。
 
-任一组件失败都结束本轮会话并进入重连；退避序列、尝试上限与失败分类归 `adapter/lifecycle.rs`，归属边界见[会话生命周期归属](../.agents/notes/implemented/architecture/2026-10-07-session-lifecycle-ownership.md)。
+voice bridge 就绪时 TS 文本经 `VoiceRouter` 而非 `EventRouter` 路由；三条入站路径的回合最终都由 `LlmEngine` 处理，工具调用经 `ToolRegistry` 过 `PermissionGate`。细节见[会话生命周期与重连](subsystems/lifecycle.md)、[事件路由与回合准入](subsystems/routing.md)。
 
-## 入站适配器
+## 子系统
 
-TeamSpeak 侧（`adapter/headless.rs`）封装 `tsclient-rs::Client`：身份与建连、文本与断开事件、音频发送、gRPC 语音服务、OpenWakeWord 唤醒门；子模块划分见 `adapter/headless/`。
+| 子系统 | 拥有 | 代码入口 |
+|---|---|---|
+| [会话生命周期与重连](subsystems/lifecycle.md) | 装配、连接生命周期、重连退避、就绪与关闭 | `main.rs`、`adapter.rs`、`adapter/lifecycle.rs` |
+| [TeamSpeak 无头客户端](subsystems/ts-client.md) | 客户端封装、身份、事件、音频发送、文本分片 | `adapter/headless.rs`、`adapter/headless/` |
+| [gRPC 语音桥](subsystems/voice-bridge.md) | 进程内语音服务、事件广播、bridge 就绪 | `adapter/headless/voice_service.rs`、`proto/voice.proto` |
+| [唤醒门](subsystems/wakeword.md) | OpenWakeWord 判定、说话人状态、插话触发 | `adapter/headless/wakeword.rs`、`adapter/headless/wakeword/` |
+| [语音回合](subsystems/voice-turns.md) | STT/TTS 流水线、回合准入与取消、出站音频 | `router/voice_router.rs`、`router/voice_turns.rs` |
+| [NapCat OneBot 11 适配器](subsystems/napcat.md) | WebSocket 连接、动作调用、上行事件解析 | `adapter/napcat.rs`、`adapter/napcat/` |
+| [事件路由与回合准入](subsystems/routing.md) | 路由循环、触发策略、回合骨架与门禁 | `router.rs`、`router/turn.rs`、`router/trigger.rs` |
+| [LLM 引擎与上下文](subsystems/llm.md) | provider、上下文与音频预算、工具循环 | `llm.rs`、`llm/` |
+| [模型可见提示词装配](subsystems/prompt.md) | 有序段落、变量解析、运行期上下文快照 | `prompt.rs`、`prompt/` |
+| [工具系统与权限门](subsystems/tools.md) | Tool 注册表、执行上下文、ACL 判定 | `tools.rs`、`tools/`、`permission.rs` |
+| [配置加载与日志](subsystems/config.md) | 配置文件与目录约定、日志初始化 | `config.rs`、`config/`、`log.rs` |
 
-NapCat 侧（`adapter/napcat.rs`）是 OneBot 11 WebSocket 客户端，只在启用时连接；它自带的两处重试循环一个有界一个无界，不复用共享重连驱动。
+## 新行为放哪里
 
-## 路由与语音桥
-
-voice bridge 就绪时 TS 文本经 `VoiceRouter` 路由而非 `EventRouter`，判定只有 `should_route_text_through_bridge(voice_configured, bridge_ready)` 一处；就绪由 gRPC 服务、事件流订阅与 actor handler 三个组件全 Up 决定，组件只上报 Up/Down。TS 的触发策略（私聊直触、前缀剥离、回复目标）统一由 `router/trigger.rs` 计算。
-
-`VoiceRouter` 提供音频 STT/TTS 双流水线、唤醒门准入与唯一的出站音频 FIFO；调用者身份键、唤醒裁决归属、TTS 会话与提示音的生命周期分别见[调用者身份键](../.agents/notes/implemented/bug-fix/2026-10-15-ts-caller-identity-keys.md)、[唤醒裁决归属](../.agents/notes/implemented/architecture/2026-10-04-wake-verdict-owned-by-gate.md)、[TTS 会话归属](../.agents/notes/implemented/bug-fix/2026-10-02-tts-session-ownership.md)，在飞名额与响应体积上限是 `adapter/headless/speech.rs`、`router/voice_router.rs` 里的常量。
-
-TS 文本路由、工具回复与语音桥 `send_notice` 共用 `text_util` 的唯一发送实现，`split_message()` 按 TS3 ServerQuery 的 8192 字节单行上限做 UTF-8 安全切分。
-
-## LLM 引擎与提示词
-
-`llm/` 分四块：引擎入口、OpenAI 兼容客户端、上下文与轮次协调、流式工具循环。TS 文本、NapCat 与语音三条入口共用 `router/turn.rs` 的回合骨架，见 [LLM 回合模块](../.agents/notes/implemented/architecture/2026-10-03-llm-turn-module.md)。
-
-`prompt/` 是模型可见提示词的唯一归属地：system 提示词与 TTS 风格提示都是其中的有序段落常量，由回合装配一次；上下文与音频历史的体积预算、体积类失败的收缩重试见 [重试恢复](../.agents/notes/implemented/bug-fix/2026-10-15-payload-retry-recovery.md)。
-
-## 权限与工具
-
-`permission.rs` 的 `PermissionGate` 按 `acl.toml` 的服务组与频道组规则给出工具白名单，`allowed_skills` 作为旧键仍可解析；受保护组的目标交互另有授权开关。
-
-`tools.rs` 的 `Tool` trait 与 `ToolRegistry` 是模型可调用函数的唯一注册处，工具实现统一收 `UnifiedExecutionContext`，按用途分 `communication`、`information`、`moderation`、`music`、`web_search` 五组；代码侧一律用「工具」一词，见 [命名统一](../.agents/notes/implemented/architecture/2026-10-12-tool-vocabulary-rename.md)。
+| 目标 | 归属 |
+|---|---|
+| 新增或修改模型可调用的工具 | `tools/` 下对应分组，注册表在 `tools.rs` |
+| 新增模型可见的提示词内容 | `prompt/sections.rs` 的段落常量 |
+| 新增配置项 | `config/` 下对应子模块，示例同步 `examples/config/` |
+| 新增 TeamSpeak 侧行为 | `adapter/headless/` 的对应子模块 |
+| 新增 QQ 侧动作或事件 | `adapter/napcat/` 的 `api` / `event` |
+| 改动回合的准入、取消或落库 | `router/turn.rs` 与 `llm/context.rs` |
+| 改动唤醒判定 | `adapter/headless/wakeword.rs` 与唤醒门的说话人状态 |
+| 新增跨适配器的协调逻辑 | `adapter/lifecycle.rs` |
 
 ## 组件图
 

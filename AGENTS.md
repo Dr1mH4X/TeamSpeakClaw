@@ -37,8 +37,10 @@ proto/voice.proto            # 语音桥 gRPC protobuf
 └── skills/                  # agent 侧复用工作流（SKILL.md）；规则见 .agents/skills/AGENTS.md
 docs/
 ├── AGENTS.md                # 文档标准
+├── architecture.md          # 索引与拓扑：分层规范、入口流、子系统一览、组件图
+├── subsystems/              # 每个子系统一篇：契约、关键序列、不变量；规则见 docs/subsystems/AGENTS.md
 ├── release/                 # 发版日志：每个 tag 一篇，作为 Release 正文；规则见 docs/release/AGENTS.md
-└── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
+└── development.md 等         # 其余开发者文档，详见 docs/AGENTS.md 分层表
 examples/
 ├── config/                  # 参考配置模板（settings.toml, acl.toml；Release 打包含此两文件）
 ├── funasr/                  # FunASR 本地 STT 的 Compose 示例
@@ -78,7 +80,8 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 ## Conventions
 
 - [docs/AGENTS.md](docs/AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
-- [docs/architecture.md](docs/architecture.md) — 架构：分层规范、入口流、双入站适配器、路由与语音桥、LLM 与提示词、权限与工具、组件图。
+- [docs/architecture.md](docs/architecture.md) — 架构：分层规范、入口流、子系统索引、新行为归属与组件图。
+- [docs/subsystems/AGENTS.md](docs/subsystems/AGENTS.md) — 子系统文档：每篇的归属边界与固定四节，以及新增与拆分规则。
 - [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
 - [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
 - [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。

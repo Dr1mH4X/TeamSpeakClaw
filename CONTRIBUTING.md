@@ -12,7 +12,7 @@
 
 | 改动 | 指导文件 |
 |---|---|
-| `src/` 代码 | [docs/architecture.md](docs/architecture.md)、[docs/defensive-patterns.md](docs/defensive-patterns.md) |
+| `src/` 代码 | [docs/architecture.md](docs/architecture.md)（索引）、[docs/subsystems/](docs/subsystems/AGENTS.md) 下的子系统页、[docs/defensive-patterns.md](docs/defensive-patterns.md) |
 | 构建、常用命令、git、输出规范 | [docs/development.md](docs/development.md) |
 | 测试与提交前质量门 | [docs/testing.md](docs/testing.md)、[docs/ci-cd.md](docs/ci-cd.md) |
 | 架构、生命周期、并发、音频/语音桥、重连等非平凡变更 | [docs/defensive-patterns.md](docs/defensive-patterns.md)、[.agents/notes/README.md](.agents/notes/README.md) |
