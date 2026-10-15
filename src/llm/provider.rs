@@ -56,6 +56,19 @@ impl LlmFailure {
         )
     }
 
+    /// 用户可见的失败说明：类别开头加细节，日志里的 `Display` 另有措辞
+    pub fn user_text(&self) -> String {
+        match self {
+            Self::PayloadTooLarge { message } => format!("payload too large: {message}"),
+            Self::ContextWindowExceeded { message } => {
+                format!("context window exceeded: {message}")
+            }
+            Self::EmptyResponse { finish_reason } => {
+                format!("no content in the model completion (finish reason '{finish_reason}')")
+            }
+        }
+    }
+
     fn rejected_body(body_bytes: usize, limit: usize) -> Self {
         Self::PayloadTooLarge {
             message: format!("request body of {body_bytes} bytes exceeds the {limit}-byte limit"),
@@ -1044,6 +1057,40 @@ mod tests {
         .into();
 
         assert!(error.downcast_ref::<LlmFailure>().is_some());
+    }
+
+    #[test]
+    fn user_text_names_the_class_for_every_variant() {
+        let payload = LlmFailure::PayloadTooLarge {
+            message: "request body of 9 bytes exceeds the 8-byte limit".to_string(),
+        };
+        let window = LlmFailure::ContextWindowExceeded {
+            message: "rejected with HTTP 400".to_string(),
+        };
+        let empty = LlmFailure::EmptyResponse {
+            finish_reason: "stop".to_string(),
+        };
+
+        assert_eq!(
+            payload.user_text(),
+            "payload too large: request body of 9 bytes exceeds the 8-byte limit"
+        );
+        assert_eq!(
+            window.user_text(),
+            "context window exceeded: rejected with HTTP 400"
+        );
+        assert_eq!(
+            empty.user_text(),
+            "no content in the model completion (finish reason 'stop')"
+        );
+        // 用户文案与日志文案是两套措辞，类别都稳定出现在各自的开头
+        assert!(payload.to_string().starts_with("LLM payload too large:"));
+        assert!(window
+            .to_string()
+            .starts_with("LLM request exceeded the model context window:"));
+        assert!(empty
+            .to_string()
+            .starts_with("LLM completion carried no content"));
     }
 
     #[test]
