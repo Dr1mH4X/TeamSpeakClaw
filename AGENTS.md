@@ -67,7 +67,7 @@ website/                     # Docusaurus 用户文档（排除在 Rust CI 路�
 
 ## Critical Code Paths
 
-每条仅列要点，细节见 [docs/architecture.md](docs/architecture.md) 对应小节。
+每条仅列要点，细节见 [docs/subsystems/](docs/subsystems/AGENTS.md) 下对应的子系统页。
 
 - `text_util::send_text_message()` + `split_message()` + `MAX_MESSAGE_BYTES`：8192 字节 TS3 ServerQuery 上限，UTF-8 安全、优先空白切分；TS 文本路由与工具回复、语音桥 `send_notice` 共用这一个发送实现
 - `voice_router.rs`：音频 STT/TTS 双流水线、OpenWakeWord 唤醒门（omni/STT 同门）、音乐 bot 音频过滤、gRPC 语音服务

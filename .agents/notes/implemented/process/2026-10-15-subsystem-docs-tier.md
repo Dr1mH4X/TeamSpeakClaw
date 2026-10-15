@@ -10,7 +10,7 @@ Status: implemented
 
 `docs/subsystems/` 下每个子系统一篇，固定四节：职责、关键路径与序列、不变量、相关决策。归属跟着代码边界走，不跟着功能特性走；横跨多个子系统的行为写在拥有它的那篇里，其他地方只链接。取舍理由不进子系统页，链接到 `.agents/notes/`。
 
-`docs/architecture.md` 只留分层规范、入口流、子系统索引表、「新行为放哪里」与组件图：它是索引与拓扑，不是模块参考。分层归属表见 [docs/AGENTS.md](../../../docs/AGENTS.md)，子系统页的规则见 [docs/subsystems/AGENTS.md](../../../docs/subsystems/AGENTS.md)。
+`docs/architecture.md` 只留分层规范、入口流、子系统索引表、「新行为放哪里」与组件图：它是索引与拓扑，不是模块参考。分层归属表见 [docs/AGENTS.md](../../../../docs/AGENTS.md)，子系统页的规则见 [docs/subsystems/AGENTS.md](../../../../docs/subsystems/AGENTS.md)。
 
 ## Alternatives considered
 

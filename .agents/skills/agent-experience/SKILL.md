@@ -5,7 +5,7 @@ description: 写或改模型可见的工具定义（名称、描述、参数 sch
 
 # 模型可见能力的设计准则
 
-本技能只放判据，没有外部来源：工具定义在 `src/tools.rs` 与 `src/tools/`，system 提示词段落是 `src/prompt/` 的源码常量，两者都在 [docs/architecture.md](../../../docs/architecture.md) 里有归属说明，这里不重述。
+本技能只放判据，没有外部来源：工具定义在 `src/tools.rs` 与 `src/tools/`，system 提示词段落是 `src/prompt/` 的源码常量，两者的归属说明分别在 [工具系统与权限门](../../../docs/subsystems/tools.md) 与 [模型可见提示词装配](../../../docs/subsystems/prompt.md)，这里不重述。
 
 ## 工作流步骤
 

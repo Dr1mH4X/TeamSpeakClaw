@@ -24,7 +24,7 @@ Status: implemented
 ## Consequences
 
 - 所得：工具副作用不再因体积重试重放；重试请求严格变小；取消时删掉的轮次完整回来；不再有预算外的长期 base64 占用。
-- 代价：体积失败触发收缩后，不可见前缀里的旧文本会从存储历史中永久消失（`docs/architecture.md` 已明确）；非取消类失败保留收缩，会话上下文会比失败前小。
+- 代价：体积失败触发收缩后，不可见前缀里的旧文本会从存储历史中永久消失（[LLM 引擎与上下文](../../../../docs/subsystems/llm.md) 已明确）；非取消类失败保留收缩，会话上下文会比失败前小。
 - 验证：反向验证 —— 退回 `tool_loop` 分类后 `regression_payload_retry_must_not_repeat_completed_action` 报 `action ran 2 times, provider calls 4`；退回收缩语义后 `regression_retry_shrinks_already_clipped_wire_view` 报 `1641402 -> 1641402 bytes`；删掉取消还原后 `cancelled_retry_restores_the_history_the_shrink_removed` 报 `left: 2, right: 8`。`cargo test --all-targets --offline --locked` 400 passed，`cargo fmt --check` 与 `cargo clippy --all-targets --offline --locked -- -D warnings` 全绿。
 
 相关：[LLM 回合模块](../../implemented/architecture/2026-10-03-llm-turn-module.md) 是回合骨架与体积自愈的归属地；[同会话回合按到达顺序取锁](../../implemented/bug-fix/2026-10-04-turn-arrival-order-tickets.md) 记录了会话锁的位置，收缩与还原都在锁内发生。

@@ -13,7 +13,7 @@ Status: implemented
 - 短语在启动期由本轮 TTS 的同一个 provider 合成一次（`feedback_phrases()` 是各池的并集，池之间不重复），解码成 48k 立体声 PCM 缓存（`decode_to_pcm_48k_stereo`，ffmpeg 只在预热时各跑一次）；触发时取该池轮换到的那条，以 `AudioOutput::enqueue_pcm_clip_with_cancel` 入队 PCM 片段，首帧只剩进程内 opus 编码。预热失败只记日志，首次触发按需重试。
 - 工具提示音在本轮第一次工具调用开始执行时立即入队（`ToolFeedback` 的 `announced` 置位后静默），与工具耗时无关；片段与本轮各条 TTS 流共用回合播放取消位，插话时一起停声。
 - 提示音的取消位就是回合持有的播放取消位（`ActiveTurn::playback_cancel`），与本回合各条 TTS 流共用（[TTS 会话按 LLM 流创建，工具轮与最终回复各占一条](../../implemented/bug-fix/2026-10-03-tts-session-per-llm-stream.md)）：插话取消回合时提示音与回复一起停。这类片段不登记进 `stop_clips` 的取消集合——那批取消位属于工具片段，登记进去会让「停止播放」连带取消本回合的 TTS 播放。
-- 唤醒确认音挂在唤醒门的命中判定上：命中点之后 VAD 活跃语音不足 `WAKE_ONLY_TAIL_MS`（200ms）即判「这条 utterance 只有唤醒词」，播确认音并丢弃该 chunk，不再进 STT/LLM；判据是流式累计的活跃毫秒数，不是音频长度（[唤醒门逐帧喂入，命中即插话](../../implemented/feature/2026-10-03-wakeword-per-frame-gate.md)）。确认音同时 `WakeGate::refresh_window`，把开门窗口从确认时刻重算。
+- 唤醒确认音挂在唤醒门的命中判定上：命中锚点之后 VAD 活跃语音不足 `WAKE_ONLY_TAIL_MS`（200ms）即判「这条 utterance 只有唤醒词」，播确认音并丢弃该 chunk，不再进 STT/LLM；判据是流式累计的活跃毫秒数，不是音频长度（[唤醒门逐帧喂入，命中即插话](../../implemented/feature/2026-10-03-wakeword-per-frame-gate.md)）。确认音同时 `WakeGate::refresh_window`，把开门窗口从确认时刻重算。
 - 确认音没有真实回合，就地登记一个「播报回合」并 `mark_producing`：`TurnRegistry::producing_turn()` 因此能看到它，后续唤醒词可插话取消，「嗯哼」的回声也按既有「忙」语义丢弃。播完（或被取消）后由等待任务放出句柄，等待有 10s 上限——消费者停摆时不能留一条「永远产出」的条目把后续语音全判成忙。
 - 工具提示音挂在两条语音回路上：STT（`handle_user_input` 的 `tool_feedback`）与 omni（`handle_omni_audio_chunk`）都置真，两块共用同一 `ToolFeedback`、`FeedbackPlayer` 与句段缓存；桥接文本不挂，文本回复本身即反馈。
 

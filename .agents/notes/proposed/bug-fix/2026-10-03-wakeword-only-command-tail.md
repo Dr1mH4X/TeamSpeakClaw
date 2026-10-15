@@ -36,7 +36,7 @@ CPU/延迟/STT 成本：无新增推理、无新增 STT/TTS 调用；只是每�
 
 测试方案（已落地）：`src/adapter/headless/wakeword.rs` 的 `fed_samples_before_accumulates_across_frames`（`:580`）、`fire_sample_is_the_absolute_hit_block_start_for_320_sample_frames`（`:630`，含 320 采样帧下旧口径固定偏晚 960 采样的场景）与 `fire_sample_is_absolute_regardless_of_frame_length`（`:661`）断言绝对锚点；`src/router/voice_feedback.rs:497`（80ms 独占、再攒 120ms 恰好 200ms → 有命令）与 `:523`（100ms 不误判、补到恰好阈值 → 有命令）覆盖阈值边界；`src/router/voice_router.rs:1710` 与 `:1744` 覆盖新的合成裁决与同一阈值边界。
 
-需同步文档：`src/router/voice_feedback.rs:36-44`、`src/router/voice_feedback.rs:92-99` 注释（已改）；`src/adapter/headless/wakeword.rs:65-74` 的滞后说明（已改，旧版「约 1s 平滑均值」的说法删除）；`docs/architecture.md:21` 的判据描述（已改为锚点口径与 200ms）。
+需同步文档：`src/router/voice_feedback.rs:36-44`、`src/router/voice_feedback.rs:92-99` 注释（已改）；`src/adapter/headless/wakeword.rs:65-74` 的滞后说明（已改，旧版「约 1s 平滑均值」的说法删除）；`docs/subsystems/wakeword.md` 的判据描述（已改为锚点口径与 200ms）。
 
 测量协议（未执行）：本机 `models/` 有分类器时才可跑（onnx 不入库、CI 无模型）。用固定语料（纯唤醒词、唤醒词+「停」、唤醒词+「下一首」、唤醒词+长指令各若干遍，覆盖播报中与静默）跑 `RUST_LOG=debug`，读两条分布：纯唤醒词的「锚点后活跃毫秒」（假阳性侧）与命令的「`T_rep − T_end` + 锚点后活跃毫秒」（假阴性侧）。阈值取两条分布之间的间隔。
 
@@ -56,7 +56,7 @@ CPU/延迟/STT 成本：无新增推理、无新增 STT/TTS 调用；只是每�
 
 ### O3 判据落点到 STT 之后
 
-行为变化：命中后照常 STT，只有转写结果「去掉唤醒词后为空/过短」才播确认音并丢弃；否则走正常回合。成本是每次只喊唤醒词多一次 STT 调用（网络与计费），且确认音从「准入即播（进程内 opus 编码，见 `src/router/voice_feedback.rs:1-6`，要点在 `:5`）」推迟到 STT 往返之后（数百毫秒起）。致命问题：分类器只给概率不给文本，没有可靠的「去掉唤醒词」操作（按文件名反推短语已被 `../implemented/2026-10-02-wakeword-utterance-passthrough.md:18` 否决），等价做法只能退回按长度判，而「停」（1 字）与唤醒词转写无法用长度区分——要么把要救的短命令一起丢，要么一律当命令、等于取消该特性。另一处硬限制：omni 模式（`src/router/voice_router.rs:1152-1156` → `src/router/voice_router.rs:1179`，`src/router/voice_router.rs:1213` 以 `input_audio` 组装 messages）没有转写，O3 对 omni 完全不可用，而门是 omni/STT 共用（`docs/architecture.md:21`），必须保留一条音频层判据。回归风险集中在确认音时序与额外费用；测试需注入 STT 桩；文档需重写 `website/docs/usage.md:42` 与英文镜像 `website/i18n/en/docusaurus-plugin-content-docs/current/usage.md:42` 的确认音描述。未做。
+行为变化：命中后照常 STT，只有转写结果「去掉唤醒词后为空/过短」才播确认音并丢弃；否则走正常回合。成本是每次只喊唤醒词多一次 STT 调用（网络与计费），且确认音从「准入即播（进程内 opus 编码，见 `src/router/voice_feedback.rs:1-6`，要点在 `:5`）」推迟到 STT 往返之后（数百毫秒起）。致命问题：分类器只给概率不给文本，没有可靠的「去掉唤醒词」操作（按文件名反推短语已被 `../implemented/2026-10-02-wakeword-utterance-passthrough.md:18` 否决），等价做法只能退回按长度判，而「停」（1 字）与唤醒词转写无法用长度区分——要么把要救的短命令一起丢，要么一律当命令、等于取消该特性。另一处硬限制：omni 模式（`src/router/voice_router.rs:1152-1156` → `src/router/voice_router.rs:1179`，`src/router/voice_router.rs:1213` 以 `input_audio` 组装 messages）没有转写，O3 对 omni 完全不可用，而门是 omni/STT 共用（`docs/subsystems/wakeword.md`），必须保留一条音频层判据。回归风险集中在确认音时序与额外费用；测试需注入 STT 桩；文档需重写 `website/docs/usage.md:42` 与英文镜像 `website/i18n/en/docusaurus-plugin-content-docs/current/usage.md:42` 的确认音描述。未做。
 
 ### O4 不丢 chunk，只在转写只剩唤醒词时抑制回复
 
@@ -90,7 +90,7 @@ O1/O2a 的锚点修复已落地，阈值经决策定为 200ms（O5 曾落到 120
 
 锚点口径落地后，`has_command_tail`（`src/router/voice_feedback.rs:184-186`）累计的是命中块起点之后的 VAD 活跃毫秒，命中时并按锚点回补报告之前已喂入的块内帧（`note_detection`，`src/router/voice_feedback.rs:126-135`）。由此有一条可算的结论：纯唤醒词 utterance 会把命中块内属于唤醒词自身的音频也计入，上限是一个命中块 = `CHUNK_SIZE = 1280` 采样 @16k = 80ms（`src/adapter/headless/wakeword/model.rs:18`）。严格口径下只有这一个量，记 `m = 阈值 − 命中块内唤醒词尾音（≤80ms）`：它既是纯唤醒词的假阳性余量，也是命令本体需要攒够的有声时长。阈值已定为 200ms，故 `m = 120ms`——纯唤醒词要再有约 120ms 级有声抖动才会被判成命令、多走一次 STT/LLM，命令本体有声不足约 120ms 时仍会被判成唤醒词独占。三个候选阈值的后果（决策依据）：120ms → `m = 40ms`，最不容易漏掉同声短命令，但纯唤醒词后约 40ms 抖动就会误判；200ms → `m = 120ms`（已选）；280ms → `m = 200ms`，与旧口径（只累计报告帧之后的活跃帧）的行为完全一致，代价是放弃了锚点回收的 80ms 几何。该记法与 `src/router/voice_feedback.rs:36-44` 的常量注释、`wake_only_tail_ms_matches_the_documented_geometry` 的文档注释（`src/router/voice_feedback.rs:566-568`）与其断言（`src/router/voice_feedback.rs:570`，断言常量 200、命中块 80ms 且阈值必须大于一个命中块）一致；块内回补的用例是 `frames_inside_the_hit_block_are_backfilled_at_detection`（`src/router/voice_feedback.rs:497`）。
 
-结论：阈值已落地为 200ms，`WAKE_ONLY_TAIL_MS`（`src/router/voice_feedback.rs:45`）与 `src/router/voice_feedback.rs:36-44` 的注释、`src/router/voice_feedback.rs:566-568` 的测试文档注释、`src/router/voice_feedback.rs:570` 的断言、`docs/architecture.md:21`（写 `WAKE_ONLY_TAIL_MS = 200ms`）以及 `src/router/voice_router.rs:1710` 与 `:1744` 的裁决用例都已同步。余量与命令本体最短有声时长是同一个量，不能分开设定（要让人耳可辨的最短命令更长，就必须接受更大的噪声余量，反之亦然），280ms 及以上的候选点等于放弃几何回收；选 200ms 是「几何回收用于抬高稳健性」的一侧。已知代价有两条：命令本体有声不足约 120ms 时仍被判成唤醒词独占（不进 STT/LLM）；阈值仍只有几何依据，分类器滞后 `T_rep − T_end` 未测量，只能按真实语料标定后复核。若后续改阈值，同步上述各处即可。
+结论：阈值已落地为 200ms，`WAKE_ONLY_TAIL_MS`（`src/router/voice_feedback.rs:45`）与 `src/router/voice_feedback.rs:36-44` 的注释、`src/router/voice_feedback.rs:566-568` 的测试文档注释、`src/router/voice_feedback.rs:570` 的断言、`docs/subsystems/wakeword.md`（写 `WAKE_ONLY_TAIL_MS = 200ms`）以及 `src/router/voice_router.rs:1710` 与 `:1744` 的裁决用例都已同步。余量与命令本体最短有声时长是同一个量，不能分开设定（要让人耳可辨的最短命令更长，就必须接受更大的噪声余量，反之亦然），280ms 及以上的候选点等于放弃几何回收；选 200ms 是「几何回收用于抬高稳健性」的一侧。已知代价有两条：命令本体有声不足约 120ms 时仍被判成唤醒词独占（不进 STT/LLM）；阈值仍只有几何依据，分类器滞后 `T_rep − T_end` 未测量，只能按真实语料标定后复核。若后续改阈值，同步上述各处即可。
 
 ## Decision
 
@@ -127,6 +127,6 @@ UX 变化：落地后「唤醒词 停 / 下一首」这类同声短命令不再�
 
 误触发风险与漏判代价：判据从「固定 200ms 窗口」变成「命中块锚点起算的窗口」，假阳性侧多承了命中块内唤醒词自身的 ≤80ms（O2a），阈值保持 200ms，因此余量 = `200 − 80 = 120ms`；同一量也是命令本体最短有声时长，即命令本体不足约 120ms 有声时仍被判成唤醒词独占（选 200ms 的代价）。阈值仍缺真实语料标定——锚点只消掉了可论证的几何部分，分类器滞后 `T_rep − T_end` 未测；这是本轮落地后最值得复看的一处。
 
-文档同步：`website/docs/usage.md:42`（中文）与 `website/i18n/en/docusaurus-plugin-content-docs/current/usage.md:42`（英文）——采用 O3/O4 时需改写确认音时序与「只喊唤醒词会走一次 LLM」（本轮未采用，两条文档未改）；`docs/architecture.md:21` 的判据描述已按锚点口径与 200ms 更新，`src/router/voice_feedback.rs:36-44`、`src/router/voice_feedback.rs:92-99` 与 `src/adapter/headless/wakeword.rs:65-74` 的注释也已改（后者原来是错的：滞后不是「约 1s 平滑均值」）。
+文档同步：`website/docs/usage.md:42`（中文）与 `website/i18n/en/docusaurus-plugin-content-docs/current/usage.md:42`（英文）——采用 O3/O4 时需改写确认音时序与「只喊唤醒词会走一次 LLM」（本轮未采用，两条文档未改）；`docs/subsystems/wakeword.md` 的判据描述已按锚点口径与 200ms 更新，`src/router/voice_feedback.rs:36-44`、`src/router/voice_feedback.rs:92-99` 与 `src/adapter/headless/wakeword.rs:65-74` 的注释也已改（后者原来是错的：滞后不是「约 1s 平滑均值」）。
 
 状态变更：`.agents/notes/implemented/2026-10-03-wakeword-per-frame-gate.md:15` 与 `.agents/notes/implemented/2026-10-03-voice-feedback-phrases.md:16`、`:30` 里「200ms 判据 + 已知代价」的记述需要按落地结果改写为「阈值 200ms + 锚点口径 + 待实测的假阳性余量」；本笔记只落了 O1/O2a/O5，测量协议与 O3/O4 未做，因此仍留在 `proposed`。
