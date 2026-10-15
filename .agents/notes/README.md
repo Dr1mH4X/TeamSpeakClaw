@@ -63,6 +63,8 @@ Status: <状态>
 
 正文以 `## Problem` 开头，写法上不依赖解决方案即可独立成文。后续章节取决于生命周期，固定章节只用下面这些名称，真正独特的技术章节（拓扑、协议约定、schema 等）放在必需章节之间自由组织。
 
+引用代码写模块路径与符号名（如 `src/router/turn.rs` 的 `TurnPermit::reserve`、`src/llm/context.rs` 的 `history_for_wire`），不写 `file:line` 行号：行号随任何一次编辑漂移，而漂移没有任何门禁能发现。
+
 implemented 骨架：
 
 ```markdown
@@ -100,4 +102,5 @@ proposed 骨架：
 - 正文以 `## Problem` 开头，implemented 用 `## Decision`，proposed 用 `## Proposal`；implemented 里没有 `## Plan`、`## Acceptance criteria` 这类 spec 语气。
 - `## Alternatives considered` 存在，且写的是真实考虑过并放弃的方案。
 - 每一条笔记间链接都能解析到仓库里的文件（`](../../implemented/<class>/<file>.md)` 形式）。
+- 没有 `file:line` 行号引用：代码只写模块路径与符号名，文档只写文件名与小节名。
 - 没有 emoji、没有历史叙述（「之前/现在/不再」）、没有过程流水账。
