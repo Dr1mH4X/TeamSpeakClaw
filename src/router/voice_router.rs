@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
@@ -275,6 +275,8 @@ pub struct VoiceRouter {
     ts_adapter: Arc<TsAdapter>,
     audio_pipeline: Mutex<Option<OpusSttPipeline>>,
     speech_provider: Option<Arc<OpenAiSpeechProvider>>,
+    /// 完整语音回合在飞上限，覆盖 caller 查询与 STT，不只限制待处理队列
+    audio_turn_slots: Arc<Semaphore>,
     bridge_state: BridgeReadiness,
     /// 统一出站：TTS/clip/外部流 FIFO；并发由 TurnCoordinator + 本层队列承担
     audio_output: AudioOutput,
@@ -310,6 +312,27 @@ fn cancel_turn(turns: &TurnRegistry, turn: &Arc<ActiveTurn>) {
     turn.cancel.cancel();
     turn.playback_cancel().store(true, Ordering::SeqCst);
     turns.remove_turn(turn);
+}
+
+/// 派发前占位；取消时丢弃整个请求 future，释放 HTTP 请求与容量。
+fn spawn_audio_turn(
+    tasks: &mut JoinSet<()>,
+    slots: &Arc<Semaphore>,
+    cancel: CancellationToken,
+    turn: impl std::future::Future<Output = ()> + Send + 'static,
+) -> bool {
+    let Ok(permit) = slots.clone().try_acquire_owned() else {
+        return false;
+    };
+    tasks.spawn(async move {
+        let _permit = permit;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {},
+            _ = turn => {},
+        }
+    });
+    true
 }
 
 /// 新回合顶替同 clid 旧回合时的取消分工（`begin_turn` 返回旧条目后调用）。
@@ -414,6 +437,7 @@ impl VoiceRouter {
             registry,
             ts_adapter,
             speech_provider,
+            audio_turn_slots: Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT)),
             bridge_state,
             audio_output,
             voice_audio,
@@ -1015,7 +1039,8 @@ impl VoiceRouter {
         );
         let router = self.clone();
         let channel = channel.clone();
-        turn_tasks.spawn(async move {
+        let cancel = active.cancel.clone();
+        let admitted = spawn_audio_turn(turn_tasks, &self.audio_turn_slots, cancel, async move {
             if let Err(error) = router
                 .run_admitted_utterance(channel, active, audio, chunk)
                 .await
@@ -1023,6 +1048,9 @@ impl VoiceRouter {
                 error!("Voice turn failed: {error}");
             }
         });
+        if !admitted {
+            warn!(clid, "voice API capacity full; dropping audio chunk");
+        }
         Ok(())
     }
 
@@ -1574,6 +1602,72 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn audio_api_capacity_rejects_excess_work_before_polling() {
+        let slots = Arc::new(Semaphore::new(AUDIO_MAX_IN_FLIGHT));
+        let mut tasks = JoinSet::new();
+        let cancel = CancellationToken::new();
+        for _ in 0..AUDIO_MAX_IN_FLIGHT {
+            assert!(spawn_audio_turn(
+                &mut tasks,
+                &slots,
+                cancel.clone(),
+                std::future::pending(),
+            ));
+        }
+        let polled = Arc::new(AtomicBool::new(false));
+        let attempted = polled.clone();
+        assert!(!spawn_audio_turn(
+            &mut tasks,
+            &slots,
+            cancel.clone(),
+            async move { attempted.store(true, Ordering::SeqCst) },
+        ));
+        assert!(!polled.load(Ordering::SeqCst));
+        cancel.cancel();
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(slots.available_permits(), AUDIO_MAX_IN_FLIGHT);
+    }
+
+    #[tokio::test]
+    async fn cancelling_slow_audio_api_work_drops_request_and_releases_capacity() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut tasks = JoinSet::new();
+        let cancel = CancellationToken::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let request = DropMarker(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        assert!(spawn_audio_turn(
+            &mut tasks,
+            &slots,
+            cancel.clone(),
+            async move {
+                let _request = request;
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            },
+        ));
+        ready.await.unwrap();
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(slots.available_permits(), 1);
+        assert!(spawn_audio_turn(
+            &mut tasks,
+            &slots,
+            CancellationToken::new(),
+            async {},
+        ));
+        tasks.join_next().await.unwrap().unwrap();
+        assert_eq!(slots.available_permits(), 1);
     }
 
     #[tokio::test]
