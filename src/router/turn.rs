@@ -21,6 +21,32 @@ use crate::tools::{ToolRegistry, UnifiedExecutionContext};
 /// LLM 后端不可用时的固定回复文案（ts/nc/voice 调用点共用）
 pub(crate) const LLM_ERROR_REPLY: &str = "AI backend unavailable. Please try again later.";
 
+/// clid 回退键：clid 会被复用，只在拿不到真实 UID 时使用
+pub(crate) fn ts_caller_clid_uid(clid: u32) -> String {
+    format!("clid:{clid}")
+}
+
+/// TS 调用者的准入键：容量票据与会话锁必须在 caller 解析（要查服务器）之前就定下来，
+/// 事件不带 UID 时退到 clid。clid 只配当准入键——它会被复用，复用后是另一个人
+pub(crate) fn ts_caller_admission_uid(event_uid: &str, clid: u32) -> String {
+    if event_uid.is_empty() {
+        ts_caller_clid_uid(clid)
+    } else {
+        event_uid.to_string()
+    }
+}
+
+/// TS 调用者的会话/历史键：解析出的真实 UID 优先（`clid` 复用不能把两任占用者写进同一份
+/// 历史），解析不到真实 UID 时退回准入键。绝不落到空串——空串会让所有拿不到 UID 的调用者
+/// 共用一份历史与一把会话锁
+pub(crate) fn ts_caller_session_uid(resolved_uid: &str, admission_uid: &str) -> String {
+    if resolved_uid.is_empty() {
+        admission_uid.to_string()
+    } else {
+        resolved_uid.to_string()
+    }
+}
+
 /// 体积类失败后最多重试的次数：只防放大，不保证保留内容
 const MAX_PAYLOAD_RETRIES: usize = 1;
 
@@ -241,6 +267,19 @@ mod tests {
     use futures_util::stream::{self, BoxStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn ts_caller_admission_key_falls_back_to_clid() {
+        assert_eq!(ts_caller_admission_uid("alice-uid", 7), "alice-uid");
+        assert_eq!(ts_caller_admission_uid("", 7), "clid:7");
+    }
+
+    /// 会话键用解析出的真实 UID：同一个 clid 复用后是另一个人，不能共享历史
+    #[test]
+    fn ts_caller_session_key_prefers_the_resolved_uid() {
+        assert_eq!(ts_caller_session_uid("alice-uid", "clid:7"), "alice-uid");
+        assert_eq!(ts_caller_session_uid("", "clid:7"), "clid:7");
+    }
 
     #[derive(Debug, Clone, Copy)]
     enum FakeOutcome {
