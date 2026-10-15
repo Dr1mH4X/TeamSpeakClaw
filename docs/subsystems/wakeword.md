@@ -1,6 +1,6 @@
 # 唤醒门
 
-唤醒门是语音桥入站的第一道裁决：`[headless.wakeword]` 启用时，语音桥把解码后的每一帧音频喂给 `WakewordGate`，由它判定是否命中唤醒词、是否仍在该 clid 的开门窗口内、以及这条 utterance 是否只喊了唤醒词。门模块在 `src/adapter/headless/wakeword.rs`，推理核心与命中打点分居 `wakeword/model.rs`、`wakeword/calibration.rs`，喂帧与裁决调度在 `src/router/voice_router.rs`。语音回合的其余部分（STT/TTS、LLM、出站音频 FIFO）不属于本文。
+唤醒门是语音桥入站的第一道裁决：`[headless.wakeword]` 启用时，语音桥把解码后的每一帧音频喂给 `WakewordGate`，由它判定是否命中唤醒词、是否仍在该 clid 的开门窗口内、以及这条 utterance 是否只喊了唤醒词。门模块在 `src/adapter/headless/wakeword.rs`，推理核心与命中打点分居 `wakeword/model.rs`、`wakeword/calibration.rs`，喂帧在 `src/router/voice_router.rs`，裁决到动作的映射在 `src/router/voice_turns.rs`。语音回合的其余部分（STT/TTS、LLM、出站音频 FIFO）不属于本文。
 
 ## 职责
 
