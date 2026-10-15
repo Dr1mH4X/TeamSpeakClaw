@@ -37,4 +37,4 @@ Status: implemented
 - 代价：`TurnRequest` 有 9 个字段，是一个请求对象而非 adapter，调用点仍需逐字段填一次；`TurnError` 要求调用点 match 一次；`TurnPermit` 的字段只为把占位持有到回合结束（容量释放靠 Drop）。
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --all-targets --locked`（317 用例全绿）。`src/router/turn.rs` 的 12 个用例用 `RecordingSink` 与脚本化 `FakeProvider` 覆盖：文本轮落库、音频轮落库、投递失败不落库且不再补发兜底、后端失败回固定文案且不落库、兜底文案也送不出去时仍以 `Failed` 交回调用点、空回复不发不落、非体积类失败不收缩历史、取消不回不落、体积收缩丢最早音频轮并重试一次、重试后请求体变小、重试上限 1 次、无音频可丢不重试。实机需确认 voice 的 TTS 收尾时序与三条失败文案。
 
-相关：[音频历史的线上体积预算](../../proposed/feature/2026-10-03-omni-audio-history-wire-budget.md) 记录的体积自愈在本轮换了归属（`src/router.rs` → `src/router/turn.rs`）。
+相关：[音频历史的线上体积预算](../../implemented/feature/2026-10-03-omni-audio-history-wire-budget.md) 记录的体积自愈在本轮换了归属（`src/router.rs` → `src/router/turn.rs`）。

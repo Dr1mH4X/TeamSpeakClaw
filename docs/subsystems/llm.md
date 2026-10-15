@@ -30,6 +30,6 @@
 ## 相关决策
 
 - [omni 音频轮进上下文历史](../../.agents/notes/implemented/feature/2026-10-02-omni-audio-context-history.md) — 音频轮以 WAV 字节进历史、装配为 `input_audio` content，以及成对逐轮丢弃的存储形态。
-- [omni 音频历史的 wire 体积预算与会话自愈](../../.agents/notes/proposed/feature/2026-10-03-omni-audio-history-wire-budget.md) — 装配层 wire 预算、单会话与全局音频上限、发送前预检与体积归类的取值与分工。
+- [omni 音频历史的 wire 体积预算与会话自愈](../../.agents/notes/implemented/feature/2026-10-03-omni-audio-history-wire-budget.md) — 装配层 wire 预算、单会话与全局音频上限、发送前预检与体积归类的取值与分工。
 - [体积重试的安全收缩与取消还原](../../.agents/notes/implemented/bug-fix/2026-10-15-payload-retry-recovery.md) — 收缩与装配共用可见后缀起点、快照式还原，以及工具执行后错误不纳入重试。
 - [LLM 回合骨架收敛为 `router/turn.rs` 单一归属](../../.agents/notes/implemented/architecture/2026-10-03-llm-turn-module.md) — 体积自愈的调用点归回合骨架，本子系统只提供引擎侧入口。
