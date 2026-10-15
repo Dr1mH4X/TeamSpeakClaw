@@ -12,7 +12,7 @@ Status: implemented
 
 ## Decision
 
-- 新增 `src/router/turn.rs`，模块拥有回合的全部策略：容量占位（`TurnPermit::reserve`，在事件循环里同步取，满即丢消息不 spawn）、同会话到达顺序票据（`LlmEngine::enqueue_turn_ticket`，同样在事件循环里同步取）与会话串行锁（`TurnPermit::acquire_session` 内先等前一条同会话回合结束再取，见[同会话回合按到达顺序取锁](../../implemented/bug-fix/2026-10-04-turn-arrival-order-tickets.md)）、工具白名单与工具循环、体积类失败收缩重试（`MAX_PAYLOAD_RETRIES = 1`）、`LLM_ERROR_REPLY` 的送达，以及「只有送达成功才落上下文」（`deliver`）。
+- 新增 `src/router/turn.rs`，模块拥有回合的全部策略：容量占位（`TurnPermit::reserve`，在事件循环里同步取，满即丢消息不 spawn）、同会话到达顺序票据（`LlmEngine::enqueue_turn_ticket`，同样在事件循环里同步取）与会话串行锁（`TurnPermit::acquire_session` 内先等前一条同会话回合结束再取，见[同会话回合按到达顺序取锁](../../implemented/bug-fix/2026-10-04-turn-arrival-order-tickets.md)）、工具白名单与工具循环、请求被拒后的收缩重试（`MAX_SHRINK_RETRIES = 1`）、`LLM_ERROR_REPLY` 的送达，以及「只有送达成功才落上下文」（`deliver`）。
 - 兜底文案在工具循环失败时经 `TurnSink` 送达同一条回复落点（`src/router/turn.rs` 的落点兜底），四条入站路径共用一份文案，不再由各调用点自己发。两种失败不发兜底：插话取消（`TurnError::Cancelled`）与正文投递失败（`TurnError::ReplyFailed`，此时回退补发只会把另一条消息推给同一个已经失败的落点）。兜底文案本身送不出去时只记一条 warn，回合仍以 `TurnError::Failed` 交回调用点。
 - 调用点提供回合请求（`TurnRequest`，定义在 `src/router/turn.rs`：llm / registry / source / user_ctx / allowed_tools / `TurnInput` / callbacks / cancel）、一个 `UnifiedExecutionContext` 构造闭包，和一个回复落点 `TurnSink`（`src/router/turn.rs`）：TS 文本（`TsTextSink`，`src/router/ts_router.rs`）、NapCat 发送（`NcReplySink`，`src/router/nc_router.rs`）、语音桥通知（`VoiceNoticeSink`，`src/router/voice_router.rs`）。
 - `TurnInput::{Text, Audio}` 一个分支同时决定消息装配（`build_messages` / `build_omni_messages`，`messages` 在 `src/router/turn.rs`）与落库（`save_turn` / `save_omni_turn`），两处不可能再错配。
@@ -32,9 +32,9 @@ Status: implemented
 
 ## Consequences
 
-- 所得：回合骨架一处实现，调用点只剩「准备提示 + 组装请求 + 定义 sink + 处理错误」；NapCat 拿到与 ts/voice 相同的自愈入口（其会话不存音频时 `LlmEngine::shrink_for_payload_retry` 返回 `None`、回合立即失败，不产生额外请求）；`src/llm.rs` 不再导出两个门禁句柄。
+- 所得：回合骨架一处实现，调用点只剩「准备提示 + 组装请求 + 定义 sink + 处理错误」；NapCat 拿到与 ts/voice 相同的自愈入口（其会话不存音频时 `LlmEngine::shrink_for_rejection_retry` 返回 `None`、回合立即失败，不产生额外请求）；`src/llm.rs` 不再导出两个门禁句柄。
 - 行为变化（有意，共四处）：① nc 后端失败不再把 `LLM_ERROR_REPLY` 落进上下文，与 ts/voice 对齐；② 投递失败一律不落上下文，ts/nc 各记一条 warn（ts 原先静默跳过）；③ 空回复（有 `finish_reason` 但零 token）不再发送也不再写入历史，ts/voice 原本就是跳过、nc 原先会发一条空消息并把空 assistant 轮落进上下文（`TurnRequest::run` 的 `!result.content.is_empty()` 分支）；④ voice 后端失败的顺序改为「先送错误文案、再 abort TTS 流」（原先 abort 在前），语音桥通知与 replay 回执共用 `send_notice`。
 - 代价：`TurnRequest` 有 9 个字段，是一个请求对象而非 adapter，调用点仍需逐字段填一次；`TurnError` 要求调用点 match 一次；`TurnPermit` 的字段只为把占位持有到回合结束（容量释放靠 Drop）。
 - 验证：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --all-targets --locked`（317 用例全绿）。`src/router/turn.rs` 的 12 个用例用 `RecordingSink` 与脚本化 `FakeProvider` 覆盖：文本轮落库、音频轮落库、投递失败不落库且不再补发兜底、后端失败回固定文案且不落库、兜底文案也送不出去时仍以 `Failed` 交回调用点、空回复不发不落、非体积类失败不收缩历史、取消不回不落、体积收缩丢最早音频轮并重试一次、重试后请求体变小、重试上限 1 次、无音频可丢不重试。实机需确认 voice 的 TTS 收尾时序与三条失败文案。
 
-相关：[音频历史的线上体积预算](../../implemented/feature/2026-10-03-omni-audio-history-wire-budget.md) 记录的体积自愈在本轮换了归属（`src/router.rs` → `src/router/turn.rs`）。
+相关：[音频历史的线上体积预算](../../implemented/feature/2026-10-03-omni-audio-history-wire-budget.md) 记录的体积自愈归属在 `src/router/turn.rs`；[模型调用失败按分类路由](../../implemented/architecture/2026-10-15-llm-failure-taxonomy.md) 定义回合骨架消费的失败分类。

@@ -34,19 +34,19 @@ provider 的非 2xx 路径只保留状态码、丢弃响应体，连「体积类
 
 一条音频轮的固定 wire 开销由 `AUDIO_WIRE_ENVELOPE_BYTES` 精确给出（`data:audio/wav;base64,` 前缀加 `input_audio` content 的 JSON 外壳），`AudioBytes::wire_bytes` 用 `div_ceil(3) * 4` 加该常量；`src/llm/engine.rs` 的单测 `wire_estimate_matches_the_serialized_audio_part` 对真实 `serde_json::to_vec` 逐字节断言，估算漂移会让它失败。
 
-### 体积类失败后的会话自愈
+### 可收缩失败后的会话自愈
 
-`OpenAiProvider` 在序列化请求体后按 `MAX_REQUEST_BODY_BYTES` 预检，超限直接返回 `PayloadTooLarge`、不发请求；非 2xx 归类里 413 一律算体积类，400 需要响应体含 `too large` 或 `请求体过大` 佐证，其余状态维持原样。
+`OpenAiProvider` 在序列化请求体后按 `MAX_REQUEST_BODY_BYTES` 预检，超限直接返回 `LlmFailure::PayloadTooLarge`、不发请求；非 2xx 归类里 413 一律算体积类；400 读一次响应体，先按上下文窗口文案归窗口类、再按 `too large` 或 `请求体过大` 归体积类，其余状态维持原样。
 
-`TurnRequest::run`（`src/router/turn.rs`）在 `MAX_PAYLOAD_RETRIES = 1` 的循环里接住 `PayloadTooLarge`：收缩历史、重建 messages、重试一次，重试仍在回合开始时取得的容量占位与同会话串行锁之内，插话取消依旧不落上下文。
+`TurnRequest::run`（`src/router/turn.rs`）在 `MAX_SHRINK_RETRIES = 1` 的循环里接住 `LlmFailure::is_shrinkable` 认下的失败：收缩历史、重建 messages、重试一次，重试仍在回合开始时取得的容量占位与同会话串行锁之内，插话取消依旧不落上下文。
 
 收缩只删最早的音频轮，不删文本轮、不删最新音频轮，且与装配共用同一可见后缀起点 `wire_keep_from`（`src/llm/context.rs`），把最早可删的可见音频轮连同整个不可见前缀一起删掉，因此重试请求严格小于失败的那一轮。
 
 收缩快照保存收缩前的完整历史，重试以 `Cancelled` 结束时由 `restore_history` 整份放回，其他失败保留收缩，下一回合从更小的历史起步。
 
-工具执行后的模型错误归 `ToolLoopError::AfterToolExecution`，`is_payload_too_large` 只认尚未执行工具的 `Other`，所以体积类失败不会被误判为可重试、已发生的工具副作用不会被重放。
+工具执行后的模型错误归 `ToolLoopError::AfterToolExecution`，`shrinkable_failure` 只认尚未执行工具的 `Other`，所以可收缩失败不会被误判为可重试、已发生的工具副作用不会被重放。
 
-`LlmEngine::shrink_for_payload_retry` 在会话没有音频可丢或只剩一条可见音频时返回 `None`，`TurnRequest::run` 直接返回原始错误、不做无意义的重试；NapCat 会话不存音频，与其他入站路径共用同一入口后同样原样失败。
+`LlmEngine::shrink_for_rejection_retry` 在会话没有音频可丢或只剩一条可见音频时返回 `None`，`TurnRequest::run` 直接返回原始错误、不做无意义的重试；NapCat 会话不存音频，与其他入站路径共用同一入口后同样原样失败。
 
 ### 存储层预算与全局账
 
@@ -82,7 +82,7 @@ provider 的非 2xx 路径只保留状态码、丢弃响应体，连「体积类
 
 ## Consequences
 
-- 所得：示例配置下装配出的稳态请求体在 wire 常量以内（2 个历史音频轮加当前轮 1.61 MiB）；常驻音频内存由单会话 8 MiB 与全局 256 MiB 兜住；体积类拒绝之后会话在同一个回合内收缩并自愈，文本轮与音频历史各自独立、不会因音频超预算一起失败；历史回放命中 base64 缓存，装配只浅拷贝保留窗口。
+- 所得：示例配置下装配出的稳态请求体在 wire 常量以内（2 个历史音频轮加当前轮 1.61 MiB）；常驻音频内存由单会话 8 MiB 与全局 256 MiB 兜住；可收缩拒绝之后会话在同一个回合内收缩并自愈，文本轮与音频历史各自独立、不会因音频超预算一起失败；历史回放命中 base64 缓存，装配只浅拷贝保留窗口。
 - 代价：音频历史按装配层 wire 预算与存储层 8 MiB、256 MiB 一致地更早被丢，模型对早期语音的指代能力下降。
 - 代价：失败路径上的收缩不可逆，非取消类失败会保留收缩，会话上下文比失败前小；不可见前缀里的旧文本会随收缩从存储历史中永久消失。
 - 风险：wire 上限与 `max_context_turns` 语义重叠，容易被读成同一种上限，常量注释与 `docs/subsystems/llm.md` 写明后者在存储层、前者在装配层。
@@ -91,7 +91,7 @@ provider 的非 2xx 路径只保留状态码、丢弃响应体，连「体积类
 - 风险：`ContextUser` 的克隆变浅拷贝后，任何依赖深拷贝的调用点都会改变语义；`OnceLock` 与 `Arc` 的组合在并发 `push`/`get` 下不引入 `unsafe`，写入由存储侧 `Mutex` 串行化。
 - 未采纳项不生效：「只保留最近 N 轮音频」没有进入实现，多轮语音指代能力不回退，也不需要同步修订「历史里有什么等同模型看到什么」。
 - 验证：`wire_budget_drops_earliest_audio_turns_until_the_body_fits`、`wire_budget_keeps_text_turns_and_the_latest_audio_turn`、`wire_budget_always_keeps_the_latest_audio_turn`、`assembled_omni_request_stays_within_the_wire_budget`、`wire_estimate_matches_the_serialized_audio_part` 覆盖装配层预算与逐字节对账。
-- 验证：`omni_request_body_over_the_limit_is_rejected_before_send`、`non_size_http_errors_are_not_payload_errors`、`payload_too_large_drops_the_earliest_audio_turn_and_retries_once`、`retry_after_shrink_assembles_a_smaller_body`、`retry_is_attempted_only_once`、`non_payload_errors_do_not_shrink_the_history`、`payload_too_large_without_audio_does_not_retry` 覆盖预检、归类与重试边界。
+- 验证：`omni_request_body_over_the_limit_is_rejected_before_send`、`classifies_413_and_matching_400_as_payload_too_large`、`non_size_http_errors_are_not_payload_errors`、`classifies_context_window_rejections_by_their_wording`、`keeps_context_lookalikes_out_of_the_context_window_class`、`context_wording_wins_over_the_size_marker_it_carries`、`http_400_body_preserves_rejection_classification_without_disclosure`、`payload_too_large_drops_the_earliest_audio_turn_and_retries_once`、`context_window_rejection_shrinks_and_retries_like_a_payload_rejection`、`retry_after_shrink_assembles_a_smaller_body`、`retry_is_attempted_only_once`、`non_payload_errors_do_not_shrink_the_history`、`payload_too_large_without_audio_does_not_retry`、`classified_empty_completion_ends_the_turn_without_a_reply`、`empty_completion_does_not_shrink_the_history` 覆盖预检、归类、空完成与两类收缩重试的边界。
 - 验证：`push_applies_the_injected_audio_byte_budget`、`global_audio_budget_evicts_the_oldest_session_first`、`global_audio_budget_never_clears_the_latest_audio_turn`、`audio_turn_encodes_base64_once`、`cached_encoding_matches_a_fresh_encode`、`cloned_audio_turns_share_the_wav_allocation` 覆盖存储层逐出与编码缓存。
 - 验证：`regression_payload_retry_must_not_repeat_completed_action`、`regression_retry_shrinks_already_clipped_wire_view`、`cancelled_retry_restores_the_history_the_shrink_removed` 守住「工具副作用不重放」「重试请求严格变小」「取消时还原」三条安全边界。
-- 相关：`src/router/turn.rs` 的回合骨架是体积自愈的调用点归属，[LLM 回合骨架收敛为 `router/turn.rs` 单一归属](../../implemented/architecture/2026-10-03-llm-turn-module.md) 记录该归属与四入口合并；[体积重试的安全收缩与取消还原](../../implemented/bug-fix/2026-10-15-payload-retry-recovery.md) 记录收缩与装配共用可见后缀起点、快照式还原，以及工具执行后错误不纳入重试。
+- 相关：`src/router/turn.rs` 的回合骨架是可收缩失败自愈的调用点归属，[LLM 回合骨架收敛为 `router/turn.rs` 单一归属](../../implemented/architecture/2026-10-03-llm-turn-module.md) 记录该归属与四入口合并；[模型调用失败按分类路由](../../implemented/architecture/2026-10-15-llm-failure-taxonomy.md) 定义 `LlmFailure` 的分类、归类口径与恢复路由；[体积重试的安全收缩与取消还原](../../implemented/bug-fix/2026-10-15-payload-retry-recovery.md) 记录收缩与装配共用可见后缀起点、快照式还原，以及工具执行后错误不纳入重试。
