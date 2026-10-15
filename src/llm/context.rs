@@ -221,14 +221,14 @@ const AUDIO_WIRE_ENVELOPE_BYTES: usize =
 #[derive(Debug, Clone)]
 pub struct AudioBytes {
     wav: Arc<[u8]>,
-    encoded: OnceLock<Arc<str>>,
+    encoded: Arc<OnceLock<Arc<str>>>,
 }
 
 impl AudioBytes {
     pub fn new(wav: Vec<u8>) -> Self {
         Self {
             wav: Arc::from(wav),
-            encoded: OnceLock::new(),
+            encoded: Arc::new(OnceLock::new()),
         }
     }
 
@@ -428,7 +428,7 @@ impl ContextWindow {
     }
 
     /// 供装配用的历史视图：按 `wire_budget` 从最早的音频轮逐轮裁掉，直到估算的
-    /// base64 加 JSON 体积放得下。文本轮不参与该裁剪（不占预算），最新一轮音频永不丢。
+    /// base64 加 JSON 体积放得下。文本不计音频预算，但不可见前缀中的文本同样被隐藏；最新音频永不丢。
     ///
     /// 裁剪在锁内完成，只 clone 保留的那一段；`ContextTurn` 的音频是 `Arc`，
     /// clone 因此是浅拷贝。存储历史不因此改变，模型实际收到的 messages 才反映裁剪结果。
@@ -439,46 +439,64 @@ impl ContextWindow {
             return Vec::new();
         };
 
-        // 从最新往回累计音频轮的 wire 体积，keep_from 落在保留窗口的起点
-        let mut total = 0usize;
-        let mut keep_from = entry.len();
-        let mut kept_latest_audio = false;
-        for index in (0..entry.len()).rev() {
-            let bytes = entry[index].user.audio_wire_bytes();
-            if bytes == 0 {
-                keep_from = index;
-                continue;
-            }
-            if kept_latest_audio && total + bytes > wire_budget {
-                break;
-            }
-            total += bytes;
-            kept_latest_audio = true;
-            keep_from = index;
-        }
+        let keep_from = wire_keep_from(entry, wire_budget);
 
         entry.range(keep_from..).cloned().collect()
     }
 
-    /// 体积类失败自愈：丢掉该会话最早的音频轮，返回是否真的丢了一轮。
-    /// 只丢音频轮，文本轮保留；最新一轮音频永不丢。下一个体积类失败会继续往前丢。
-    pub fn drop_oldest_audio_turn(&self, source: &SessionSource) -> bool {
+    /// 体积失败时删除 wire 中最早可删音频及不可见前缀，避免旧音频回填。
+    /// 原 wire 中的文本与最新音频保留；无法缩小实际视图时不修改历史。
+    pub fn drop_oldest_audio_turn(&self, source: &SessionSource, wire_budget: usize) -> bool {
         let session_id = source.to_string();
         let mut state = self.state.lock().expect("context window lock poisoned");
-        let dropped = {
-            let Some(entry) = state.histories.get_mut(&session_id) else {
-                return false;
-            };
-            drop_earliest_audio_turn(entry)
+        let Some(entry) = state.histories.get_mut(&session_id) else {
+            return false;
         };
-        match dropped {
-            Some(bytes) => {
-                state.audio_bytes_total -= bytes;
-                true
-            }
-            None => false,
+        let keep_from = wire_keep_from(entry, wire_budget);
+        let mut visible_audio = entry
+            .iter()
+            .enumerate()
+            .skip(keep_from)
+            .filter(|(_, turn)| matches!(&turn.user, ContextUser::Audio(_)))
+            .map(|(index, _)| index);
+        let Some(index) = visible_audio.next() else {
+            return false;
+        };
+        if visible_audio.next().is_none() {
+            return false;
         }
+        let dropped_bytes: usize = entry
+            .range(..keep_from)
+            .map(|turn| turn.user.audio_bytes())
+            .sum::<usize>()
+            + entry[index].user.audio_bytes();
+        entry.drain(..keep_from);
+        entry.remove(index - keep_from);
+        state.audio_bytes_total -= dropped_bytes;
+        true
     }
+}
+
+/// 与请求装配共用可见后缀起点，始终保留最新音频。
+fn wire_keep_from(entry: &VecDeque<ContextTurn>, wire_budget: usize) -> usize {
+    let mut total = 0usize;
+    let mut keep_from = entry.len();
+    let mut kept_latest_audio = false;
+    for index in (0..entry.len()).rev() {
+        let bytes = entry[index].user.audio_wire_bytes();
+        if bytes == 0 {
+            keep_from = index;
+            continue;
+        }
+        if kept_latest_audio && total + bytes > wire_budget {
+            break;
+        }
+        total += bytes;
+        kept_latest_audio = true;
+        keep_from = index;
+    }
+
+    keep_from
 }
 
 /// 单会话音频历史超预算时从最早的一轮对话逐轮丢弃：user/assistant 成对移除，历史保持连续；
@@ -772,7 +790,7 @@ mod tests {
         context.push(&source, turn(1));
         context.push(&source, audio_turn(1000));
 
-        assert!(context.drop_oldest_audio_turn(&source));
+        assert!(context.drop_oldest_audio_turn(&source, MAX_WIRE_AUDIO_BYTES));
 
         let history = context.get(&source);
         assert_eq!(history.len(), 2);
@@ -784,13 +802,97 @@ mod tests {
         );
 
         // 只剩最新一轮音频：拒绝再丢
-        assert!(!context.drop_oldest_audio_turn(&source));
+        assert!(!context.drop_oldest_audio_turn(&source, MAX_WIRE_AUDIO_BYTES));
         assert_eq!(context.get(&source).len(), 2);
 
         // 未知会话没有可丢的音频轮
-        assert!(!context.drop_oldest_audio_turn(&SessionSource::TeamSpeak {
-            uid: "missing".to_string(),
-        }));
+        assert!(!context.drop_oldest_audio_turn(
+            &SessionSource::TeamSpeak {
+                uid: "missing".to_string(),
+            },
+            MAX_WIRE_AUDIO_BYTES
+        ));
+    }
+
+    #[test]
+    fn encoding_a_clone_before_first_use_populates_the_shared_cache() {
+        let stored = AudioBytes::new(vec![0u8; 4096]);
+        let history_copy = stored.clone();
+        assert!(stored.encoded.get().is_none());
+        let encoded = history_copy.base64();
+        assert!(stored.encoded.get().is_some());
+        assert!(Arc::ptr_eq(&stored.encoded, &history_copy.encoded));
+        assert!(Arc::ptr_eq(&encoded, &stored.base64()));
+        assert!(Arc::ptr_eq(&encoded, &stored.clone().base64()));
+    }
+
+    /// 清掉不可见前缀防止音频回填，原 wire 中的文本全部保留
+    #[test]
+    fn payload_recovery_shrinks_the_visible_audio_suffix_without_backfill() {
+        let context = ContextWindow::new(12, 10);
+        let source = SessionSource::TeamSpeak {
+            uid: "wire-recovery".into(),
+        };
+        for index in 0..4 {
+            context.push(&source, turn(index));
+            context.push(&source, audio_turn(3000));
+        }
+        context.push(&source, turn(4));
+        let budget = 2 * audio_wire(3000);
+        let before = context.history_for_wire(&source, budget);
+        assert_eq!(before.len(), 5);
+        assert!(context.drop_oldest_audio_turn(&source, budget));
+        let after = context.history_for_wire(&source, budget);
+        assert_eq!(after.len(), 4);
+        assert_eq!(
+            after
+                .iter()
+                .filter_map(|turn| turn.user.as_text())
+                .collect::<Vec<_>>(),
+            vec!["user-2", "user-3", "user-4"]
+        );
+        assert_eq!(
+            after.iter().filter_map(audio_bytes).collect::<Vec<_>>(),
+            vec![3000]
+        );
+        assert_eq!(context.get(&source).len(), after.len());
+        assert_eq!(context.state.lock().unwrap().audio_bytes_total, 3000);
+        assert_eq!(stored_audio_bytes(&context), 3000);
+        assert!(!context.drop_oldest_audio_turn(&source, budget));
+    }
+
+    /// 只有一条可见音频时删隐藏轮不会缩小请求，因此保持历史不变
+    #[test]
+    fn payload_recovery_keeps_history_when_only_the_latest_audio_is_visible() {
+        let context = ContextWindow::new(8, 10);
+        let source = SessionSource::TeamSpeak {
+            uid: "wire-floor-recovery".into(),
+        };
+        context.push(&source, audio_turn(3000));
+        context.push(&source, turn(1));
+        context.push(&source, audio_turn(3000));
+        assert!(!context.drop_oldest_audio_turn(&source, audio_wire(3000)));
+        assert_eq!(context.get(&source).len(), 3);
+        assert_eq!(context.state.lock().unwrap().audio_bytes_total, 6000);
+    }
+
+    #[test]
+    fn payload_recovery_counts_empty_wav_turns_as_wire_audio() {
+        let context = ContextWindow::new(8, 10);
+        let source = SessionSource::TeamSpeak {
+            uid: "empty-wav-recovery".into(),
+        };
+        context.push(&source, audio_turn(0));
+        context.push(&source, audio_turn(0));
+        assert!(context.drop_oldest_audio_turn(&source, MAX_WIRE_AUDIO_BYTES));
+        assert_eq!(
+            context
+                .history_for_wire(&source, MAX_WIRE_AUDIO_BYTES)
+                .len(),
+            1
+        );
+        assert_eq!(context.state.lock().unwrap().audio_bytes_total, 0);
+        assert!(!context.drop_oldest_audio_turn(&source, MAX_WIRE_AUDIO_BYTES));
     }
 
     #[test]

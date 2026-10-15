@@ -227,7 +227,7 @@ where
 }
 
 /// 体积类失败判定：`PayloadTooLarge` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
-/// 用 downcast 识别，避免每个调用点各写一份错误的文案比对
+/// 只允许尚未执行工具的 `Other` 触发重试，避免重放已经发生的操作。
 fn is_payload_too_large(error: &ToolLoopError) -> bool {
     matches!(error, ToolLoopError::Other(inner) if inner.downcast_ref::<PayloadTooLarge>().is_some())
 }
@@ -251,6 +251,7 @@ mod tests {
         Reply(&'static str),
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
+        Action,
     }
 
     /// 脚本化的假 provider：记录调用次数与每次 messages 的序列化体积，
@@ -310,6 +311,14 @@ mod tests {
                         tool_calls: Vec::new(),
                     }),
                 ]))),
+                FakeOutcome::Action => Ok(Box::pin(stream::iter(vec![Ok(LlmStreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    tool_calls: vec![ToolCall {
+                        id: "action-call".to_string(),
+                        name: "record_action".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                })]))),
                 FakeOutcome::EmptySuccess => {
                     Ok(Box::pin(stream::iter(vec![Ok(LlmStreamEvent::Done {
                         finish_reason: "stop".to_string(),
@@ -722,6 +731,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_retry_shrinks_already_clipped_wire_view() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::PayloadTooLarge,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "retry-body".to_string(),
+        };
+        for _ in 0..8 {
+            llm.save_omni_turn(&source, vec![0u8; 400 * 1024], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(result.is_ok());
+        let bodies = provider.body_lengths();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[1] < bodies[0],
+            "retry did not shrink request: {} -> {} bytes",
+            bodies[0],
+            bodies[1]
+        );
+    }
+
+    #[tokio::test]
     async fn retry_is_attempted_only_once() {
         // 第二次仍是体积类错误：重试上限 1 次，不得出现第三次调用
         let provider = Arc::new(FakeProvider::new(vec![
@@ -763,5 +800,97 @@ mod tests {
         assert!(matches!(result, Err(TurnError::Failed(_))));
         assert_eq!(provider.calls(), 1);
         assert_eq!(llm.stored_history(&source).len(), 1);
+    }
+    struct RecordedAction(Arc<AtomicUsize>);
+    #[async_trait]
+    impl crate::tools::Tool for RecordedAction {
+        fn name(&self) -> &'static str {
+            "record_action"
+        }
+        fn description(&self) -> &'static str {
+            "Record a local test action"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &UnifiedExecutionContext,
+        ) -> anyhow::Result<Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"done":true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_payload_retry_must_not_repeat_completed_action() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::Action,
+            FakeOutcome::PayloadTooLarge,
+            FakeOutcome::Action,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "side-effect-retry".to_string(),
+        };
+        llm.save_omni_turn(&source, vec![0; 1024], "old".to_string());
+        llm.save_omni_turn(&source, vec![0; 1024], "new".to_string());
+        let actions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::default();
+        registry.register(Box::new(RecordedAction(actions.clone())));
+        let sink = RecordingSink::new();
+        let cancel = CancellationToken::new();
+        let permit = TurnPermit::reserve(&llm).unwrap();
+        let ticket = llm.enqueue_turn_ticket(&source);
+        let session = permit.acquire_session(&llm, &source, ticket).await;
+        let allowed = vec!["record_action".to_string()];
+        let request = TurnRequest {
+            llm: &llm,
+            registry: &registry,
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &allowed,
+            input: TurnInput::Text("perform the action once"),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        let result = request
+            .run(
+                session,
+                || UnifiedExecutionContext {
+                    platform: crate::tools::Platform::TeamSpeak,
+                    ts_adapter: None,
+                    nc_adapter: None,
+                    caller_id: 1,
+                    caller_id_nc: 0,
+                    caller_name: "test".to_string(),
+                    caller_groups: Vec::new(),
+                    caller_channel_group_id: 0,
+                    nc_group_id: None,
+                    gate: Arc::new(crate::permission::PermissionGate::new(
+                        crate::config::AclConfig::default(),
+                    )),
+                    config: Arc::new(crate::config::AppConfig::default()),
+                },
+                &sink,
+            )
+            .await;
+        let Err(TurnError::Failed(error)) = result else {
+            panic!("a model failure after tool execution must fail without retrying");
+        };
+        assert!(matches!(
+            error.downcast_ref::<ToolLoopError>(),
+            Some(ToolLoopError::AfterToolExecution(_))
+        ));
+        assert_eq!(
+            actions.load(Ordering::SeqCst),
+            1,
+            "completed action was replayed by the context retry"
+        );
+        assert_eq!(provider.calls(), 2);
+        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        assert_eq!(llm.stored_history(&source).len(), 2);
     }
 }

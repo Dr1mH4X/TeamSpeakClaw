@@ -98,7 +98,7 @@ impl LlmEngine {
     /// 构建可信系统提示与原始上下文历史（不含最后一条用户消息）。
     /// `system_prompt` 由调用点（回合骨架）装配完成，引擎只负责放进 system 角色。
     /// 音频轮的历史项按 `input_audio` content 回放；装配按 `MAX_WIRE_AUDIO_BYTES`
-    /// 从最早的音频轮逐轮裁剪，文本轮不受影响。
+    /// 从最早的音频轮逐轮裁剪历史后缀；文本不计音频预算。
     fn build_context_base(&self, source: &SessionSource, system_prompt: &str) -> Vec<Value> {
         let mut messages = vec![json!({"role": "system", "content": system_prompt})];
 
@@ -186,10 +186,11 @@ impl LlmEngine {
         self.context.get(source)
     }
 
-    /// 体积类失败自愈：丢弃该会话最早的音频轮，返回是否真的丢了一轮。
-    /// 只丢音频轮，文本轮与最新一轮音频保留。
+    /// 体积类失败自愈：删除 wire 中最早可删音频及不可见前缀，防止旧音频回填。
+    /// 原 wire 可见文本与最新音频保留；无法缩小实际请求时返回 false。
     pub fn drop_oldest_audio_turn(&self, source: &SessionSource) -> bool {
-        self.context.drop_oldest_audio_turn(source)
+        self.context
+            .drop_oldest_audio_turn(source, MAX_WIRE_AUDIO_BYTES)
     }
 
     /// 测试可见：注入 provider 的引擎，供路由层重试路径的单测使用
@@ -374,6 +375,28 @@ mod tests {
         );
         // 存储历史不受装配裁剪影响
         assert_eq!(engine.stored_history(&source).len(), 5);
+    }
+
+    #[test]
+    fn repeated_message_builds_share_the_stored_history_encoding() {
+        let engine = engine_with_history();
+        let source = SessionSource::TeamSpeak {
+            uid: "encoding-cache".into(),
+        };
+        engine.save_omni_turn(&source, vec![7u8; 4096], "reply".into());
+        let first_messages = engine.build_messages(&source, "system", "{}", "current");
+        let first_history = engine.stored_history(&source);
+        let ContextUser::Audio(first) = &first_history[0].user else {
+            panic!("expected audio history");
+        };
+        let first_encoded = first.base64();
+        let second_messages = engine.build_messages(&source, "system", "{}", "current");
+        let second_history = engine.stored_history(&source);
+        let ContextUser::Audio(second) = &second_history[0].user else {
+            panic!("expected audio history");
+        };
+        assert_eq!(first_messages, second_messages);
+        assert!(std::sync::Arc::ptr_eq(&first_encoded, &second.base64()));
     }
 
     #[test]
