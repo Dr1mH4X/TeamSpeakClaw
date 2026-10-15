@@ -13,7 +13,10 @@ pub use ts_router::EventRouter;
 pub use unified::{ReplyPolicy, UnifiedInboundEvent};
 pub use voice_router::{VoiceRouter, VoiceRouterHandles};
 
-pub(crate) use turn::{TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink};
+pub(crate) use turn::{
+    ts_caller_admission_uid, ts_caller_clid_uid, ts_caller_session_uid, TurnError, TurnInput,
+    TurnPermit, TurnRequest, TurnSession, TurnSink,
+};
 
 use std::future::Future;
 use std::pin::Pin;
