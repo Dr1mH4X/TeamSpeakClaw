@@ -205,6 +205,7 @@ impl TurnRequest<'_> {
             {
                 warn!(
                     session = %self.source,
+                    error = %error,
                     "model completion carried no content; turn ends without a reply"
                 );
                 Ok(())
@@ -689,6 +690,36 @@ mod tests {
         // 只尝试过正文那一次：投递失败不回退到兜底文案，也不落上下文
         assert_eq!(sink.sent(), vec!["hello".to_string()]);
         assert!(llm.stored_history(&source).is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_the_fixed_text_reaches_the_user_on_backend_failure() {
+        // 用户侧只有固定兜底文案：分类决定恢复动作，错误正文只进日志。
+        // 工具执行后的失败同样如此（见 regression_payload_retry_must_not_repeat_completed_action）
+        for (outcome, error_fragment) in [
+            (FakeOutcome::HttpError, "HTTP 500"),
+            (FakeOutcome::PayloadTooLarge, "payload"),
+            (FakeOutcome::ContextWindowExceeded, "context window"),
+        ] {
+            let provider = Arc::new(FakeProvider::new(vec![outcome]));
+            let llm = engine_with(&provider, 8);
+            let source = SessionSource::TeamSpeak {
+                uid: format!("no-leak-{error_fragment}"),
+            };
+            let sink = RecordingSink::new();
+
+            let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
+
+            let Err(TurnError::Failed(error)) = result else {
+                panic!("a backend failure must fail the turn");
+            };
+            // 片段确实是错误正文：用户侧为空才说明它没有透传
+            assert!(
+                format!("{error:#}").contains(error_fragment),
+                "the leak marker is not part of the failure text: {error_fragment}"
+            );
+            assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        }
     }
 
     #[tokio::test]
