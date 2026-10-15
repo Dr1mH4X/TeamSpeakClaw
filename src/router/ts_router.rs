@@ -10,8 +10,8 @@ use crate::llm::context::SessionSource;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{
-    ReplyPolicy, RouterContext, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession,
-    TurnSink, UnifiedInboundEvent,
+    ts_caller_admission_uid, ts_caller_session_uid, ReplyPolicy, RouterContext, TurnError,
+    TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink, UnifiedInboundEvent,
 };
 use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
 use anyhow::Result;
@@ -94,7 +94,7 @@ impl EventRouter {
                         continue;
                     };
                     let source = SessionSource::TeamSpeak {
-                        uid: msg.invoker_uid.clone(),
+                        uid: ts_caller_admission_uid(&msg.invoker_uid, msg.invoker_id),
                     };
                     let Ok(permit) = TurnPermit::reserve(&this.llm) else {
                         warn!(
@@ -174,24 +174,29 @@ impl EventRouter {
         );
 
         let groups = parse_server_groups(&event.invoker_groups);
-        let channel_group_id = match self
+        // 频道组与真实 UID 出自同一次 clientinfo 查询：会话与历史键要用解析出的 UID，
+        // 事件不带 UID 时才退到准入键（clid 复用不能把两任占用者写进同一份历史）
+        let (channel_group_id, resolved_uid) = match self
             .adapter
-            .get_client_channel_group_id(event.invoker_id)
+            .get_client_channel_group_and_uid(event.invoker_id)
             .await
         {
-            Ok(channel_group_id) => channel_group_id,
+            Ok(identity) => identity,
             Err(error) => {
                 error!(
                     clid = event.invoker_id,
                     error = %error,
-                    "Failed to resolve caller channel group"
+                    "Failed to resolve caller identity"
                 );
                 return;
             }
         };
 
         let source = SessionSource::TeamSpeak {
-            uid: event.invoker_uid.clone(),
+            uid: ts_caller_session_uid(
+                &resolved_uid,
+                &ts_caller_admission_uid(&event.invoker_uid, event.invoker_id),
+            ),
         };
         let (online_clients, invoker_channel) =
             self.adapter.list_clients_json(event.invoker_id).await;

@@ -30,7 +30,8 @@ use crate::router::voice_turns::{
     decide_wakeword_action, ActiveTurn, TurnRegistry, WakewordAction,
 };
 use crate::router::{
-    resolve_ts_inbound, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
+    resolve_ts_inbound, ts_caller_admission_uid, ts_caller_clid_uid, ts_caller_session_uid,
+    TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
 };
 
 use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
@@ -77,14 +78,6 @@ enum ChatAdmission {
     },
 }
 
-fn chat_caller_uid(chat: &voicev1::ChatEvent) -> String {
-    if chat.invoker_unique_id.is_empty() {
-        format!("clid:{}", chat.invoker_client_id)
-    } else {
-        chat.invoker_unique_id.clone()
-    }
-}
-
 fn check_chat_caller_identity(chat: &voicev1::ChatEvent, online_uid: &str) -> Result<()> {
     if !chat.invoker_unique_id.is_empty() && chat.invoker_unique_id != online_uid {
         anyhow::bail!(
@@ -100,6 +93,8 @@ fn check_chat_caller_identity(chat: &voicev1::ChatEvent, online_uid: &str) -> Re
 ///
 /// 两次快照都要过身份校验：列表查询与 clientinfo 查询之间 clid 可能被复用，
 /// 只按列表校验就会把旧调用者的 server groups 与新占用者的频道组拼在一起。
+/// 会话与历史键取 clientinfo 快照里的真实 UID（就是收到回复的那个 clid 的占用者），
+/// 拿不到才退回准入键；`clid` 复用不能让两任占用者共享历史。
 fn resolve_chat_caller(
     chat: &voicev1::ChatEvent,
     reply_target_mode: i32,
@@ -123,9 +118,10 @@ fn resolve_chat_caller(
         "Resolved chat caller '{}' from online list: clid={}",
         chat.invoker_name, caller.id
     );
+    let admission_uid = ts_caller_admission_uid(&chat.invoker_unique_id, chat.invoker_client_id);
     Ok(CallerContext {
         caller_id: chat.invoker_client_id,
-        caller_uid: chat_caller_uid(chat),
+        caller_uid: ts_caller_session_uid(clientinfo_uid, &admission_uid),
         caller_name: chat.invoker_name.clone(),
         groups: parse_server_groups(&caller.server_groups),
         channel_group_id,
@@ -180,7 +176,7 @@ fn prepare_chat(
             return None;
         };
         let source = SessionSource::TeamSpeak {
-            uid: chat_caller_uid(chat),
+            uid: ts_caller_admission_uid(&chat.invoker_unique_id, chat.invoker_client_id),
         };
         let ticket = llm.enqueue_turn_ticket(&source);
         // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
@@ -910,7 +906,10 @@ impl VoiceRouter {
         );
         Ok(CallerContext {
             caller_id: audio.from_client_id,
-            caller_uid: caller.uid.clone(),
+            caller_uid: ts_caller_session_uid(
+                &caller.uid,
+                &ts_caller_clid_uid(audio.from_client_id),
+            ),
             caller_name: caller.nickname.clone(),
             groups,
             channel_group_id,
@@ -956,7 +955,10 @@ impl VoiceRouter {
                         .await
                 else {
                     debug!(
-                        caller_uid = %chat_caller_uid(&chat),
+                        caller_uid = %ts_caller_admission_uid(
+                            &chat.invoker_unique_id,
+                            chat.invoker_client_id
+                        ),
                         "voice text turn cancelled while waiting for the LLM slot"
                     );
                     return Ok(());
@@ -2053,8 +2055,10 @@ mod tests {
         assert!(matches!(replay.admission, ChatAdmission::DirectReplay(_)));
     }
 
+    /// 事件不带 UID 时准入键退到 clid（票据与会话锁必须在解析之前定下），
+    /// 但会话与历史键用解析出的真实 UID，同一个人不会因事件样式不同分成两份历史
     #[test]
-    fn chat_admission_and_caller_resolution_share_fallback_uid() {
+    fn chat_admission_falls_back_to_clid_while_the_session_uses_the_resolved_uid() {
         let config = AppConfig::default();
         let llm = LlmEngine::new(Arc::new(config.clone())).unwrap();
         let chat = voicev1::ChatEvent {
@@ -2062,11 +2066,21 @@ mod tests {
             ..chat_event("hello")
         };
         let prepared = prepare_chat(&config, &llm, &TurnRegistry::default(), 99, &chat).unwrap();
-        assert_eq!(chat_caller_uid(&chat), "clid:7");
         let ChatAdmission::Llm { admission, .. } = prepared.admission else {
             panic!("ordinary chat must reserve an LLM turn");
         };
         assert_eq!(admission.source.to_string(), "sq:clid:7");
+
+        let online = vec![online_chat_caller("replacement-user")];
+        let ctx = resolve_chat_caller(&chat, 1, 7, &online, 42, "replacement-user").unwrap();
+        assert_eq!(ctx.caller_uid, "replacement-user");
+        assert_eq!(
+            SessionSource::TeamSpeak {
+                uid: ctx.caller_uid,
+            }
+            .to_string(),
+            "sq:replacement-user"
+        );
     }
 
     /// 文本回合在派发任务前登记：同 clid 的音频顶替不等任务被轮询就能取消排队中的回复
@@ -2149,14 +2163,27 @@ mod tests {
         assert_eq!((ctx.reply_target_mode, ctx.reply_target_client_id), (2, 9));
     }
 
-    /// 事件不带 UID 时无从比对（桥接可能省略），会话键回退到 clid
+    /// 事件不带 UID 时无从比对（桥接可能省略），会话键用快照里的真实 UID——
+    /// 回复发给的是这个 clid 当前的占用者，`clid` 复用不能把两任占用者写进同一份历史
     #[test]
-    fn chat_resolution_falls_back_to_the_client_id_key_without_an_event_uid() {
+    fn chat_resolution_uses_the_resolved_uid_without_an_event_uid() {
         let mut chat = chat_event("hello");
         chat.invoker_unique_id.clear();
         let online = vec![online_chat_caller("replacement-user")];
 
         let ctx = resolve_chat_caller(&chat, 1, 7, &online, 42, "replacement-user").unwrap();
+
+        assert_eq!(ctx.caller_uid, "replacement-user");
+    }
+
+    /// 连快照都拿不到真实 UID 时才退回准入键，绝不落到空串（空串会让所有无 UID 调用者共用历史）
+    #[test]
+    fn chat_resolution_falls_back_to_the_admission_key_without_any_uid() {
+        let mut chat = chat_event("hello");
+        chat.invoker_unique_id.clear();
+        let online = vec![online_chat_caller("")];
+
+        let ctx = resolve_chat_caller(&chat, 1, 7, &online, 42, "").unwrap();
 
         assert_eq!(ctx.caller_uid, "clid:7");
     }
