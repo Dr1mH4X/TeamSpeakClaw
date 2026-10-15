@@ -41,7 +41,7 @@ Status: implemented
 ## Review 后的三处收敛
 
 - **装配失败不再静默**：`TurnRequest::run` 的提示词装配失败与后端失败共用 `fail_with_notice`——先尽力送出 `LLM_ERROR_REPLY`，再返回 `TurnError::Failed`。此前它直接返回 `Failed` 而不发文案，违反了该变体的契约（「固定文案已尽力回复」），TS 与 NapCat 调用点只记日志，用户收不到任何回复；参考实现遇到装配异常同样是失败整个回合并把错误摊到界面上，不吞。
-- **引用外的 `}}` 是普通文本**：扫描只看 `{{`，单独的 `}}` 原样进入提示词；这条与参考实现一致（`packages/core/system-prompt/src/index.ts:344-372`，其注释写明「否则就是普通散文」），已用 `a_closing_delimiter_outside_a_reference_is_literal_text` 钉住，免得日后被当成漏洞「修」掉。
+- **引用外的 `}}` 是普通文本**：扫描只看 `{{`，单独的 `}}` 原样进入提示词；这条与参考实现一致（`packages/core/system-prompt/src/index.ts` 的分隔符扫描，其注释写明「否则就是普通散文」），已用 `a_closing_delimiter_outside_a_reference_is_literal_text` 钉住，免得日后被当成漏洞「修」掉。
 - **开引用缺闭合仍然报错**：这里比参考实现严格。参考实现把没有后续 `}}` 的 `{{` 也当普通散文，因为它的段落可以由插件与任意散文中来；我们的段落是代码常量，残缺引用只可能是笔误，FAILFAST 比悄悄发出走样的提示词合适。差异是有意保留的，`interpolate` 的文档注释写明了理由。
 - **日期用例不再看表**：`PromptVariables::on(&str)` 让 `now()` 与用例共用同一构造路径，用例用固定日期渲染并断言，消除渲染与期望值跨零点分别取 `now()` 的偶发失败。
 
