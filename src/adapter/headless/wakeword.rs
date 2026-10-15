@@ -277,6 +277,19 @@ impl SpeakerState {
         self.last_wake
             .is_some_and(|wake| now.duration_since(wake) < window)
     }
+
+    /// 容量驱逐优先级：0 已收段（`take_utterance_verdict` 已取走本条 utterance）、
+    /// 1 在飞未命中、2 在飞已命中。逐出后本条 utterance 的裁决再也取不回来，
+    /// 所以命中未收段的状态最后才丢；同档之间再按 `last_seen` 取最久未见
+    fn eviction_priority(&self) -> u8 {
+        if self.utterance.detected {
+            2
+        } else if self.utterance.recent_frames.is_empty() {
+            0
+        } else {
+            1
+        }
+    }
 }
 
 /// 一条 utterance 在门里的累计状态：命中锚点与锚点之后的 VAD 活跃语音。
@@ -504,14 +517,16 @@ impl WakewordGate {
         self.models.retain(|clid, _| self.states.contains_key(clid));
     }
 
-    /// 轻量状态只有一个归属；模型独立按 LRU 驱逐，不触碰在飞语句
+    /// 轻量状态只有一个归属；模型独立按 LRU 驱逐，不触碰在飞语句。
+    /// 状态容量是硬上限，候选按 `eviction_priority` 分档：已收段的先走，在飞的留在表里；
+    /// 全部都在飞时仍按最久未见让步，容量不随并发说话人数膨胀
     fn session_for(&mut self, clid: u32, now: Instant) -> (&mut SpeakerModel, &mut SpeakerState) {
         if !self.states.contains_key(&clid) {
             if self.states.len() >= MAX_SPEAKER_STATES {
                 let oldest = self
                     .states
                     .iter()
-                    .min_by_key(|(_, state)| state.last_seen)
+                    .min_by_key(|(_, state)| (state.eviction_priority(), state.last_seen))
                     .map(|(id, _)| *id)
                     .expect("speaker states non-empty");
                 self.states.remove(&oldest);
@@ -1292,6 +1307,9 @@ mod tests {
             base + Duration::from_secs(1),
         );
         assert!(first.verdict.detected);
+        // 先收段：1 不再持有在飞裁决，才是容量驱逐的首选档
+        let collected = gate.take_utterance_verdict(1, base + Duration::from_secs(1));
+        assert!(collected.detected);
         // 仅续窗刷新其他状态，使仍持有模型的 1 成为状态表 LRU。
         for clid in 2u32..=MAX_SPEAKER_STATES as u32 {
             gate.refresh_window(clid, base + Duration::from_secs(2));
@@ -1317,6 +1335,65 @@ mod tests {
         assert!(fresh.verdict.detected);
         assert_eq!(fresh.fed_samples, CHUNK_SIZE);
         assert_eq!(fresh.fire_sample, Some(0));
+    }
+
+    /// 容量驱逐不得丢掉在飞语句的裁决：命中未收段的状态最后才被挑中
+    #[test]
+    fn state_capacity_eviction_spares_an_uncollected_detection() {
+        let mut gate = first_block_hit_gate();
+        let base = Instant::now();
+        // 2..=262 各喂一块并立刻收段：它们已不持有裁决，是可安全驱逐的一档
+        for clid in 2u32..=MAX_SPEAKER_STATES as u32 {
+            let now = base + Duration::from_millis(u64::from(clid));
+            gate.feed(clid, WakeFrame::pcm(&[0i16; CHUNK_SIZE]), now);
+            let collected = gate.take_utterance_verdict(clid, now);
+            assert!(collected.detected);
+        }
+        // 1 命中但尚未收段，且 last_seen 全表最旧：只按 LRU 挑会连同裁决一起丢掉
+        let hit = gate.feed(1, WakeFrame::pcm(&[0i16; CHUNK_SIZE]), base);
+        assert!(hit.verdict.detected);
+        gate.feed(
+            MAX_SPEAKER_STATES as u32 + 1,
+            WakeFrame::pcm(&[]),
+            base + Duration::from_secs(2),
+        );
+        assert_eq!(gate.states.len(), MAX_SPEAKER_STATES);
+        assert!(gate.states.contains_key(&1), "在飞裁决不得被容量驱逐丢掉");
+        assert!(
+            !gate.states.contains_key(&2),
+            "让步的应是最久未见的已收段状态"
+        );
+        assert!(gate
+            .models
+            .keys()
+            .all(|clid| gate.states.contains_key(clid)));
+        let verdict = gate.take_utterance_verdict(1, base + Duration::from_secs(2));
+        assert!(verdict.detected && verdict.open);
+    }
+
+    /// 全表都在飞时容量仍是硬上限：最久未见的那条让步，不随并发说话人数膨胀
+    #[test]
+    fn state_capacity_eviction_falls_back_to_the_oldest_when_all_are_in_flight() {
+        let mut gate = first_block_hit_gate();
+        let base = Instant::now();
+        for clid in 1u32..=MAX_SPEAKER_STATES as u32 {
+            gate.feed(
+                clid,
+                WakeFrame::pcm(&[0i16; CHUNK_SIZE]),
+                base + Duration::from_millis(u64::from(clid)),
+            );
+        }
+        gate.feed(
+            MAX_SPEAKER_STATES as u32 + 1,
+            WakeFrame::pcm(&[]),
+            base + Duration::from_secs(2),
+        );
+        assert_eq!(gate.states.len(), MAX_SPEAKER_STATES);
+        assert!(
+            !gate.states.contains_key(&1),
+            "都在飞时仍按最久未见让步，容量不膨胀"
+        );
+        assert!(gate.states.contains_key(&(MAX_SPEAKER_STATES as u32 + 1)));
     }
 
     /// TTL 同步清理模型，未到期的轻量状态无论是否持有模型都继续存在

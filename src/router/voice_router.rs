@@ -70,7 +70,11 @@ struct PreparedChat {
 
 enum ChatAdmission {
     DirectReplay(crate::tools::voice_replay::DirectReplayCommand),
-    Llm(ChatTurnAdmission),
+    Llm {
+        admission: ChatTurnAdmission,
+        /// 事件循环里就登记好的回合：任务被派发后、首次被轮询前，音频回合也要能找到并取消它
+        active: Arc<ActiveTurn>,
+    },
 }
 
 fn chat_caller_uid(chat: &voicev1::ChatEvent) -> String {
@@ -91,10 +95,52 @@ fn check_chat_caller_identity(chat: &voicev1::ChatEvent, online_uid: &str) -> Re
     Ok(())
 }
 
-// 在事件循环内登记票据，caller 与在线名单查询必须在取得会话锁后执行。
+/// 由排队聊天的两次在线快照解析调用者：`online` 是列表快照，`clientinfo_uid` 与
+/// `channel_group_id` 出自同一次 clientinfo 查询。
+///
+/// 两次快照都要过身份校验：列表查询与 clientinfo 查询之间 clid 可能被复用，
+/// 只按列表校验就会把旧调用者的 server groups 与新占用者的频道组拼在一起。
+fn resolve_chat_caller(
+    chat: &voicev1::ChatEvent,
+    reply_target_mode: i32,
+    reply_target_client_id: u32,
+    online: &[tsclient_rs::ClientInfo],
+    channel_group_id: u32,
+    clientinfo_uid: &str,
+) -> Result<CallerContext> {
+    let caller = online
+        .iter()
+        .find(|client| u32::try_from(client.id).ok() == Some(chat.invoker_client_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "chat caller {} not found in online clients",
+                chat.invoker_client_id
+            )
+        })?;
+    check_chat_caller_identity(chat, &caller.uid)?;
+    check_chat_caller_identity(chat, clientinfo_uid)?;
+    debug!(
+        "Resolved chat caller '{}' from online list: clid={}",
+        chat.invoker_name, caller.id
+    );
+    Ok(CallerContext {
+        caller_id: chat.invoker_client_id,
+        caller_uid: chat_caller_uid(chat),
+        caller_name: chat.invoker_name.clone(),
+        groups: parse_server_groups(&caller.server_groups),
+        channel_group_id,
+        channel_id: caller.channel_id,
+        reply_target_mode,
+        reply_target_client_id,
+    })
+}
+
+// 在事件循环内登记票据与回合：caller 与在线名单查询必须在取得会话锁后执行，
+// 而回合必须在派发任务前就可见，否则音频事件找不到它、取消不掉排队中的文本回复。
 fn prepare_chat(
     config: &AppConfig,
     llm: &LlmEngine,
+    turns: &TurnRegistry,
     bot_clid: u32,
     chat: &voicev1::ChatEvent,
 ) -> Option<PreparedChat> {
@@ -137,11 +183,21 @@ fn prepare_chat(
             uid: chat_caller_uid(chat),
         };
         let ticket = llm.enqueue_turn_ticket(&source);
-        ChatAdmission::Llm(ChatTurnAdmission {
-            source,
-            permit,
-            ticket,
-        })
+        // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
+        // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
+        // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消。
+        // 登记必须在这里、派发任务之前：任务是独立任务，等它首次被轮询时音频事件可能已经
+        // 处理过，那时它找不到这条回合，插话取消不掉排队中的文本回复
+        let active = Arc::new(ActiveTurn::new());
+        turns.begin_turn(chat.invoker_client_id, &active);
+        ChatAdmission::Llm {
+            admission: ChatTurnAdmission {
+                source,
+                permit,
+                ticket,
+            },
+            active,
+        }
     };
     Some(PreparedChat {
         text,
@@ -688,6 +744,7 @@ impl VoiceRouter {
                             let Some(prepared) = prepare_chat(
                                 &router.config,
                                 &router.llm,
+                                &router.turns,
                                 router.ts_adapter.get_bot_clid(),
                                 &chat,
                             ) else {
@@ -787,25 +844,14 @@ impl VoiceRouter {
         reply_target_mode: i32,
         reply_target_client_id: u32,
     ) -> Result<CallerContext> {
-        let caller_uid = chat_caller_uid(chat);
         let clients = self
             .ts_adapter
             .list_clients()
             .await
             .map_err(|error| anyhow::anyhow!("list chat caller failed: {error}"))?;
-        let caller = clients
-            .iter()
-            .find(|client| u32::try_from(client.id).ok() == Some(chat.invoker_client_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "chat caller {} not found in online clients",
-                    chat.invoker_client_id
-                )
-            })?;
-        check_chat_caller_identity(chat, &caller.uid)?;
-        let channel_group_id = self
+        let (channel_group_id, clientinfo_uid) = self
             .ts_adapter
-            .get_client_channel_group_id(chat.invoker_client_id)
+            .get_client_channel_group_and_uid(chat.invoker_client_id)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -813,21 +859,14 @@ impl VoiceRouter {
                     chat.invoker_client_id
                 )
             })?;
-        let groups = parse_server_groups(&caller.server_groups);
-        debug!(
-            "Resolved chat caller '{}' from online list: clid={}",
-            chat.invoker_name, caller.id
-        );
-        Ok(CallerContext {
-            caller_id: chat.invoker_client_id,
-            caller_uid,
-            caller_name: chat.invoker_name.clone(),
-            groups,
-            channel_group_id,
-            channel_id: caller.channel_id,
+        resolve_chat_caller(
+            chat,
             reply_target_mode,
             reply_target_client_id,
-        })
+            &clients,
+            channel_group_id,
+            &clientinfo_uid,
+        )
     }
 
     async fn resolve_caller_from_audio(
@@ -910,14 +949,8 @@ impl VoiceRouter {
         let resolve =
             self.resolve_caller_from_chat(&chat, prepared.reply_mode, prepared.reply_target);
         let (session, ctx, active) = match prepared.admission {
-            ChatAdmission::Llm(admission) => {
-                // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
-                // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
-                // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消。
-                // 登记先于等待：等 LLM 容量与会话锁期间，同 clid 的新语音顶替或唤醒确认音
-                // 夺权都要能取消这条排队中的文本回合，丢弃等待 future 并释放占位与票据
-                let active = Arc::new(ActiveTurn::new());
-                self.turns.begin_turn(chat.invoker_client_id, &active);
+            ChatAdmission::Llm { admission, active } => {
+                // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
                 let Some(admitted) =
                     cancellable_turn_step(&active.cancel, admission.prepare(&self.llm, resolve))
                         .await
@@ -1329,8 +1362,12 @@ impl VoiceRouter {
     ) -> Result<()> {
         let wav_bytes = pcm16_mono_to_wav_bytes(&chunk.pcm16_mono_16k, 16_000);
 
-        // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
-        let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
+        // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock。
+        // 与文本/STT 同一顺序：先占名额与到达顺序、再取会话锁，最后才查在线名单，
+        // 名单查询的耗时不再让票据顺序与呼叫者解析互相漂移
+        let source = SessionSource::TeamSpeak {
+            uid: ctx.caller_uid.clone(),
+        };
         let Ok(permit) = TurnPermit::reserve(&self.llm) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
@@ -1338,17 +1375,27 @@ impl VoiceRouter {
             );
             return Ok(());
         };
-        let ticket = self.llm.enqueue_turn_ticket(&session_source);
+        let ticket = self.llm.enqueue_turn_ticket(&source);
         // 等 LLM 容量与会话锁期间被取消：丢弃等待 future，占位、票据与锁随之释放
         let Some(session) = cancellable_turn_step(
             &active.cancel,
-            acquire_voice_turn_session(permit, &self.llm, &session_source, ticket),
+            acquire_voice_turn_session(permit, &self.llm, &source, ticket),
         )
         .await
         else {
             debug!(
                 caller_uid = %ctx.caller_uid,
                 "voice turn cancelled while waiting for the LLM slot"
+            );
+            return Ok(());
+        };
+        // 查在线名单同样是要放下的等待：取消时丢弃查询 future，会话锁与容量立刻归还
+        let Some((user_ctx, allowed_tools, session_source)) =
+            cancellable_turn_step(&active.cancel, self.build_llm_request(&ctx)).await
+        else {
+            debug!(
+                caller_uid = %ctx.caller_uid,
+                "voice turn cancelled while preparing the request"
             );
             return Ok(());
         };
@@ -1435,7 +1482,17 @@ impl VoiceRouter {
             message_chars = user_msg.chars().count(),
             "Voice user message received"
         );
-        let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
+        // 会话锁已到手，接着查在线名单：这同样是要放下的等待，
+        // 取消时丢弃查询 future，让锁与 LLM 容量立刻归还给顶替它的回合
+        let Some((user_ctx, allowed_tools, session_source)) =
+            cancellable_turn_step(&active.cancel, self.build_llm_request(&ctx)).await
+        else {
+            debug!(
+                caller_uid = %ctx.caller_uid,
+                "voice turn cancelled while preparing the request"
+            );
+            return Ok(());
+        };
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
         } else {
@@ -1860,15 +1917,37 @@ mod tests {
         let config = AppConfig::default();
         let provider = Arc::new(ChatOrderProvider::default());
         let llm = LlmEngine::with_provider(Box::new(provider.clone()), 8);
-        let first = prepare_chat(&config, &llm, 99, &chat_event("first")).unwrap();
-        let second = prepare_chat(&config, &llm, 99, &chat_event("second")).unwrap();
+        let first = prepare_chat(
+            &config,
+            &llm,
+            &TurnRegistry::default(),
+            99,
+            &chat_event("first"),
+        )
+        .unwrap();
+        let second = prepare_chat(
+            &config,
+            &llm,
+            &TurnRegistry::default(),
+            99,
+            &chat_event("second"),
+        )
+        .unwrap();
         let sink = ChatOrderSink::default();
         let second_prepared = AtomicBool::new(false);
         let (release_caller, caller_ready) = tokio::sync::oneshot::channel();
-        let ChatAdmission::Llm(first_admission) = first.admission else {
+        let ChatAdmission::Llm {
+            admission: first_admission,
+            ..
+        } = first.admission
+        else {
             panic!("first chat must reserve an LLM turn");
         };
-        let ChatAdmission::Llm(second_admission) = second.admission else {
+        let ChatAdmission::Llm {
+            admission: second_admission,
+            ..
+        } = second.admission
+        else {
             panic!("second chat must reserve an LLM turn");
         };
         let first_task = async {
@@ -1940,14 +2019,37 @@ mod tests {
                 ..chat_event("not triggered")
             },
         ] {
-            assert!(prepare_chat(&config, &llm, 99, &chat).is_none());
+            assert!(prepare_chat(&config, &llm, &TurnRegistry::default(), 99, &chat).is_none());
         }
         let admissions: Vec<_> = (0..4)
-            .map(|_| prepare_chat(&config, &llm, 99, &chat_event("hello")).unwrap())
+            .map(|_| {
+                prepare_chat(
+                    &config,
+                    &llm,
+                    &TurnRegistry::default(),
+                    99,
+                    &chat_event("hello"),
+                )
+                .unwrap()
+            })
             .collect();
         assert_eq!(admissions.len(), 4);
-        assert!(prepare_chat(&config, &llm, 99, &chat_event("hello")).is_none());
-        let replay = prepare_chat(&config, &llm, 99, &chat_event("!replay")).unwrap();
+        assert!(prepare_chat(
+            &config,
+            &llm,
+            &TurnRegistry::default(),
+            99,
+            &chat_event("hello")
+        )
+        .is_none());
+        let replay = prepare_chat(
+            &config,
+            &llm,
+            &TurnRegistry::default(),
+            99,
+            &chat_event("!replay"),
+        )
+        .unwrap();
         assert!(matches!(replay.admission, ChatAdmission::DirectReplay(_)));
     }
 
@@ -1959,12 +2061,36 @@ mod tests {
             invoker_unique_id: String::new(),
             ..chat_event("hello")
         };
-        let prepared = prepare_chat(&config, &llm, 99, &chat).unwrap();
+        let prepared = prepare_chat(&config, &llm, &TurnRegistry::default(), 99, &chat).unwrap();
         assert_eq!(chat_caller_uid(&chat), "clid:7");
-        let ChatAdmission::Llm(admission) = prepared.admission else {
+        let ChatAdmission::Llm { admission, .. } = prepared.admission else {
             panic!("ordinary chat must reserve an LLM turn");
         };
         assert_eq!(admission.source.to_string(), "sq:clid:7");
+    }
+
+    /// 文本回合在派发任务前登记：同 clid 的音频顶替不等任务被轮询就能取消排队中的回复
+    #[test]
+    fn queued_chat_turn_is_cancellable_before_its_task_is_polled() {
+        let config = AppConfig::default();
+        let llm = LlmEngine::new(Arc::new(config.clone())).unwrap();
+        let turns = TurnRegistry::default();
+        let prepared = prepare_chat(&config, &llm, &turns, 99, &chat_event("hello")).unwrap();
+        let ChatAdmission::Llm { active, .. } = &prepared.admission else {
+            panic!("ordinary chat must reserve an LLM turn");
+        };
+
+        // 任务还没被轮询，登记表里已经有这条回合
+        assert!(turns.active(7).is_some());
+        // 音频顶替：旧回合没进 mark_producing，插话路径可用也一律取消
+        let audio = Arc::new(ActiveTurn::new());
+        let displaced = turns.begin_turn(7, &audio);
+        cancel_displaced_turns(&turns, displaced, true);
+
+        assert!(active.cancel.is_cancelled());
+        // 取消同时按身份摘除，表里只留下顶替者
+        let remaining = turns.active(7).expect("successor turn stays registered");
+        assert!(Arc::ptr_eq(&remaining, &audio));
     }
 
     #[test]
@@ -1974,6 +2100,73 @@ mod tests {
         assert!(check_chat_caller_identity(&chat, "replacement-user").is_err());
         chat.invoker_unique_id.clear();
         assert!(check_chat_caller_identity(&chat, "replacement-user").is_ok());
+    }
+
+    fn online_chat_caller(uid: &str) -> tsclient_rs::ClientInfo {
+        tsclient_rs::ClientInfo {
+            nickname: "caller".to_string(),
+            uid: uid.to_string(),
+            server_groups: vec!["6".to_string(), "not-a-number".to_string()],
+            channel_id: 3,
+            r#type: 0,
+            id: 7,
+        }
+    }
+
+    /// 排队消息的调用者解析走两次快照：列表里的 UID 与事件不一致就拒收
+    #[test]
+    fn chat_resolution_rejects_a_replacement_caller_in_the_online_list() {
+        let chat = chat_event("hello");
+        let online = vec![online_chat_caller("replacement-user")];
+
+        assert!(resolve_chat_caller(&chat, 1, 7, &online, 42, "replacement-user").is_err());
+    }
+
+    /// 列表与 clientinfo 之间 clid 被复用：两次快照都要校验，
+    /// 只查列表就会把旧调用者的身份与新占用者的频道组拼在一起
+    #[test]
+    fn chat_resolution_rejects_a_client_id_reused_between_snapshots() {
+        let chat = chat_event("hello");
+        let online = vec![online_chat_caller("chat-user")];
+
+        assert!(resolve_chat_caller(&chat, 1, 7, &online, 42, "replacement-user").is_err());
+    }
+
+    #[test]
+    fn chat_resolution_builds_the_caller_from_matching_snapshots() {
+        let chat = chat_event("hello");
+        let online = vec![online_chat_caller("chat-user")];
+
+        let ctx = resolve_chat_caller(&chat, 2, 9, &online, 42, "chat-user").unwrap();
+
+        assert_eq!(ctx.caller_id, 7);
+        assert_eq!(ctx.caller_uid, "chat-user");
+        assert_eq!(ctx.caller_name, "caller");
+        // 无法解析的 server group 项被忽略
+        assert_eq!(ctx.groups, vec![6]);
+        assert_eq!(ctx.channel_group_id, 42);
+        assert_eq!(ctx.channel_id, 3);
+        assert_eq!((ctx.reply_target_mode, ctx.reply_target_client_id), (2, 9));
+    }
+
+    /// 事件不带 UID 时无从比对（桥接可能省略），会话键回退到 clid
+    #[test]
+    fn chat_resolution_falls_back_to_the_client_id_key_without_an_event_uid() {
+        let mut chat = chat_event("hello");
+        chat.invoker_unique_id.clear();
+        let online = vec![online_chat_caller("replacement-user")];
+
+        let ctx = resolve_chat_caller(&chat, 1, 7, &online, 42, "replacement-user").unwrap();
+
+        assert_eq!(ctx.caller_uid, "clid:7");
+    }
+
+    /// 名单里没有这个 clid 时报错，不拿另一个人的身份兜底
+    #[test]
+    fn chat_resolution_rejects_a_missing_caller() {
+        let chat = chat_event("hello");
+
+        assert!(resolve_chat_caller(&chat, 1, 7, &[], 42, "chat-user").is_err());
     }
 
     struct DropMarker(Arc<AtomicBool>);

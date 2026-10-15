@@ -69,6 +69,15 @@ fn parse_client_channel_group_id(info: &std::collections::HashMap<String, String
         .map_err(|error| anyhow!("invalid client_channel_group_id '{value}': {error}"))
 }
 
+/// clientinfo 里的 `client_unique_identifier`：与列表快照交叉校验 clid 是否已被复用。
+/// 空值与缺字段同等对待——它无法证明这份快照属于哪个人
+fn parse_client_uid(info: &std::collections::HashMap<String, String>) -> Result<String> {
+    info.get("client_unique_identifier")
+        .filter(|uid| !uid.is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow!("clientinfo missing client_unique_identifier"))
+}
+
 /// 把客户端 server_groups 字符串 ID 列表解析为 u32，忽略无法解析的项
 pub(crate) fn parse_server_groups(groups: &[String]) -> Vec<u32> {
     groups.iter().filter_map(|g| g.parse().ok()).collect()
@@ -454,6 +463,16 @@ impl TsAdapter {
         parse_client_channel_group_id(&info)
     }
 
+    /// 一次 clientinfo 同时取频道组与 UID：调用者的身份与频道组必须来自同一份快照，
+    /// 分两次查就会在两次查询之间被 clid 复用掺进另一个人的频道组
+    pub async fn get_client_channel_group_and_uid(&self, clid: u32) -> Result<(u32, String)> {
+        let info = self.get_client_info(clid).await?;
+        Ok((
+            parse_client_channel_group_id(&info)?,
+            parse_client_uid(&info)?,
+        ))
+    }
+
     pub async fn quit(&self) -> Result<()> {
         self.closing
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -490,8 +509,8 @@ pub enum TextMessageTarget {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_identity_level, parse_client_channel_group_id, should_upgrade_identity,
-        write_identity_file,
+        next_identity_level, parse_client_channel_group_id, parse_client_uid,
+        should_upgrade_identity, write_identity_file,
     };
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -513,6 +532,25 @@ mod tests {
         let info = HashMap::from([("client_channel_group_id".to_string(), "invalid".to_string())]);
 
         assert!(parse_client_channel_group_id(&info).is_err());
+    }
+
+    #[test]
+    fn parses_client_uid_from_clientinfo() {
+        let info = HashMap::from([(
+            "client_unique_identifier".to_string(),
+            "alice-uid".to_string(),
+        )]);
+
+        assert_eq!(parse_client_uid(&info).unwrap(), "alice-uid");
+    }
+
+    /// 空 UID 证明不了这份快照属于谁，与缺字段同等处理
+    #[test]
+    fn rejects_missing_or_empty_client_uid() {
+        assert!(parse_client_uid(&HashMap::new()).is_err());
+        let empty = HashMap::from([("client_unique_identifier".to_string(), String::new())]);
+
+        assert!(parse_client_uid(&empty).is_err());
     }
 
     #[test]
