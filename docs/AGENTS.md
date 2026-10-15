@@ -1,6 +1,6 @@
 # AGENTS.md — 文档标准
 
-本文定义 docs/ 文档体系的分层归属、写作规则与字数预算。写或改 docs/ 下任何文档前先读本文件；超限事实按「字数预算」的两步流程处理。
+本文定义 docs/ 文档体系的分层归属与写作规则。写或改 docs/ 下任何文档前先读本文件。
 
 ## 分层归属：一事实一归属
 
@@ -14,15 +14,17 @@
 | `docs/testing.md` | 测试约定：单测摆放、`#[test]`/`#[tokio::test]` 标注、命名与断言、CI 测试门 | 测试用例誊写 |
 | `docs/defensive-patterns.md` | 编码反面与替代：FAILFAST、YAGNI、警告压制处置、类型安全优先 | 常规开发流程 |
 | `docs/ci-cd.md` | 各 GitHub Actions workflow 的触发条件与职责 | 架构决策 |
-| `docs/agent-notes.md` | 决策记录：为什么这么做、放弃了什么、如何验证；已落地条目用现在时描述现状 | 迁移计划、验收清单、spec 语气 |
+| `docs/release/` | 发版日志：每个 tag 的 Release 正文，按 git 提交归纳这一版面向读者的变化；格式与生命周期见其 `AGENTS.md` | 当前机制的说明（→ docs 各归属地）、下一版的计划 |
+| `.agents/notes/` | 决策记录：为什么这么做、放弃了什么、如何验证；路径编码生命周期与类目，已落地条目用现在时描述现状，规则见其 `README.md` | 迁移计划、验收清单、spec 语气 |
+| `.agents/skills/` | agent 侧复用工作流与判定标准（`SKILL.md`） | 产品与运行期契约（→ docs 或源码） |
 | 模块内 `AGENTS.md` | 目录级规则，如 `docs/AGENTS.md`、`src/config/AGENTS.md`、`website/AGENTS.md` | 仓库级规则（→ 根 AGENTS.md） |
 | `website/` | 面向最终用户的文档 | 内部实现、引用目录、决策历史 |
 
-放置速查：standing orders → 根 `AGENTS.md`；拓扑/关键路径 → `architecture.md`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；决策理由 → `agent-notes.md`；模块规则 → 模块内 `AGENTS.md`；用户文档 → `website/`。
+放置速查：standing orders → 根 `AGENTS.md`；拓扑/关键路径 → `architecture.md`；开发流程 → `development.md`；测试 → `testing.md`；编码反面 → `defensive-patterns.md`；workflow → `ci-cd.md`；发版日志 → `docs/release/`；决策理由 → `.agents/notes/`；复用流程 → `.agents/skills/`；模块规则 → 模块内 `AGENTS.md`；用户文档 → `website/`。
 
 ## 写作规则
 
-- **只写当前状态，不写变更史。** 不用「之前/现在/不再/曾改名/已迁移」等说法，不写 PR 或 commit 编号，只写当前机制本身；变更故事归 commit、PR 与 agent-notes。
+- **只写当前状态，不写变更史。** 不用「之前/现在/不再/曾改名/已迁移」等说法，不写 PR 或 commit 编号，只写当前机制本身；变更故事归 commit、PR、`.agents/notes/` 与 `docs/release/` 的发版日志。
 
 - **一段一物理行。** Markdown 每段只占一行，用编辑器软换行；代码块、表格、列表结构保持原格式。
 

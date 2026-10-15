@@ -15,8 +15,10 @@
 | `src/` 代码 | [docs/architecture.md](docs/architecture.md)、[docs/defensive-patterns.md](docs/defensive-patterns.md) |
 | 构建、常用命令、git、输出规范 | [docs/development.md](docs/development.md) |
 | 测试与提交前质量门 | [docs/testing.md](docs/testing.md)、[docs/ci-cd.md](docs/ci-cd.md) |
-| 架构、生命周期、并发、音频/语音桥、重连等非平凡变更 | [docs/defensive-patterns.md](docs/defensive-patterns.md)、[docs/agent-notes.md](docs/agent-notes.md) |
+| 架构、生命周期、并发、音频/语音桥、重连等非平凡变更 | [docs/defensive-patterns.md](docs/defensive-patterns.md)、[.agents/notes/README.md](.agents/notes/README.md) |
+| 发版日志 | [docs/release/AGENTS.md](docs/release/AGENTS.md) |
 | 新增或修改 `docs/` | [docs/AGENTS.md](docs/AGENTS.md) |
+| agent 侧技能（`SKILL.md`） | [.agents/skills/AGENTS.md](.agents/skills/AGENTS.md) |
 | 模块内规则 | 对应目录的 `AGENTS.md`，如 `src/config/AGENTS.md`、`website/AGENTS.md` |
 | 面向最终用户的文档 | `website/` |
 
@@ -27,7 +29,8 @@
 - 命令与 git 约定：[docs/development.md](docs/development.md)
 - 测试写法与 CI 质量门：[docs/testing.md](docs/testing.md)
 - FAILFAST、YAGNI、DRY、禁警告压制、类型安全优先：[docs/defensive-patterns.md](docs/defensive-patterns.md)
-- 非平凡变更须附决策记录：[docs/agent-notes.md](docs/agent-notes.md)
+- 非平凡变更须附决策记录：[.agents/notes/README.md](.agents/notes/README.md)
+- 发版前须写该版发版日志：[docs/release/AGENTS.md](docs/release/AGENTS.md)
 - 敏感配置不进 git、不写日志：[AGENTS.md](AGENTS.md)
 
 ## Issue 与安全
@@ -36,7 +39,7 @@ Bug 报告使用 [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/b
 
 ## Pull Request
 
-创建 PR 时使用 [.github/pull_request_template.md](.github/pull_request_template.md)：勾选变更类型与影响范围，填写验证与质量门结果；非平凡变更补决策记录要点，见 [docs/agent-notes.md](docs/agent-notes.md)。
+创建 PR 时使用 [.github/pull_request_template.md](.github/pull_request_template.md)：勾选变更类型与影响范围，填写验证与质量门结果；非平凡变更补决策记录要点，见 [.agents/notes/README.md](.agents/notes/README.md)。
 
 ## 写文档
 

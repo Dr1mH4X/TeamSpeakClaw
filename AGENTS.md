@@ -32,8 +32,12 @@ src/
 │   └── music/               # (ts3audiobot, tsbot_http, tsmusicbot)
 
 proto/voice.proto            # 语音桥 gRPC protobuf
+.agents/
+├── notes/                   # 决策记录，按 {lifecycle}/{class}/ 分树；规则见 .agents/notes/README.md
+└── skills/                  # agent 侧复用工作流（SKILL.md）；规则见 .agents/skills/AGENTS.md
 docs/
 ├── AGENTS.md                # 文档标准
+├── release/                 # 发版日志：每个 tag 一篇，作为 Release 正文；规则见 docs/release/AGENTS.md
 └── architecture.md 等        # 开发者文档，详见 docs/AGENTS.md 分层表
 examples/
 ├── config/                  # 参考配置模板（settings.toml, acl.toml；Release 打包含此两文件）
@@ -78,8 +82,10 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 - [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
 - [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
 - [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
-- [docs/ci-cd.md](docs/ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及 git-cliff 变更日志。
-- [docs/agent-notes.md](docs/agent-notes.md) — 决策记录：为什么这么做、放弃了什么、如何验证。
+- [docs/ci-cd.md](docs/ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及发版日志如何成为 Release 正文。
+- [docs/release/AGENTS.md](docs/release/AGENTS.md) — 发版日志：每个 tag 一篇、由 git 提交归纳，作为 Release 正文。
+- [.agents/notes/README.md](.agents/notes/README.md) — 决策记录：为什么这么做、放弃了什么、如何验证，路径编码生命周期与类目。
+- [.agents/skills/AGENTS.md](.agents/skills/AGENTS.md) — agent 侧复用工作流（SKILL.md）的目录与正文规范。
 
 ## LLM / Provider
 
