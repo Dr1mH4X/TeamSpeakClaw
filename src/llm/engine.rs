@@ -186,15 +186,15 @@ impl LlmEngine {
         self.context.get(source)
     }
 
-    /// 体积类失败自愈：删除 wire 中最早可删音频及不可见前缀，防止旧音频回填，
-    /// 返回收缩前的完整历史供 `restore_history` 还原。
+    /// 可收缩失败（体积类与上下文窗口类）自愈：删除 wire 中最早可删音频及不可见前缀，
+    /// 防止旧音频回填，返回收缩前的完整历史供 `restore_history` 还原。
     /// 原 wire 可见文本与最新音频保留；无法缩小实际请求时返回 `None`。
-    pub fn shrink_for_payload_retry(&self, source: &SessionSource) -> Option<Vec<ContextTurn>> {
+    pub fn shrink_for_rejection_retry(&self, source: &SessionSource) -> Option<Vec<ContextTurn>> {
         self.context
-            .shrink_for_payload_retry(source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_rejection_retry(source, MAX_WIRE_AUDIO_BYTES)
     }
 
-    /// 重试被取消时把 `shrink_for_payload_retry` 收缩掉的历史放回
+    /// 重试被取消时把 `shrink_for_rejection_retry` 收缩掉的历史放回
     pub fn restore_history(&self, source: &SessionSource, history: Vec<ContextTurn>) {
         self.context.restore_history(source, history);
     }

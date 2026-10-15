@@ -1,4 +1,4 @@
-//! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、体积自愈与回复策略。
+//! LLM 回合的唯一归属地：容量占位、会话串行锁、消息装配、工具循环、请求被拒后的收缩自愈与回复策略。
 //!
 //! 调用点只提供回合请求（会话、提示、输入、回调、取消）与回复落点 `TurnSink`：
 //! 容量占位（`TurnPermit::reserve`）与到达顺序票据（`LlmEngine::enqueue_turn_ticket`）
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use crate::llm::context::{
     ContextTurn, SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
 };
-use crate::llm::provider::PayloadTooLarge;
+use crate::llm::provider::LlmFailure;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::tools::{ToolRegistry, UnifiedExecutionContext};
@@ -47,8 +47,8 @@ pub(crate) fn ts_caller_session_uid(resolved_uid: &str, admission_uid: &str) -> 
     }
 }
 
-/// 体积类失败后最多重试的次数：只防放大，不保证保留内容
-const MAX_PAYLOAD_RETRIES: usize = 1;
+/// 可收缩失败后最多重试的次数：只防放大，不保证保留内容
+const MAX_SHRINK_RETRIES: usize = 1;
 
 /// 回合输入：文本走 `build_messages`，音频走 `build_omni_messages`；
 /// 成功落上下文时按同一分支选择 `save_turn` / `save_omni_turn`
@@ -166,11 +166,18 @@ impl TurnRequest<'_> {
                 )
                 .await
             {
-                Err(error) if retries < MAX_PAYLOAD_RETRIES && is_payload_too_large(&error) => {
+                Err(error)
+                    if retries < MAX_SHRINK_RETRIES && shrinkable_failure(&error).is_some() =>
+                {
                     // 没有可收缩的会话（NapCat）或已无音频可丢时原样返回，不做无意义的重试
-                    let Some(history) = self.llm.shrink_for_payload_retry(self.source) else {
+                    let Some(history) = self.llm.shrink_for_rejection_retry(self.source) else {
                         break Err(error);
                     };
+                    warn!(
+                        session = %self.source,
+                        error = %error,
+                        "LLM rejected the request; retrying with a smaller history"
+                    );
                     undo = Some(history);
                     retries += 1;
                 }
@@ -188,6 +195,20 @@ impl TurnRequest<'_> {
                 self.deliver(sink, result.content).await
             }
             Ok(_) => Ok(()),
+            // 空完成是模型侧的退化结果：一次没有回复的回合仍然是完整回合，不送达也不落库，
+            // 但必须按分类留下日志，否则「机器人偶尔不理人」无法诊断
+            Err(error)
+                if matches!(
+                    failure_class(&error),
+                    Some(LlmFailure::EmptyResponse { .. })
+                ) =>
+            {
+                warn!(
+                    session = %self.source,
+                    "model completion carried no content; turn ends without a reply"
+                );
+                Ok(())
+            }
             Err(ToolLoopError::Cancelled) => {
                 // 取消的回合不回复也不落库：把收缩掉的历史放回，别让一次插话永久丢上下文
                 if let Some(history) = undo {
@@ -261,10 +282,26 @@ where
     }
 }
 
-/// 体积类失败判定：`PayloadTooLarge` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
-/// 只允许尚未执行工具的 `Other` 触发重试，避免重放已经发生的操作。
-fn is_payload_too_large(error: &ToolLoopError) -> bool {
-    matches!(error, ToolLoopError::Other(inner) if inner.downcast_ref::<PayloadTooLarge>().is_some())
+/// 失败分类提取：工具执行前的模型错误归 `Other`，执行后的归 `AfterToolExecution`，
+/// 分类本身不变；收缩只允许前者，其他动作不看工具是否执行过。
+fn failure_class(error: &ToolLoopError) -> Option<&LlmFailure> {
+    match error {
+        ToolLoopError::Other(inner) | ToolLoopError::AfterToolExecution(inner) => {
+            inner.downcast_ref::<LlmFailure>()
+        }
+        _ => None,
+    }
+}
+
+/// 可收缩失败判定：`LlmFailure` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
+/// 只允许尚未执行工具的 `Other` 触发收缩重试，避免重放已经发生的操作。
+fn shrinkable_failure(error: &ToolLoopError) -> Option<&LlmFailure> {
+    match error {
+        ToolLoopError::Other(inner) => inner
+            .downcast_ref::<LlmFailure>()
+            .filter(|failure| failure.is_shrinkable()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -293,12 +330,16 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum FakeOutcome {
         PayloadTooLarge,
+        /// 网关按模型上下文窗口拒绝：与体积类共用收缩恢复
+        ContextWindowExceeded,
         HttpError,
         Success,
         /// 固定文本回复：让「哪条回复先送达」可断言，顺序类用例用它
         Reply(&'static str),
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
+        /// 真实 provider 对空完成的分类形态：以 `LlmFailure` 交回回合骨架
+        EmptyResponse,
         Action,
         /// 重试期间插话取消：置位令牌并挂起流，让取消分支胜出
         CancelRetry,
@@ -353,9 +394,18 @@ mod tests {
                 .unwrap()
                 .push(serde_json::to_vec(&messages).unwrap().len());
             match self.outcomes.lock().unwrap().remove(0) {
-                FakeOutcome::PayloadTooLarge => {
-                    Err(PayloadTooLarge::for_test("oversized test payload").into())
+                FakeOutcome::PayloadTooLarge => Err(LlmFailure::PayloadTooLarge {
+                    message: "oversized test payload".to_string(),
                 }
+                .into()),
+                FakeOutcome::ContextWindowExceeded => Err(LlmFailure::ContextWindowExceeded {
+                    message: "context window exceeded".to_string(),
+                }
+                .into()),
+                FakeOutcome::EmptyResponse => Err(LlmFailure::EmptyResponse {
+                    finish_reason: "stop".to_string(),
+                }
+                .into()),
                 FakeOutcome::HttpError => Err(anyhow::anyhow!("LLM API error: HTTP 500")),
                 FakeOutcome::Success => Ok(Box::pin(stream::iter(vec![
                     Ok(LlmStreamEvent::Token("hello".to_string())),
@@ -686,6 +736,128 @@ mod tests {
         let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
 
         assert!(result.is_ok());
+        assert!(sink.sent().is_empty());
+        assert!(llm.stored_history(&source).is_empty());
+    }
+
+    #[tokio::test]
+    async fn classified_empty_completion_ends_the_turn_without_a_reply() {
+        // 真实 provider 把空完成交回 `LlmFailure::EmptyResponse`：分类存在、日志存在，
+        // 但回合的处置与零 token 的完成一致——不送达、不落库、不当作后端故障
+        let provider = Arc::new(FakeProvider::new(vec![FakeOutcome::EmptyResponse]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "classified-empty".to_string(),
+        };
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Text("question"), &sink).await;
+
+        assert!(result.is_ok());
+        assert!(sink.sent().is_empty());
+        assert!(llm.stored_history(&source).is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_window_rejection_shrinks_and_retries_like_a_payload_rejection() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::ContextWindowExceeded,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "context-window".to_string(),
+        };
+        for _ in 0..3 {
+            llm.save_omni_turn(&source, vec![0u8; 2048], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(result.is_ok());
+        let bodies = provider.body_lengths();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[1] < bodies[0]);
+        assert_eq!(sink.sent(), vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn empty_completion_does_not_shrink_the_history() {
+        // 空完成不是可收缩拒绝：不得因为一次零输出就丢掉会话历史
+        let provider = Arc::new(FakeProvider::new(vec![FakeOutcome::EmptyResponse]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "empty-no-shrink".to_string(),
+        };
+        for _ in 0..3 {
+            llm.save_omni_turn(&source, vec![0u8; 1024], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(result.is_ok());
+        assert_eq!(provider.calls(), 1);
+        assert_eq!(llm.stored_history(&source).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_completion_after_a_tool_call_ends_the_turn_without_a_reply() {
+        // 工具执行后的空完成被包进 `AfterToolExecution`，但分类不变：仍然安静收尾，
+        // 不把「工具已经做完事、模型没有收尾话术」报成后端故障
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::Action,
+            FakeOutcome::EmptyResponse,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "empty-after-action".to_string(),
+        };
+        let actions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::default();
+        registry.register(Box::new(RecordedAction(actions.clone())));
+        let sink = RecordingSink::new();
+        let cancel = CancellationToken::new();
+        let permit = TurnPermit::reserve(&llm).unwrap();
+        let ticket = llm.enqueue_turn_ticket(&source);
+        let session = permit.acquire_session(&llm, &source, ticket).await;
+        let allowed = vec!["record_action".to_string()];
+        let request = TurnRequest {
+            llm: &llm,
+            registry: &registry,
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &allowed,
+            input: TurnInput::Text("perform the action"),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        let result = request
+            .run(
+                session,
+                || UnifiedExecutionContext {
+                    platform: crate::tools::Platform::TeamSpeak,
+                    ts_adapter: None,
+                    nc_adapter: None,
+                    caller_id: 1,
+                    caller_id_nc: 0,
+                    caller_name: "test".to_string(),
+                    caller_groups: Vec::new(),
+                    caller_channel_group_id: 0,
+                    nc_group_id: None,
+                    gate: Arc::new(crate::permission::PermissionGate::new(
+                        crate::config::AclConfig::default(),
+                    )),
+                    config: Arc::new(crate::config::AppConfig::default()),
+                },
+                &sink,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(actions.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls(), 2);
         assert!(sink.sent().is_empty());
         assert!(llm.stored_history(&source).is_empty());
     }

@@ -444,10 +444,10 @@ impl ContextWindow {
         entry.range(keep_from..).cloned().collect()
     }
 
-    /// 体积失败时删除 wire 中最早可删音频及不可见前缀，避免旧音频回填，并返回收缩前的
-    /// 完整历史供 `restore_history` 还原。原 wire 中的文本与最新音频保留；无法缩小实际
-    /// 视图时返回 `None` 且不修改历史。
-    pub fn shrink_for_payload_retry(
+    /// 请求被网关按体积或上下文窗口拒绝时，删除 wire 中最早可删音频及不可见前缀，避免旧
+    /// 音频回填，并返回收缩前的完整历史供 `restore_history` 还原。原 wire 中的文本与最新
+    /// 音频保留；无法缩小实际视图时返回 `None` 且不修改历史。
+    pub fn shrink_for_rejection_retry(
         &self,
         source: &SessionSource,
         wire_budget: usize,
@@ -478,7 +478,7 @@ impl ContextWindow {
         Some(undo)
     }
 
-    /// 把 `shrink_for_payload_retry` 收缩掉的历史整体放回，并重算单会话与全局音频预算。
+    /// 把 `shrink_for_rejection_retry` 收缩掉的历史整体放回，并重算单会话与全局音频预算。
     /// 回合持有会话锁，收缩期间该会话不会再落库，因此快照就是收缩前状态；会话若已被
     /// 会话数上限逐出则保持收缩（不重建会话，避免 `session_order` 失配）。
     pub fn restore_history(&self, source: &SessionSource, history: Vec<ContextTurn>) {
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn shrink_for_payload_retry_keeps_visible_text_and_the_latest_audio_turn() {
+    fn shrink_for_rejection_retry_keeps_visible_text_and_the_latest_audio_turn() {
         let context = ContextWindow::new(8, 10);
         let source = SessionSource::TeamSpeak {
             uid: "heal-once".to_string(),
@@ -825,7 +825,7 @@ mod tests {
         context.push(&source, audio_turn(1000));
 
         assert!(context
-            .shrink_for_payload_retry(&source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_rejection_retry(&source, MAX_WIRE_AUDIO_BYTES)
             .is_some());
 
         let history = context.get(&source);
@@ -839,13 +839,13 @@ mod tests {
 
         // 只剩最新一轮音频：拒绝再丢
         assert!(context
-            .shrink_for_payload_retry(&source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_rejection_retry(&source, MAX_WIRE_AUDIO_BYTES)
             .is_none());
         assert_eq!(context.get(&source).len(), 2);
 
         // 未知会话没有可丢的音频轮
         assert!(context
-            .shrink_for_payload_retry(
+            .shrink_for_rejection_retry(
                 &SessionSource::TeamSpeak {
                     uid: "missing".to_string(),
                 },
@@ -869,7 +869,9 @@ mod tests {
         let budget = 2 * audio_wire(3000);
         let before = context.history_for_wire(&source, budget);
         assert_eq!(before.len(), 5);
-        assert!(context.shrink_for_payload_retry(&source, budget).is_some());
+        assert!(context
+            .shrink_for_rejection_retry(&source, budget)
+            .is_some());
         let after = context.history_for_wire(&source, budget);
         assert_eq!(after.len(), 4);
         assert_eq!(
@@ -886,7 +888,9 @@ mod tests {
         assert_eq!(context.get(&source).len(), after.len());
         assert_eq!(context.state.lock().unwrap().audio_bytes_total, 3000);
         assert_eq!(stored_audio_bytes(&context), 3000);
-        assert!(context.shrink_for_payload_retry(&source, budget).is_none());
+        assert!(context
+            .shrink_for_rejection_retry(&source, budget)
+            .is_none());
     }
 
     /// 收缩只丢音频：还原后被删音频、wire 视图与文本回到收缩前
@@ -906,7 +910,7 @@ mod tests {
         assert_eq!(before.len(), 5);
 
         let undo = context
-            .shrink_for_payload_retry(&source, budget)
+            .shrink_for_rejection_retry(&source, budget)
             .expect("two visible audio turns can shrink");
         assert_eq!(context.get(&source).len(), before.len() - 1);
 
@@ -947,7 +951,7 @@ mod tests {
         context.push(&source, turn(1));
         context.push(&source, audio_turn(3000));
         assert!(context
-            .shrink_for_payload_retry(&source, audio_wire(3000))
+            .shrink_for_rejection_retry(&source, audio_wire(3000))
             .is_none());
         assert_eq!(context.get(&source).len(), 3);
         assert_eq!(context.state.lock().unwrap().audio_bytes_total, 6000);
@@ -962,7 +966,7 @@ mod tests {
         context.push(&source, audio_turn(0));
         context.push(&source, audio_turn(0));
         assert!(context
-            .shrink_for_payload_retry(&source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_rejection_retry(&source, MAX_WIRE_AUDIO_BYTES)
             .is_some());
         assert_eq!(
             context
@@ -972,7 +976,7 @@ mod tests {
         );
         assert_eq!(context.state.lock().unwrap().audio_bytes_total, 0);
         assert!(context
-            .shrink_for_payload_retry(&source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_rejection_retry(&source, MAX_WIRE_AUDIO_BYTES)
             .is_none());
     }
 
