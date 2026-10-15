@@ -98,7 +98,7 @@ impl LlmEngine {
     /// 构建可信系统提示与原始上下文历史（不含最后一条用户消息）。
     /// `system_prompt` 由调用点（回合骨架）装配完成，引擎只负责放进 system 角色。
     /// 音频轮的历史项按 `input_audio` content 回放；装配按 `MAX_WIRE_AUDIO_BYTES`
-    /// 从最早的音频轮逐轮裁剪，文本轮不受影响。
+    /// 从最早的音频轮逐轮裁剪历史后缀；文本不计音频预算。
     fn build_context_base(&self, source: &SessionSource, system_prompt: &str) -> Vec<Value> {
         let mut messages = vec![json!({"role": "system", "content": system_prompt})];
 
@@ -186,10 +186,17 @@ impl LlmEngine {
         self.context.get(source)
     }
 
-    /// 体积类失败自愈：丢弃该会话最早的音频轮，返回是否真的丢了一轮。
-    /// 只丢音频轮，文本轮与最新一轮音频保留。
-    pub fn drop_oldest_audio_turn(&self, source: &SessionSource) -> bool {
-        self.context.drop_oldest_audio_turn(source)
+    /// 体积类失败自愈：删除 wire 中最早可删音频及不可见前缀，防止旧音频回填，
+    /// 返回收缩前的完整历史供 `restore_history` 还原。
+    /// 原 wire 可见文本与最新音频保留；无法缩小实际请求时返回 `None`。
+    pub fn shrink_for_payload_retry(&self, source: &SessionSource) -> Option<Vec<ContextTurn>> {
+        self.context
+            .shrink_for_payload_retry(source, MAX_WIRE_AUDIO_BYTES)
+    }
+
+    /// 重试被取消时把 `shrink_for_payload_retry` 收缩掉的历史放回
+    pub fn restore_history(&self, source: &SessionSource, history: Vec<ContextTurn>) {
+        self.context.restore_history(source, history);
     }
 
     /// 测试可见：注入 provider 的引擎，供路由层重试路径的单测使用

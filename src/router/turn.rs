@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::llm::context::{
-    SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
+    ContextTurn, SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
 };
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
@@ -151,6 +151,8 @@ impl TurnRequest<'_> {
             build_exec_ctx,
         };
         let mut retries = 0usize;
+        // 收缩在重试前落到存储历史上；重试被取消时用这份快照放回
+        let mut undo: Option<Vec<ContextTurn>> = None;
         let result = loop {
             let mut messages = self.messages(&system_prompt);
             match self
@@ -166,9 +168,10 @@ impl TurnRequest<'_> {
             {
                 Err(error) if retries < MAX_PAYLOAD_RETRIES && is_payload_too_large(&error) => {
                     // 没有可收缩的会话（NapCat）或已无音频可丢时原样返回，不做无意义的重试
-                    if !self.llm.drop_oldest_audio_turn(self.source) {
+                    let Some(history) = self.llm.shrink_for_payload_retry(self.source) else {
                         break Err(error);
-                    }
+                    };
+                    undo = Some(history);
                     retries += 1;
                 }
                 result => break result,
@@ -185,7 +188,13 @@ impl TurnRequest<'_> {
                 self.deliver(sink, result.content).await
             }
             Ok(_) => Ok(()),
-            Err(ToolLoopError::Cancelled) => Err(TurnError::Cancelled),
+            Err(ToolLoopError::Cancelled) => {
+                // 取消的回合不回复也不落库：把收缩掉的历史放回，别让一次插话永久丢上下文
+                if let Some(history) = undo {
+                    self.llm.restore_history(self.source, history);
+                }
+                Err(TurnError::Cancelled)
+            }
             Err(error) => Err(self.fail_with_notice(sink, error.into()).await),
         }
     }
@@ -253,7 +262,7 @@ where
 }
 
 /// 体积类失败判定：`PayloadTooLarge` 经 `anyhow::Error` → `ToolLoopError::Other` 原样透传，
-/// 用 downcast 识别，避免每个调用点各写一份错误的文案比对
+/// 只允许尚未执行工具的 `Other` 触发重试，避免重放已经发生的操作。
 fn is_payload_too_large(error: &ToolLoopError) -> bool {
     matches!(error, ToolLoopError::Other(inner) if inner.downcast_ref::<PayloadTooLarge>().is_some())
 }
@@ -290,6 +299,9 @@ mod tests {
         Reply(&'static str),
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
+        Action,
+        /// 重试期间插话取消：置位令牌并挂起流，让取消分支胜出
+        CancelRetry,
     }
 
     /// 脚本化的假 provider：记录调用次数与每次 messages 的序列化体积，
@@ -298,6 +310,8 @@ mod tests {
         outcomes: Mutex<Vec<FakeOutcome>>,
         calls: AtomicUsize,
         body_lengths: Mutex<Vec<usize>>,
+        /// 需要模拟插话取消时由用例注入，与 `TurnRequest::run` 用的是同一个令牌
+        cancel: Option<CancellationToken>,
     }
 
     impl FakeProvider {
@@ -306,6 +320,14 @@ mod tests {
                 outcomes: Mutex::new(outcomes),
                 calls: AtomicUsize::new(0),
                 body_lengths: Mutex::new(Vec::new()),
+                cancel: None,
+            }
+        }
+
+        fn with_cancel(outcomes: Vec<FakeOutcome>, cancel: CancellationToken) -> Self {
+            Self {
+                cancel: Some(cancel),
+                ..Self::new(outcomes)
             }
         }
 
@@ -349,11 +371,25 @@ mod tests {
                         tool_calls: Vec::new(),
                     }),
                 ]))),
+                FakeOutcome::Action => Ok(Box::pin(stream::iter(vec![Ok(LlmStreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    tool_calls: vec![ToolCall {
+                        id: "action-call".to_string(),
+                        name: "record_action".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                })]))),
                 FakeOutcome::EmptySuccess => {
                     Ok(Box::pin(stream::iter(vec![Ok(LlmStreamEvent::Done {
                         finish_reason: "stop".to_string(),
                         tool_calls: Vec::new(),
                     })])))
+                }
+                FakeOutcome::CancelRetry => {
+                    if let Some(cancel) = &self.cancel {
+                        cancel.cancel();
+                    }
+                    Ok(Box::pin(stream::pending()))
                 }
             }
         }
@@ -738,6 +774,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_retry_restores_the_history_the_shrink_removed() {
+        let cancel = CancellationToken::new();
+        let provider = Arc::new(FakeProvider::with_cancel(
+            vec![FakeOutcome::PayloadTooLarge, FakeOutcome::CancelRetry],
+            cancel.clone(),
+        ));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "retry-cancel".to_string(),
+        };
+        for _ in 0..8 {
+            llm.save_omni_turn(&source, vec![0u8; 400 * 1024], "reply".to_string());
+        }
+        let before = llm.stored_history(&source);
+        let sink = RecordingSink::new();
+
+        let result = TurnRequest {
+            llm: &llm,
+            registry: &ToolRegistry::default(),
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &[],
+            input: TurnInput::Audio(&[0u8; 64]),
+            callbacks: None,
+            cancel: &cancel,
+        }
+        .run(
+            TurnPermit::reserve(&llm)
+                .expect("capacity is free in tests")
+                .acquire_session(&llm, &source, llm.enqueue_turn_ticket(&source))
+                .await,
+            || panic!("no tool execution in these tests"),
+            &sink,
+        )
+        .await;
+
+        assert!(matches!(result, Err(TurnError::Cancelled)));
+        assert!(sink.sent().is_empty());
+        // 重试确实在收缩后的更小请求上发出，随后被插话取消
+        assert_eq!(provider.calls(), 2);
+        let bodies = provider.body_lengths();
+        assert!(
+            bodies[1] < bodies[0],
+            "the retry was not assembled from the shrunk history: {} -> {} bytes",
+            bodies[0],
+            bodies[1]
+        );
+        // 取消的回合不落库，收缩也要放回：一次插话不该永久丢掉上下文
+        let after = llm.stored_history(&source);
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            after
+                .iter()
+                .map(|turn| turn.user.as_text())
+                .collect::<Vec<_>>(),
+            before
+                .iter()
+                .map(|turn| turn.user.as_text())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn retry_after_shrink_assembles_a_smaller_body() {
         let provider = Arc::new(FakeProvider::new(vec![
             FakeOutcome::PayloadTooLarge,
@@ -758,6 +857,34 @@ mod tests {
         let bodies = provider.body_lengths();
         assert_eq!(bodies.len(), 2);
         assert!(bodies[1] < bodies[0]);
+    }
+
+    #[tokio::test]
+    async fn regression_retry_shrinks_already_clipped_wire_view() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::PayloadTooLarge,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "retry-body".to_string(),
+        };
+        for _ in 0..8 {
+            llm.save_omni_turn(&source, vec![0u8; 400 * 1024], "reply".to_string());
+        }
+        let sink = RecordingSink::new();
+
+        let result = run_turn(&llm, &source, TurnInput::Audio(&[0u8; 64]), &sink).await;
+
+        assert!(result.is_ok());
+        let bodies = provider.body_lengths();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[1] < bodies[0],
+            "retry did not shrink request: {} -> {} bytes",
+            bodies[0],
+            bodies[1]
+        );
     }
 
     #[tokio::test]
@@ -802,5 +929,97 @@ mod tests {
         assert!(matches!(result, Err(TurnError::Failed(_))));
         assert_eq!(provider.calls(), 1);
         assert_eq!(llm.stored_history(&source).len(), 1);
+    }
+    struct RecordedAction(Arc<AtomicUsize>);
+    #[async_trait]
+    impl crate::tools::Tool for RecordedAction {
+        fn name(&self) -> &'static str {
+            "record_action"
+        }
+        fn description(&self) -> &'static str {
+            "Record a local test action"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &UnifiedExecutionContext,
+        ) -> anyhow::Result<Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"done":true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_payload_retry_must_not_repeat_completed_action() {
+        let provider = Arc::new(FakeProvider::new(vec![
+            FakeOutcome::Action,
+            FakeOutcome::PayloadTooLarge,
+            FakeOutcome::Action,
+            FakeOutcome::Success,
+        ]));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "side-effect-retry".to_string(),
+        };
+        llm.save_omni_turn(&source, vec![0; 1024], "old".to_string());
+        llm.save_omni_turn(&source, vec![0; 1024], "new".to_string());
+        let actions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::default();
+        registry.register(Box::new(RecordedAction(actions.clone())));
+        let sink = RecordingSink::new();
+        let cancel = CancellationToken::new();
+        let permit = TurnPermit::reserve(&llm).unwrap();
+        let ticket = llm.enqueue_turn_ticket(&source);
+        let session = permit.acquire_session(&llm, &source, ticket).await;
+        let allowed = vec!["record_action".to_string()];
+        let request = TurnRequest {
+            llm: &llm,
+            registry: &registry,
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &allowed,
+            input: TurnInput::Text("perform the action once"),
+            callbacks: None,
+            cancel: &cancel,
+        };
+        let result = request
+            .run(
+                session,
+                || UnifiedExecutionContext {
+                    platform: crate::tools::Platform::TeamSpeak,
+                    ts_adapter: None,
+                    nc_adapter: None,
+                    caller_id: 1,
+                    caller_id_nc: 0,
+                    caller_name: "test".to_string(),
+                    caller_groups: Vec::new(),
+                    caller_channel_group_id: 0,
+                    nc_group_id: None,
+                    gate: Arc::new(crate::permission::PermissionGate::new(
+                        crate::config::AclConfig::default(),
+                    )),
+                    config: Arc::new(crate::config::AppConfig::default()),
+                },
+                &sink,
+            )
+            .await;
+        let Err(TurnError::Failed(error)) = result else {
+            panic!("a model failure after tool execution must fail without retrying");
+        };
+        assert!(matches!(
+            error.downcast_ref::<ToolLoopError>(),
+            Some(ToolLoopError::AfterToolExecution(_))
+        ));
+        assert_eq!(
+            actions.load(Ordering::SeqCst),
+            1,
+            "completed action was replayed by the context retry"
+        );
+        assert_eq!(provider.calls(), 2);
+        assert_eq!(sink.sent(), vec![LLM_ERROR_REPLY.to_string()]);
+        assert_eq!(llm.stored_history(&source).len(), 2);
     }
 }

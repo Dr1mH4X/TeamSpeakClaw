@@ -41,6 +41,9 @@ pub enum ToolLoopError {
     /// 插话取消：调用方不回错误文案、不落上下文
     #[error("tool loop cancelled")]
     Cancelled,
+    /// 工具已执行，后续模型请求失败；调用方不得重新执行整个回合。
+    #[error("model request failed after tool execution: {0}")]
+    AfterToolExecution(#[source] anyhow::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -189,7 +192,12 @@ pub async fn run_tool_loop(
             messages.len()
         );
 
-        let acc = accumulate_stream(messages, tools, provider, callbacks, cancel).await?;
+        let acc = match accumulate_stream(messages, tools, provider, callbacks, cancel).await {
+            Err(ToolLoopError::Other(error)) if executed_tool_calls > 0 => {
+                return Err(ToolLoopError::AfterToolExecution(error));
+            }
+            result => result?,
+        };
         let turn_argument_bytes = validate_tool_batch(
             &acc.finish_reason,
             &acc.tool_calls,
@@ -309,6 +317,39 @@ mod tests {
 
     struct CountingExecutor {
         calls: AtomicUsize,
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_tool_execution_keeps_cancelled_classification() {
+        struct CancellingExecutor {
+            calls: AtomicUsize,
+            cancel: CancellationToken,
+        }
+
+        #[async_trait]
+        impl ToolExecutor for CancellingExecutor {
+            async fn execute(&self, _call: &ToolCall) -> String {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.cancel.cancel();
+                "done".to_string()
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let provider = RepeatingProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let executor = CancellingExecutor {
+            calls: AtomicUsize::new(0),
+            cancel: cancel.clone(),
+        };
+        let error = run_tool_loop(&mut Vec::new(), &[], &provider, &executor, None, &cancel)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolLoopError::Cancelled));
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[async_trait]
