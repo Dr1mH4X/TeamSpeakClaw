@@ -23,7 +23,7 @@
 
 ## git 约定
 
-提交用 Conventional Commits 格式，类型取自 `feat / fix / docs / style / refactor / perf / test / chore / ci`，可选 scope。示例：`feat: add poke_client skill`、`docs: align AGENTS.md with current architecture`、`fix: serialize TTS turns in voice router`。变更日志由 `git-cliff` 按此格式生成，见 [ci-cd.md](ci-cd.md)。
+提交用 Conventional Commits 格式，类型取自 `feat / fix / docs / style / refactor / perf / test / chore / ci`，可选 scope。示例：`feat: add poke_client skill`、`docs: align AGENTS.md with current architecture`、`fix: serialize TTS turns in voice router`。发版日志按这些提交归纳，规则见 [release/AGENTS.md](release/AGENTS.md)。
 
 ## 子代理拆分
 

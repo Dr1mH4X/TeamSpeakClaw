@@ -17,4 +17,6 @@
 ## 质量门
 
 - [ ] 相关文档已按 [docs/AGENTS.md](../docs/AGENTS.md) 归属更新
+- [ ] 非平凡变更已按 [.agents/notes/README.md](../.agents/notes/README.md) 归位决策记录
+- [ ] 发版相关改动已按 [docs/release/AGENTS.md](../docs/release/AGENTS.md) 更新该版发版日志
 - [ ] 已读并遵守 [docs/defensive-patterns.md](../docs/defensive-patterns.md)（改 `src/` 时）
