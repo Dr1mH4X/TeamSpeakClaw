@@ -78,7 +78,7 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 ## Conventions
 
 - [docs/AGENTS.md](docs/AGENTS.md) — 文档标准：分层归属、写作规则与精简版 slop checklist，写或改本目录任何文档前先读。
-- [docs/architecture.md](docs/architecture.md) — 架构：系统拓扑、入口流、双入站适配器、文本路由与语音桥、关键代码路径、LLM 引擎、权限与工具体系、层级规范。
+- [docs/architecture.md](docs/architecture.md) — 架构：分层规范、入口流、双入站适配器、路由与语音桥、LLM 与提示词、权限与工具、组件图。
 - [docs/development.md](docs/development.md) — 开发流程：常用命令、构建依赖、git 约定、子代理拆分、输出规范与 CLI 工具偏好。
 - [docs/testing.md](docs/testing.md) — 测试约定：单测摆放与标注、断言规范、测试范围选择、CI 测试门。
 - [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
@@ -89,7 +89,12 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 
 ## LLM / Provider
 
-OpenAI 兼容（任意 `/v1/chat/completions` API）；流式解析忽略 `reasoning_content`（不存不转发）；上下文受 `max_context_turns` 与固定常量上限控制；并发门禁为 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用），超时为常量（连接 10s、流空闲 30s、流总 300s）；system 提示词与 TTS 风格提示是 `prompt/` 的源码常量，由 `TurnRequest::run` 装配，不由用户配置；`omni_model` 标志（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。详见 [docs/architecture.md](docs/architecture.md)。
+- OpenAI 兼容，任意 `/v1/chat/completions` API；流式解析忽略 `reasoning_content`，不存不转发。
+- 上下文受 `max_context_turns` 与固定常量上限控制；并发门禁是 `TurnCoordinator`（容量 + 同会话串行锁，三入口共用）；超时为常量：连接 10s、流空闲 30s、流总 300s。
+- system 提示词与 TTS 风格提示是 `prompt/` 的源码常量，由 `TurnRequest::run` 装配，不由用户配置。
+- `omni_model`（`config/llm.rs`）开启时语音以 `input_audio` 直送模型（无 STT），文本消息随之走语音桥，语音回复仍由 `[headless.tts]` 合成。
+
+细节见 [docs/architecture.md](docs/architecture.md) 与 `llm/`、`prompt/` 源码。
 
 ## Defensive patterns
 
