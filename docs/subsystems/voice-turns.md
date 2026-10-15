@@ -4,7 +4,7 @@
 
 ## 职责
 
-- 承载 STT 与 omni 两条语音回合：`OpusSttPipeline` 分段后由 `OpenAiSpeechProvider` 转写，或音频以 `input_audio` 直送模型；模型回复始终是文本，语音 API 响应受体积上限（STT 响应 64 KiB、TTS 音频 8 MiB）。
+- 承载 STT 与 omni 两条语音回合：`OpusSttPipeline` 分段后由 `OpenAiSpeechProvider` 转写，或音频以 `input_audio` 直送模型；模型回复始终是文本，语音 API 的响应体读取受上限约束（STT 响应体 64 KiB、TTS 音频 8 MiB），超限直接报错而不截断。
 - 承载桥接文本回合：`prepare_chat` 在事件循环里同步完成过滤、触发判定、文本预处理与体积预检，取得 LLM 容量与到达顺序票据，并登记活跃回合。
 - 拥有回合准入与取消：`TurnRegistry` 按 clid 保存活回合集合，`decide_wakeword_action` 把每条 utterance 的裁决映射为丢弃、正常对话或插话，取消时同时置 LLM 取消令牌与播放取消位。
 - 拥有出站音频：TTS 流、提示音片段与回放片段统一排在 `AudioOutput` 的单一 FIFO 上，文本通知经 `VoiceNoticeSink` 落到语音桥。
@@ -30,3 +30,4 @@
 - [TTS 会话按 LLM 流创建，工具轮与最终回复各占一条](../../.agents/notes/implemented/bug-fix/2026-10-03-tts-session-per-llm-stream.md) — 决定 TTS 会话的创建与关闭时机、播放取消位的归属。
 - [TTS 会话归 synth 任务所有，轮次收尾不再等待](../../.agents/notes/implemented/bug-fix/2026-10-02-tts-session-ownership.md) — 决定 `finish`/`abort` 与 `finish_drained` 的收尾语义。
 - [短反馈音频走预生成 PCM 缓存与播报回合](../../.agents/notes/implemented/feature/2026-10-03-voice-feedback-phrases.md) — 决定提示音与确认音的短语池、入队时机与播报回合。
+- [语音 API 的响应体上限是传输层约束](../../.agents/notes/implemented/architecture/2026-10-15-speech-response-caps-are-transport-bounds.md) — 两个上限约束读取字节数而不是模型能力，余量按请求形状折算。
