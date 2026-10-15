@@ -261,20 +261,25 @@ const MAX_TTS_BASE64_BYTES: usize = MAX_TTS_AUDIO_BYTES.div_ceil(3) * 4;
 const MAX_MIMO_RESPONSE_BYTES: usize = MAX_TTS_BASE64_BYTES + 64 * 1024;
 
 /// 不信任 Content-Length：在每块加入缓冲之前检查累计大小。
-async fn read_speech_response(mut response: Response, max_bytes: usize) -> Result<Vec<u8>> {
+/// `api` 只进错误文案：三类语音请求共用这条读取路径，失败时要能分辨是谁
+async fn read_speech_response(
+    mut response: Response,
+    max_bytes: usize,
+    api: &str,
+) -> Result<Vec<u8>> {
     if !response.status().is_success() {
-        anyhow::bail!("speech request failed: status {}", response.status());
+        anyhow::bail!("{api} request failed: status {}", response.status());
     }
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        anyhow::bail!("speech response exceeds {max_bytes} byte limit");
+        anyhow::bail!("{api} response exceeds {max_bytes} byte limit");
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if chunk.len() > max_bytes - body.len() {
-            anyhow::bail!("speech response exceeds {max_bytes} byte limit");
+            anyhow::bail!("{api} response exceeds {max_bytes} byte limit");
         }
         body.extend_from_slice(&chunk);
     }
@@ -342,7 +347,7 @@ impl OpenAiSpeechProvider {
             request = request.bearer_auth(api_key);
         }
         let resp = request.send().await?;
-        let body = read_speech_response(resp, MAX_STT_RESPONSE_BYTES).await?;
+        let body = read_speech_response(resp, MAX_STT_RESPONSE_BYTES, "stt").await?;
         let body = String::from_utf8(body).context("STT response is not UTF-8")?;
         let text = parse_stt_text(&body);
         if text.is_empty() {
@@ -390,7 +395,7 @@ impl OpenAiSpeechProvider {
             request = request.bearer_auth(api_key);
         }
         let resp = request.send().await?;
-        read_speech_response(resp, MAX_TTS_AUDIO_BYTES).await
+        read_speech_response(resp, MAX_TTS_AUDIO_BYTES, "tts").await
     }
 
     /// MiMo TTS：使用 /chat/completions 的 messages + audio 字段
@@ -430,7 +435,7 @@ impl OpenAiSpeechProvider {
         let resp = request.send().await?;
 
         // MiMo TTS 返回含 base64 编码音频数据的 JSON 响应。
-        let body = read_speech_response(resp, MAX_MIMO_RESPONSE_BYTES).await?;
+        let body = read_speech_response(resp, MAX_MIMO_RESPONSE_BYTES, "mimo tts").await?;
         let resp_json: serde_json::Value =
             serde_json::from_slice(&body).context("Failed to parse MiMo TTS response as JSON")?;
 

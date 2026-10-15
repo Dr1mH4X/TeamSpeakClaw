@@ -68,6 +68,25 @@ impl fmt::Display for PayloadTooLarge {
 
 impl std::error::Error for PayloadTooLarge {}
 
+/// 超过读取上限的 400 错误体：只保留已缓冲的前缀供体积分类，正文本身不进错误文案。
+///
+/// 超限不等于放弃分类：体积文案落在已读取的前缀里时，仍要走体积错误这条自愈路径。
+#[derive(Debug)]
+struct OversizedErrorBody {
+    prefix: String,
+}
+
+impl fmt::Display for OversizedErrorBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "error response body exceeds the {MAX_ERROR_BODY_BYTES}-byte limit"
+        )
+    }
+}
+
+impl std::error::Error for OversizedErrorBody {}
+
 /// 发送前预检：序列化后的请求体超过上限就不发请求
 fn ensure_payload_within_limit(body_bytes: usize, limit: usize) -> Result<(), PayloadTooLarge> {
     if body_bytes > limit {
@@ -379,9 +398,10 @@ where
             StreamPoll::Item(Ok(chunk)) => {
                 let chunk = chunk.as_ref();
                 if chunk.len() > MAX_ERROR_BODY_BYTES - body.len() {
-                    anyhow::bail!(
-                        "error response body exceeds the {MAX_ERROR_BODY_BYTES}-byte limit"
-                    );
+                    return Err(OversizedErrorBody {
+                        prefix: String::from_utf8_lossy(&body).into_owned(),
+                    }
+                    .into());
                 }
                 body.extend_from_slice(chunk);
             }
@@ -414,7 +434,16 @@ async fn http_response_error(
                     return error.into();
                 }
             }
-            Err(error) => return error.context(format!("LLM API error: HTTP {status}")),
+            Err(error) => {
+                // 正文超限时仍用已缓冲前缀判定体积错误，不让收缩重试被截断白白跳过
+                if let Some(oversized) = error.downcast_ref::<OversizedErrorBody>() {
+                    if let Some(classified) = classify_payload_too_large(status, &oversized.prefix)
+                    {
+                        return classified.into();
+                    }
+                }
+                return error.context(format!("LLM API error: HTTP {status}"));
+            }
         }
     }
     anyhow::anyhow!("LLM API error: HTTP {status}")
@@ -802,6 +831,24 @@ mod tests {
         assert!(error.to_string().contains("400"));
         assert!(format!("{error:#}").contains("65536-byte limit"));
         assert!(error.downcast_ref::<PayloadTooLarge>().is_none());
+    }
+
+    #[tokio::test]
+    async fn http_400_oversized_body_still_classifies_the_buffered_prefix() {
+        // 体积文案落在前 64 KiB，正文其余部分超限：分类不能因为截断而丢失
+        let mut body = b"request entity too large".to_vec();
+        body.resize(MAX_ERROR_BODY_BYTES + 1, b'x');
+        let response = error_response(400, &body).await;
+        let error = http_response_error(
+            response,
+            Duration::from_secs(5),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(error.downcast_ref::<PayloadTooLarge>().is_some());
+        assert!(error.to_string().contains("400"));
+        assert!(!format!("{error:#}").contains("request entity too large"));
     }
 
     #[test]
