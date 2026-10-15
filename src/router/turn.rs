@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::llm::context::{
-    SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
+    ContextTurn, SessionSource, TurnCapacityPermit, TurnQueueFull, TurnSessionGuard, TurnTicket,
 };
 use crate::llm::provider::PayloadTooLarge;
 use crate::llm::tool_loop::ToolLoopError;
@@ -151,6 +151,8 @@ impl TurnRequest<'_> {
             build_exec_ctx,
         };
         let mut retries = 0usize;
+        // 收缩在重试前落到存储历史上；重试被取消时用这份快照放回
+        let mut undo: Option<Vec<ContextTurn>> = None;
         let result = loop {
             let mut messages = self.messages(&system_prompt);
             match self
@@ -166,9 +168,10 @@ impl TurnRequest<'_> {
             {
                 Err(error) if retries < MAX_PAYLOAD_RETRIES && is_payload_too_large(&error) => {
                     // 没有可收缩的会话（NapCat）或已无音频可丢时原样返回，不做无意义的重试
-                    if !self.llm.drop_oldest_audio_turn(self.source) {
+                    let Some(history) = self.llm.shrink_for_payload_retry(self.source) else {
                         break Err(error);
-                    }
+                    };
+                    undo = Some(history);
                     retries += 1;
                 }
                 result => break result,
@@ -185,7 +188,13 @@ impl TurnRequest<'_> {
                 self.deliver(sink, result.content).await
             }
             Ok(_) => Ok(()),
-            Err(ToolLoopError::Cancelled) => Err(TurnError::Cancelled),
+            Err(ToolLoopError::Cancelled) => {
+                // 取消的回合不回复也不落库：把收缩掉的历史放回，别让一次插话永久丢上下文
+                if let Some(history) = undo {
+                    self.llm.restore_history(self.source, history);
+                }
+                Err(TurnError::Cancelled)
+            }
             Err(error) => Err(self.fail_with_notice(sink, error.into()).await),
         }
     }
@@ -291,6 +300,8 @@ mod tests {
         /// 有 `finish_reason` 但零 token：模型没产出可送达的文本
         EmptySuccess,
         Action,
+        /// 重试期间插话取消：置位令牌并挂起流，让取消分支胜出
+        CancelRetry,
     }
 
     /// 脚本化的假 provider：记录调用次数与每次 messages 的序列化体积，
@@ -299,6 +310,8 @@ mod tests {
         outcomes: Mutex<Vec<FakeOutcome>>,
         calls: AtomicUsize,
         body_lengths: Mutex<Vec<usize>>,
+        /// 需要模拟插话取消时由用例注入，与 `TurnRequest::run` 用的是同一个令牌
+        cancel: Option<CancellationToken>,
     }
 
     impl FakeProvider {
@@ -307,6 +320,14 @@ mod tests {
                 outcomes: Mutex::new(outcomes),
                 calls: AtomicUsize::new(0),
                 body_lengths: Mutex::new(Vec::new()),
+                cancel: None,
+            }
+        }
+
+        fn with_cancel(outcomes: Vec<FakeOutcome>, cancel: CancellationToken) -> Self {
+            Self {
+                cancel: Some(cancel),
+                ..Self::new(outcomes)
             }
         }
 
@@ -363,6 +384,12 @@ mod tests {
                         finish_reason: "stop".to_string(),
                         tool_calls: Vec::new(),
                     })])))
+                }
+                FakeOutcome::CancelRetry => {
+                    if let Some(cancel) = &self.cancel {
+                        cancel.cancel();
+                    }
+                    Ok(Box::pin(stream::pending()))
                 }
             }
         }
@@ -744,6 +771,69 @@ mod tests {
             panic!("the latest audio turn must survive");
         };
         assert_eq!(audio.len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn cancelled_retry_restores_the_history_the_shrink_removed() {
+        let cancel = CancellationToken::new();
+        let provider = Arc::new(FakeProvider::with_cancel(
+            vec![FakeOutcome::PayloadTooLarge, FakeOutcome::CancelRetry],
+            cancel.clone(),
+        ));
+        let llm = engine_with(&provider, 8);
+        let source = SessionSource::TeamSpeak {
+            uid: "retry-cancel".to_string(),
+        };
+        for _ in 0..8 {
+            llm.save_omni_turn(&source, vec![0u8; 400 * 1024], "reply".to_string());
+        }
+        let before = llm.stored_history(&source);
+        let sink = RecordingSink::new();
+
+        let result = TurnRequest {
+            llm: &llm,
+            registry: &ToolRegistry::default(),
+            source: &source,
+            user_ctx: "{}",
+            allowed_tools: &[],
+            input: TurnInput::Audio(&[0u8; 64]),
+            callbacks: None,
+            cancel: &cancel,
+        }
+        .run(
+            TurnPermit::reserve(&llm)
+                .expect("capacity is free in tests")
+                .acquire_session(&llm, &source, llm.enqueue_turn_ticket(&source))
+                .await,
+            || panic!("no tool execution in these tests"),
+            &sink,
+        )
+        .await;
+
+        assert!(matches!(result, Err(TurnError::Cancelled)));
+        assert!(sink.sent().is_empty());
+        // 重试确实在收缩后的更小请求上发出，随后被插话取消
+        assert_eq!(provider.calls(), 2);
+        let bodies = provider.body_lengths();
+        assert!(
+            bodies[1] < bodies[0],
+            "the retry was not assembled from the shrunk history: {} -> {} bytes",
+            bodies[0],
+            bodies[1]
+        );
+        // 取消的回合不落库，收缩也要放回：一次插话不该永久丢掉上下文
+        let after = llm.stored_history(&source);
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            after
+                .iter()
+                .map(|turn| turn.user.as_text())
+                .collect::<Vec<_>>(),
+            before
+                .iter()
+                .map(|turn| turn.user.as_text())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

@@ -186,11 +186,17 @@ impl LlmEngine {
         self.context.get(source)
     }
 
-    /// 体积类失败自愈：删除 wire 中最早可删音频及不可见前缀，防止旧音频回填。
-    /// 原 wire 可见文本与最新音频保留；无法缩小实际请求时返回 false。
-    pub fn drop_oldest_audio_turn(&self, source: &SessionSource) -> bool {
+    /// 体积类失败自愈：删除 wire 中最早可删音频及不可见前缀，防止旧音频回填，
+    /// 返回收缩前的完整历史供 `restore_history` 还原。
+    /// 原 wire 可见文本与最新音频保留；无法缩小实际请求时返回 `None`。
+    pub fn shrink_for_payload_retry(&self, source: &SessionSource) -> Option<Vec<ContextTurn>> {
         self.context
-            .drop_oldest_audio_turn(source, MAX_WIRE_AUDIO_BYTES)
+            .shrink_for_payload_retry(source, MAX_WIRE_AUDIO_BYTES)
+    }
+
+    /// 重试被取消时把 `shrink_for_payload_retry` 收缩掉的历史放回
+    pub fn restore_history(&self, source: &SessionSource, history: Vec<ContextTurn>) {
+        self.context.restore_history(source, history);
     }
 
     /// 测试可见：注入 provider 的引擎，供路由层重试路径的单测使用
@@ -375,28 +381,6 @@ mod tests {
         );
         // 存储历史不受装配裁剪影响
         assert_eq!(engine.stored_history(&source).len(), 5);
-    }
-
-    #[test]
-    fn repeated_message_builds_share_the_stored_history_encoding() {
-        let engine = engine_with_history();
-        let source = SessionSource::TeamSpeak {
-            uid: "encoding-cache".into(),
-        };
-        engine.save_omni_turn(&source, vec![7u8; 4096], "reply".into());
-        let first_messages = engine.build_messages(&source, "system", "{}", "current");
-        let first_history = engine.stored_history(&source);
-        let ContextUser::Audio(first) = &first_history[0].user else {
-            panic!("expected audio history");
-        };
-        let first_encoded = first.base64();
-        let second_messages = engine.build_messages(&source, "system", "{}", "current");
-        let second_history = engine.stored_history(&source);
-        let ContextUser::Audio(second) = &second_history[0].user else {
-            panic!("expected audio history");
-        };
-        assert_eq!(first_messages, second_messages);
-        assert!(std::sync::Arc::ptr_eq(&first_encoded, &second.base64()));
     }
 
     #[test]
