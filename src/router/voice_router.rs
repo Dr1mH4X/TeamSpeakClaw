@@ -65,7 +65,12 @@ struct PreparedChat {
     text: String,
     reply_mode: i32,
     reply_target: u32,
-    admission: Option<ChatTurnAdmission>,
+    admission: ChatAdmission,
+}
+
+enum ChatAdmission {
+    DirectReplay(crate::tools::voice_replay::DirectReplayCommand),
+    Llm(ChatTurnAdmission),
 }
 
 fn chat_caller_uid(chat: &voicev1::ChatEvent) -> String {
@@ -113,14 +118,16 @@ fn prepare_chat(
         warn!(error = %error, "voice chat dropped for exceeding size limit");
         return None;
     }
-    let direct_replay = config.voice_replay.enabled
-        && crate::tools::voice_replay::parse_direct_command(
+    let direct_replay = if config.voice_replay.enabled {
+        crate::tools::voice_replay::parse_direct_command(
             &text,
             &config.voice_replay.direct_commands,
         )
-        .is_some();
-    let admission = if direct_replay {
+    } else {
         None
+    };
+    let admission = if let Some(command) = direct_replay {
+        ChatAdmission::DirectReplay(command)
     } else {
         let Ok(permit) = TurnPermit::reserve(llm) else {
             warn!("Voice LLM turn queue full; dropping message");
@@ -130,7 +137,7 @@ fn prepare_chat(
             uid: chat_caller_uid(chat),
         };
         let ticket = llm.enqueue_turn_ticket(&source);
-        Some(ChatTurnAdmission {
+        ChatAdmission::Llm(ChatTurnAdmission {
             source,
             permit,
             ticket,
@@ -903,45 +910,29 @@ impl VoiceRouter {
         let resolve =
             self.resolve_caller_from_chat(&chat, prepared.reply_mode, prepared.reply_target);
         let (session, ctx) = match prepared.admission {
-            Some(admission) => {
-                let (session, ctx) = admission.prepare(&self.llm, resolve).await?;
-                (Some(session), ctx)
+            ChatAdmission::Llm(admission) => admission.prepare(&self.llm, resolve).await?,
+            ChatAdmission::DirectReplay(command) => {
+                let ctx = resolve.await?;
+                return self.handle_direct_replay(channel, &ctx, command).await;
             }
-            None => (None, resolve.await?),
         };
-        if self
-            .try_handle_direct_replay(channel, &ctx, &prepared.text)
-            .await?
-        {
-            return Ok(());
-        }
-        let session = session.ok_or_else(|| anyhow::anyhow!("chat turn was not admitted"))?;
         // 文本触发的回复同样经 TTS 出声：与语音回合共用产出登记与取消令牌。
         // 文本不经唤醒门，不夺取话语权：正在播报的语音回合继续播完。忽略 `begin_turn`
         // 的返回值（不取消、不摘除那些旧条目），它们留在集合里，插话仍能取到并取消
         let active = Arc::new(ActiveTurn::new());
         self.turns.begin_turn(ctx.caller_id, &active);
         // 桥接文本不是 STT 路径：不挂工具调用提示音
-        self.handle_user_input(channel, ctx, prepared.text, &active, false, Some(session))
+        self.handle_user_input(channel, ctx, prepared.text, &active, false, session)
             .await
     }
 
-    /// 直呼：与工具同一 ACL（voice_replay）；成功处理返回 true
-    async fn try_handle_direct_replay(
+    /// 直呼：与工具同一 ACL（voice_replay），不占 LLM 回合容量。
+    async fn handle_direct_replay(
         &self,
         channel: &VoiceChannel,
         ctx: &CallerContext,
-        text: &str,
-    ) -> Result<bool> {
-        if !self.config.voice_replay.enabled {
-            return Ok(false);
-        }
-        let Some(command) = crate::tools::voice_replay::parse_direct_command(
-            text,
-            &self.config.voice_replay.direct_commands,
-        ) else {
-            return Ok(false);
-        };
+        command: crate::tools::voice_replay::DirectReplayCommand,
+    ) -> Result<()> {
         if !crate::tools::voice_replay::direct_command_allowed(
             &self.gate,
             &ctx.groups,
@@ -949,12 +940,12 @@ impl VoiceRouter {
         ) {
             self.send_reply(channel, ctx, "voice_replay denied by ACL")
                 .await?;
-            return Ok(true);
+            return Ok(());
         }
         let Some(runtime) = self.voice_audio.get() else {
             self.send_reply(channel, ctx, "voice replay runtime not ready")
                 .await?;
-            return Ok(true);
+            return Ok(());
         };
         match crate::tools::voice_replay::execute_direct_command(command, &runtime) {
             Ok(value) => {
@@ -986,7 +977,7 @@ impl VoiceRouter {
                     .await?;
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     async fn process_audio_frame(
@@ -1284,8 +1275,21 @@ impl VoiceRouter {
             return Ok(());
         };
 
+        if let Err(error) = self.llm.check_user_text_bounds(&text) {
+            warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
+            return Ok(());
+        }
+        let source = SessionSource::TeamSpeak {
+            uid: ctx.caller_uid.clone(),
+        };
+        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
+            warn!(caller_uid = %ctx.caller_uid, "Voice LLM turn queue full; dropping message");
+            return Ok(());
+        };
+        let ticket = self.llm.enqueue_turn_ticket(&source);
+        let session = acquire_voice_turn_session(permit, &self.llm, &source, ticket).await;
         // STT 语音回合：挂工具调用提示音
-        self.handle_user_input(&channel, ctx, text, &active, true, None)
+        self.handle_user_input(&channel, ctx, text, &active, true, session)
             .await
     }
 
@@ -1386,6 +1390,7 @@ impl VoiceRouter {
         }
     }
 
+    /// 执行已取得会话锁的文本/STT 回合，持锁到回复投递和落库完成。
     /// `tool_feedback` 为真时挂工具调用提示音：STT 与 omni 两条语音回合都挂，
     /// 桥接文本不挂（回复本身就是文本反馈）
     async fn handle_user_input(
@@ -1395,7 +1400,7 @@ impl VoiceRouter {
         user_msg: String,
         active: &Arc<ActiveTurn>,
         tool_feedback: bool,
-        session: Option<TurnSession>,
+        session: TurnSession,
     ) -> Result<()> {
         info!(
             event = "voice.user_message",
@@ -1403,23 +1408,7 @@ impl VoiceRouter {
             message_chars = user_msg.chars().count(),
             "Voice user message received"
         );
-        // 并发门禁：TurnCoordinator 管 LLM 轮；AudioOutput FIFO 管出站，不再使用 tts_lock
-        if let Err(error) = self.llm.check_user_text_bounds(&user_msg) {
-            warn!(error = %error, caller_uid = %ctx.caller_uid, "voice message dropped for exceeding size limit");
-            return Ok(());
-        }
         let (user_ctx, allowed_tools, session_source) = self.build_llm_request(&ctx).await;
-        let session = match session {
-            Some(session) => session,
-            None => {
-                let Ok(permit) = TurnPermit::reserve(&self.llm) else {
-                    warn!(caller_uid = %ctx.caller_uid, "Voice LLM turn queue full; dropping message");
-                    return Ok(());
-                };
-                let ticket = self.llm.enqueue_turn_ticket(&session_source);
-                acquire_voice_turn_session(permit, &self.llm, &session_source, ticket).await
-            }
-        };
         let tts_runtime = if self.is_tts_effectively_enabled() {
             Some(self.build_tts_callbacks(active, tool_feedback).await?)
         } else {
@@ -1849,10 +1838,14 @@ mod tests {
         let sink = ChatOrderSink::default();
         let second_prepared = AtomicBool::new(false);
         let (release_caller, caller_ready) = tokio::sync::oneshot::channel();
+        let ChatAdmission::Llm(first_admission) = first.admission else {
+            panic!("first chat must reserve an LLM turn");
+        };
+        let ChatAdmission::Llm(second_admission) = second.admission else {
+            panic!("second chat must reserve an LLM turn");
+        };
         let first_task = async {
-            let (session, ()) = first
-                .admission
-                .unwrap()
+            let (session, ()) = first_admission
                 .prepare(&llm, async {
                     caller_ready.await.unwrap();
                     Ok(())
@@ -1862,9 +1855,7 @@ mod tests {
             finish_prepared_chat(&llm, &first.text, session, &sink).await;
         };
         let second_task = async {
-            let (session, ()) = second
-                .admission
-                .unwrap()
+            let (session, ()) = second_admission
                 .prepare(&llm, async {
                     second_prepared.store(true, Ordering::SeqCst);
                     Ok(())
@@ -1930,7 +1921,7 @@ mod tests {
         assert_eq!(admissions.len(), 4);
         assert!(prepare_chat(&config, &llm, 99, &chat_event("hello")).is_none());
         let replay = prepare_chat(&config, &llm, 99, &chat_event("!replay")).unwrap();
-        assert!(replay.admission.is_none());
+        assert!(matches!(replay.admission, ChatAdmission::DirectReplay(_)));
     }
 
     #[test]
@@ -1943,7 +1934,10 @@ mod tests {
         };
         let prepared = prepare_chat(&config, &llm, 99, &chat).unwrap();
         assert_eq!(chat_caller_uid(&chat), "clid:7");
-        assert_eq!(prepared.admission.unwrap().source.to_string(), "sq:clid:7");
+        let ChatAdmission::Llm(admission) = prepared.admission else {
+            panic!("ordinary chat must reserve an LLM turn");
+        };
+        assert_eq!(admission.source.to_string(), "sq:clid:7");
     }
 
     #[test]
