@@ -26,8 +26,20 @@ on:
     branches:
       - main
       - master
-    paths-ignore:
-      - "website/**"
+    paths:
+      - ".github/workflows/**"
+      - ".cargo/**"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "proto/**"
+      - "src/**"
+      - "tests/**"
+      - "models/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
   workflow_dispatch:
 
 permissions:
