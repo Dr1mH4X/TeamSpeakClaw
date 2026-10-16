@@ -80,12 +80,22 @@ jobs:
       - name: Locate the release log
         id: release-log
         run: |
-          path="docs/release/${{ needs.meta.outputs.tag }}.md"
+          tag="${{ needs.meta.outputs.tag }}"
+          version="${tag#v}"
+          path="docs/release/$tag.md"
           if [ ! -f "$path" ]; then
             echo "::error::missing release log $path; write it in the release PR per docs/release/AGENTS.md"
             exit 1
           fi
-          echo "path=$path" >> "$GITHUB_OUTPUT"
+          title="$(head -n 1 "$path")"
+          if ! printf '%s\n' "$title" | grep -Eq "^# ${version} \([0-9]{4}-[0-9]{2}-[0-9]{2}\): [^[:space:]].*$"; then
+            echo "::error::$path must open with '# $version (<date>): <summary>'; see docs/release/AGENTS.md"
+            exit 1
+          fi
+          {
+            echo "path=$path"
+            echo "title=${title#"# "}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -101,7 +111,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
-          name: Release ${{ needs.meta.outputs.tag }}
+          name: ${{ steps.release-log.outputs.title }}
           body_path: ${{ steps.release-log.outputs.path }}
           draft: false
           prerelease: ${{ needs.meta.outputs.is-prerelease == 'true' }}
