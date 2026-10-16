@@ -21,7 +21,7 @@ description: 发版前写 docs/release/<tag>.md、补写或改写某个版本的
 3. **按分类写条目**：分类与顺序见 [docs/release/AGENTS.md](../../../docs/release/AGENTS.md)。每条一句话讲行为或归属上的变化，不抄提交标题原文；只写本版真实存在的内容，没内容的分类整节不写。判断不准某条改动的用户可见性时，用 `git show <sha>` 看它实际改了什么。
 4. **写升级注意**：检查范围内是否动了 `config/settings.toml` 或 `config/acl.toml` 的键、环境变量、CLI 参数、消息路由与回复行为、上下文或数据格式。有人需要动手就写清受影响的人与确切动作；没有就删掉整节。
 5. **写贡献者**：`git log <range> --pretty=%an` 取人类作者，机器人账号（如 `dependabot[bot]`）不计，写成 `@handle`。
-6. **落盘并随改动提交**：写 `docs/release/<tag>.md`，与该版改动同一个 PR。tag 打完后冻结，只有事实写错才回头修改，并在提交信息里说明改的是哪一处。
+6. **落盘并随改动提交**：写 `docs/release/<tag>.md`，第一行是标题行 `# <版本> (<发布日期>): <主要更新简述>`，例：`# 0.6.2 (2026-10-03): 唤醒词与语音反馈`；这一行同时是 GitHub Release 的标题，写法判据见 [docs/release/AGENTS.md](../../../docs/release/AGENTS.md)。与该版改动同一个 PR。tag 打完后冻结，只有事实写错才回头修改，并在提交信息里说明改的是哪一处。
 7. **发布**：tag 推送后 CI 自动把该文件作为 Release 正文；需要手工补发或改写时用 `gh`（见下）。未知 tag 不要发明版本号：先与用户确认。
 
 ## 验证命令
@@ -35,16 +35,16 @@ git log --oneline "$(git describe --tags --abbrev=0)"..HEAD
 ls docs/release/
 test -f "docs/release/<tag>.md" && echo ok
 
-# 格式自查：第一行是 tag，分类节名与顺序符合 AGENTS.md
-head -1 "docs/release/<tag>.md"
+# 格式自查：首行标题的版本、日期与简述，分类节名与顺序符合 AGENTS.md
+head -n 1 "docs/release/<tag>.md"
 grep -n '^## ' "docs/release/<tag>.md"
 
-# 发布与复核
-gh release create <tag> --title "Release <tag>" --notes-file "docs/release/<tag>.md"   # -beta 时加 --prerelease
-gh release edit <tag> --notes-file "docs/release/<tag>.md"
-gh release view <tag> --json body
+# 发布与复核：标题取该文件首行
+gh release create <tag> --title "$(head -n 1 docs/release/<tag>.md | sed 's/^# //')" --notes-file "docs/release/<tag>.md"   # -beta 时加 --prerelease
+gh release edit <tag> --title "$(head -n 1 docs/release/<tag>.md | sed 's/^# //')" --notes-file "docs/release/<tag>.md"
+gh release view <tag> --json name,body
 ```
 
 ## 报告要求
 
-给出：目标 tag、提交范围与提交数、每个分类的条目数、升级注意的条目（没有就说没有）、贡献者、写出的文件路径。拿不准用户可见性的改动单独列出并说明判断依据，不要为了凑齐分类而写条目。
+给出：目标 tag、标题行（版本、发布日期、主要更新简述）、提交范围与提交数、每个分类的条目数、升级注意的条目（没有就说没有）、贡献者、写出的文件路径。拿不准用户可见性的改动单独列出并说明判断依据，不要为了凑齐分类而写条目。

@@ -5,7 +5,7 @@ GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每�
 | workflow | 触发器 | 职责 | 产物 |
 |---|---|---|---|
 | `ci.yml` | push/PR 到 main/master（push 按路径过滤、PR 排除 `website/**`）、手动 | 质量门 + 三平台构建 | 平台归档（见 reusable-build） |
-| `release.yml` | push tag `v*` | 发版：质量门 + 构建 + Docker 镜像 + 建 Release | GitHub Release（正文取 `docs/release/<tag>.md`）、GHCR 镜像 |
+| `release.yml` | push tag `v*` | 发版：质量门 + 构建 + Docker 镜像 + 建 Release | GitHub Release（正文与标题取 `docs/release/<tag>.md`）、GHCR 镜像 |
 | `deploy-website.yml` | push/PR 到 main 且改动 `website/**` 或 workflow 本身、手动 | Docusaurus 站点构建与 Pages 部署 | GitHub Pages |
 | `docker-sha.yml` | 手动（可选 `sha-tag` 输入） | 给当前 commit 打 SHA tag 并推 GHCR 镜像 | GHCR 镜像 |
 | `cleanup-untagged.yml` | 手动 | 删 GHCR 未打标镜像 | 无 |
@@ -19,7 +19,7 @@ GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每�
 
 `reusable-build.yml` 矩阵三平台：windows-amd64 / linux-amd64 / macos-aarch64，各平台装对应系统依赖（macOS `brew install autoconf automake libtool`）。发版时先用 Python 校验 semver 并改写 `Cargo.toml` / `Cargo.lock` 版本，再 `cargo build --release`，把二进制、`examples/config/` 的两个模板与 `models/` 内的模型清单和下载脚本（`README.md`、`fetch-models.sh`、`fetch-models.ps1`）打进 zip 或 tar.gz 归档并上传 artifact；归档不含任何模型文件，唤醒模型与 whisper 模型由使用者按 [models/README.md](../models/README.md) 自行下载。GHCR 镜像不含模型，运行时靠 `./models:/app/models` 挂载供给。
 
-`release.yml` 在 `build` 之外，`docker` 调 reusable-docker 推送镜像，最终 `release` 先取 `docs/release/<tag>.md`（缺失即失败），把归档挂到 `softprops/action-gh-release` 创建的 GitHub Release，正文取该文件，`-beta` tag 标记为 prerelease。
+`release.yml` 在 `build` 之外，`docker` 调 reusable-docker 推送镜像，最终 `release` 先取 `docs/release/<tag>.md`（缺失或首行标题不合格式即失败），把归档挂到 `softprops/action-gh-release` 创建的 GitHub Release，正文取该文件、标题取该文件首行，`-beta` tag 标记为 prerelease。
 
 ## Docker 与清理
 
@@ -27,4 +27,4 @@ GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每�
 
 ## 发版日志
 
-每个版本的 Release 正文是仓库里的一篇文档：`docs/release/<tag>.md`，文件名与 git tag 完全一致。它在发版前由 agent 按 git 提交归纳写成，与该版改动一并提交；`release.yml` 的 `Locate the release log` 步骤按 tag 拼出路径，文件不存在就报错终止发布，因此缺日志的 tag 不会产生没有正文的 Release。格式、分类顺序与生命周期归 [release/AGENTS.md](release/AGENTS.md)；生成与手工发布用 [.agents/skills/tsc-release-log/SKILL.md](../.agents/skills/tsc-release-log/SKILL.md)。
+每个版本的 Release 正文是仓库里的一篇文档：`docs/release/<tag>.md`，文件名与 git tag 完全一致。它在发版前由 agent 按 git 提交归纳写成，与该版改动一并提交；`release.yml` 的 `Locate the release log` 步骤按 tag 拼出路径、再校验首行标题（版本等于 tag 去掉 `v`、日期与简述齐全），文件缺失或标题不合格式就报错终止发布，因此缺日志的 tag 不会产生没有正文的 Release。格式、分类顺序与生命周期归 [release/AGENTS.md](release/AGENTS.md)；生成与手工发布用 [.agents/skills/tsc-release-log/SKILL.md](../.agents/skills/tsc-release-log/SKILL.md)。
