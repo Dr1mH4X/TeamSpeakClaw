@@ -4,7 +4,7 @@ GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每�
 
 | workflow | 触发器 | 职责 | 产物 |
 |---|---|---|---|
-| `ci.yml` | push/PR 到 main/master（push 按路径过滤、PR 排除 `website/**`）、手动 | 质量门 + 三平台构建 | 平台归档（见 reusable-build） |
+| `ci.yml` | push/PR 到 main/master（两者同一份代码路径名单，文档、网站与 `.agents/**` 的改动不触发）、手动 | 质量门 + 三平台构建 | 平台归档（见 reusable-build） |
 | `release.yml` | push tag `v*` | 发版：质量门 + 构建 + Docker 镜像 + 建 Release | GitHub Release（正文取 `docs/release/<tag>.md`，标题 `Release v<版本>`）、GHCR 镜像 |
 | `deploy-website.yml` | push/PR 到 main 且改动 `website/**` 或 workflow 本身、手动 | Docusaurus 站点构建与 Pages 部署 | GitHub Pages |
 | `docker-sha.yml` | 手动（可选 `sha-tag` 输入） | 给当前 commit 打 SHA tag 并推 GHCR 镜像 | GHCR 镜像 |
