@@ -28,6 +28,25 @@ sidebar_position: 3
 | `omni_model` | bool | `false` | 语音输入多模态模型（音频作为 `input_audio`，跳过 STT，`model` 需支持音频输入）；模型回复仍是文本，语音回复由 `[headless.tts]` 提供；音频轮会占用上下文体积，超出预算时从最早的音频轮开始丢弃 |
 | `max_context_turns` | integer | `0` | 每个会话保留的最大对话轮数；`0` 表示禁用上下文 |
 
+### 联网搜索
+
+`[web_search]` 区段选择 `web_search` 工具的搜索服务；修改后重启进程生效。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `provider` | string | `exa` | `exa` 或 `parallel`；其他值会使配置加载失败 |
+
+使用 [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) 时，在 `config/settings.toml` 中加入或修改以下区段，无需 Parallel 账号或 API key：
+
+```toml
+[web_search]
+provider = "parallel"
+```
+
+Parallel 匿名搜索采用 Fast 模式，搜索设置由服务端管理，工具只接受 `query`；`numResults` 与 `type` 仅适用于 Exa。免费服务有用量限制，达到限额或网络请求失败时会向模型返回工具错误，不自动切换服务。
+
+在 `config/acl.toml` 中为需要联网查询的用户组授予 `web_search`，然后向机器人发送「搜索 Rust 最新稳定版及其发布说明」。示例 ACL 中管理员的 `*` 已包含此权限，普通用户与访客需显式添加。查询会发送至所选外部搜索服务。
+
 ### NapCat 配置详解
 
 `[napcat]` 区段用于配置 QQ 机器人功能，通过 NapCat（OneBot 11 协议实现）连接 QQ。

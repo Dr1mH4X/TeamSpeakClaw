@@ -28,6 +28,25 @@ The `[llm]` section configures an OpenAI-compatible Chat Completions endpoint:
 | `omni_model` | bool | `false` | Send speech straight to a multimodal model (audio as `input_audio`, no STT; `model` must accept audio input). Replies are still text; `[headless.tts]` provides spoken replies. Audio turns take up context size and the earliest ones are dropped once the size budget is exceeded |
 | `max_context_turns` | integer | `0` | Maximum conversation turns retained per session; `0` disables context |
 
+### Web Search
+
+The `[web_search]` section selects the search service for the `web_search` tool; restart the process after changing it.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `provider` | string | `exa` | `exa` or `parallel`; other values cause configuration loading to fail |
+
+To use [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp), add or edit this section in `config/settings.toml`. No Parallel account or API key is required:
+
+```toml
+[web_search]
+provider = "parallel"
+```
+
+Anonymous Parallel search uses Fast mode with server-managed search settings, so the tool accepts only `query`; `numResults` and `type` apply only to Exa. The free service has usage limits. Quota and network failures return a tool error to the model without switching providers automatically.
+
+Grant `web_search` to the relevant user groups in `config/acl.toml`, then ask the bot to "Search for the latest stable Rust release and its release notes." In the example ACL, administrators already have this permission through `*`; normal users and guests need it added explicitly. Queries are sent to the selected external search service.
+
 ### NapCat Configuration Details
 
 The `[napcat]` section configures the QQ bot functionality via NapCat (OneBot 11 protocol implementation).

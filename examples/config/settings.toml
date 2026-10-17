@@ -16,6 +16,10 @@ model = "gpt-4o"
 omni_model = false    # 多模态模型：true 时跳过 STT，model 需支持音频输入；模型只输出文本，语音回复需另开 [headless.tts]
 max_context_turns = 3  # 最大上下文对话轮数（0 表示禁用上下文）；omni 音频轮另受体积预算约束，超出时从最早的音频轮开始丢弃
 
+# 联网搜索：exa（默认）或 parallel（免 API key，使用 Fast 模式）
+[web_search]
+provider = "exa"  # 切换后重启；仍需在 acl.toml 授予 web_search 权限
+
 # Headless 语音服务配置
 [headless]
 server_address = "127.0.0.1"
