@@ -6,6 +6,7 @@ pub mod logging;
 pub mod music_backend;
 pub mod napcat;
 pub mod voice_replay;
+pub mod web_search;
 pub use acl::AclConfig;
 pub use bot::BotConfig;
 pub use headless::HeadlessConfig;
@@ -14,6 +15,7 @@ pub use logging::LogConfig;
 pub use music_backend::MusicBackendConfig;
 pub use napcat::NapCatConfig;
 pub use voice_replay::VoiceReplayConfig;
+pub use web_search::WebSearchConfig;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -66,6 +68,7 @@ pub struct AppConfig {
     pub headless: HeadlessConfig,
     pub logging: LogConfig,
     pub voice_replay: VoiceReplayConfig,
+    pub web_search: WebSearchConfig,
 }
 
 impl AppConfig {

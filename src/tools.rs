@@ -301,8 +301,8 @@ static DEFAULT_TOOLS: &[(&str, ToolFactory)] = &[
     ("get_client_info", |_| {
         Box::new(information::GetClientInfo) as Box<dyn Tool>
     }),
-    ("web_search", |_| {
-        Box::new(web_search::WebSearch) as Box<dyn Tool>
+    ("web_search", |ctx| {
+        Box::new(web_search::WebSearch::new(ctx.config.web_search.provider)) as Box<dyn Tool>
     }),
     ("music_control", |ctx| {
         Box::new(music::MusicControl::new(ctx.music_backend_config())) as Box<dyn Tool>
