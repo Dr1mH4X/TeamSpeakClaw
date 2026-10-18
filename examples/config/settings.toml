@@ -51,11 +51,6 @@ api_key = ""
 model = "mimo-v2.5-tts"
 voice = "mimo_default"
 
-# 日志配置
-[logging]
-file_level = "info"
-max_log_days = 7  # 日志保留天数，超出自动删除
-
 # 语音回放（TeamSpeak）
 # window_secs ∈ [1,120]；修改配置后需重启进程生效。
 [voice_replay]
@@ -80,3 +75,8 @@ listen_groups = []                        # 监听的群 ID 列表，空列表�
 trigger_prefixes = ["!claw", "!bot"]      # 群聊触发前缀（私聊无需前缀）
 trusted_groups = []                       # 信任的群 ID 列表，群内所有成员可使用机器人
 trusted_users = []                        # 信任的用户 QQ 号列表，私聊和群聊均可使用
+
+# 日志配置
+[logging]
+file_level = "debug"
+max_log_days = 7  # 日志保留天数，超出自动删除
