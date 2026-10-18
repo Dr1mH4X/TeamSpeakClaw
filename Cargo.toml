@@ -26,6 +26,9 @@ reqwest = { version = "0.12", features = ["json", "multipart", "stream", "rustls
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+scraper = "0.27"
+ego-tree = "0.11"
+encoding_rs = "0.8"
 toml = "0.8"
 dashmap = "6"
 tracing = "0.1"

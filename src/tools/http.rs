@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+pub(crate) const USER_AGENT: &str = "TeamSpeakClaw (https://github.com/Dr1mH4X/TeamSpeakClaw)";
+
 /// 按超时参数化的共享 HTTP 客户端：同一超时值只构建一次。
 /// 返回克隆（`reqwest::Client` 内部引用计数，克隆开销很小）。
 pub(crate) fn shared_client(timeout_secs: u64) -> reqwest::Client {

@@ -27,7 +27,7 @@ src/
 ├── prompt/                  # (sections, context)
 ├── permission.rs            # 基于 ACL 的权限门
 ├── tools.rs                 # Tool trait + 注册表；Tool、UnifiedExecutionContext
-├── tools/                   # (communication, information, moderation, music, web_search)
+├── tools/                   # (communication, information, moderation, music, web_search, web_fetch)
 │   ├── music.rs             # 音乐工具根
 │   └── music/               # (ts3audiobot, tsbot_http, tsmusicbot)
 

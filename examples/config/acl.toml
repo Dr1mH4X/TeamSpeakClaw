@@ -28,6 +28,7 @@
 #   - get_client_info: 获取用户详细信息
 #   - music_control: 音乐控制
 #   - web_search: 搜索最新网络信息
+#   - web_fetch: 抓取指定公网 HTTP(S) URL 的正文
 #   - voice_replay: 回放最近语音窗口
 
 # 6 Server Admin：全部技能，并可对受保护组的成员执行踢出/封禁
