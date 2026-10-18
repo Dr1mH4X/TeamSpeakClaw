@@ -45,7 +45,7 @@ provider = "parallel"
 
 Anonymous Parallel search uses Fast mode with server-managed search settings, so the tool accepts only `query`; `numResults` and `type` apply only to Exa. The free service has usage limits. Quota and network failures return a tool error to the model without switching providers automatically.
 
-Grant `web_search` to the relevant user groups in `config/acl.toml`, then ask the bot to "Search for the latest stable Rust release and its release notes." In the example ACL, administrators already have this permission through `*`; normal users and guests need it added explicitly. Queries are sent to the selected external search service.
+Grant `web_search` to the relevant user groups in `config/acl.toml`, then ask the bot your question. In the example ACL, administrators already have this permission through `*`; normal users and guests need it added explicitly. Queries are sent to the selected external search service.
 
 ### Web Fetch
 
