@@ -9,6 +9,7 @@
 - `PermissionGate`：把 `acl.toml` 的规则匹配成工具白名单，并对受保护组给出目标授权判定。
 - 工具分组：`communication`、`information`、`moderation`、`music`（后端 `ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`、`voice_audio`、`voice_replay`。
 - 工具间共享设施：按超时参数化复用的 HTTP 客户端，以及聊天类音乐后端的串行锁。
+- `WebSearch` 在注册时读取搜索服务选择，并按所选服务生成参数 schema；执行仍经过相同的 ACL 与结果包装。配置用法见[用户配置指南](../../website/docs/configuration.md#联网搜索)。
 
 ## 关键路径与序列
 
@@ -31,3 +32,4 @@
 
 - [代码侧 skill 词汇统一为 tool](../../.agents/notes/implemented/architecture/2026-10-12-tool-vocabulary-rename.md) — 统一类型名、日志文案与 ACL 配置键的工具词汇，并保留旧键别名。
 - [提示词改为代码内有序段落装配](../../.agents/notes/implemented/architecture/2026-10-12-code-owned-prompt-composition.md) — 确定工具用法指引由工具自身承载，system 段落不重复。
+- [联网搜索服务显式选择](../../.agents/notes/implemented/feature/2026-10-17-optional-parallel-search.md) — 搜索服务由配置选择，参数 schema 与服务能力一致。
