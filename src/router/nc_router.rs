@@ -13,6 +13,7 @@ use crate::router::{
     strip_trigger_prefix, TurnError, TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink,
 };
 use crate::tools::{NcCaller, ToolRegistry, UnifiedExecutionContext};
+use crate::ui::{ActivityLabel, Ui};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ pub struct NcRouter {
     llm: Arc<LlmEngine>,
     registry: Arc<ToolRegistry>,
     ts_adapter: Option<Arc<TsAdapter>>,
+    ui: Ui,
 }
 
 fn nc_pseudo_groups(config: &NapCatConfig, user_id: i64, group_id: Option<i64>) -> Vec<u32> {
@@ -70,6 +72,7 @@ impl NcRouter {
         llm: Arc<LlmEngine>,
         registry: Arc<ToolRegistry>,
         ts_adapter: Option<Arc<TsAdapter>>,
+        ui: Ui,
     ) -> Self {
         Self {
             config,
@@ -78,6 +81,7 @@ impl NcRouter {
             llm,
             registry,
             ts_adapter,
+            ui,
         }
     }
 
@@ -124,10 +128,12 @@ impl NcRouter {
                     ) else {
                         continue;
                     };
+                    let activity_label = ActivityLabel::new("NC", msg.sender.nickname.clone());
                     self.spawn_handle(
                         &mut tasks,
                         msg,
                         SessionSource::NapCatPrivate { user_id },
+                        activity_label,
                         || warn!(user_id, "NC LLM turn queue full; dropping message"),
                         |router, msg, session| async move {
                             router
@@ -175,10 +181,13 @@ impl NcRouter {
                     ) else {
                         continue;
                     };
+                    let activity_label =
+                        ActivityLabel::new("NC", format!("{} @{group_id}", msg.sender.nickname));
                     self.spawn_handle(
                         &mut tasks,
                         msg,
                         SessionSource::NapCatGroup { group_id },
+                        activity_label,
                         || warn!(group_id, "NC LLM turn queue full; dropping message"),
                         move |router, msg, session| async move {
                             router
@@ -209,6 +218,7 @@ impl NcRouter {
         tasks: &mut JoinSet<()>,
         msg: M,
         source: SessionSource,
+        activity_label: ActivityLabel,
         on_queue_full: impl FnOnce(),
         handler: F,
     ) where
@@ -222,8 +232,9 @@ impl NcRouter {
         let llm = self.llm.clone();
         let registry = self.registry.clone();
         let ts_adapter = self.ts_adapter.clone();
+        let ui = self.ui.clone();
 
-        let Ok(permit) = TurnPermit::reserve(&llm) else {
+        let Ok(permit) = TurnPermit::reserve_with_ui(&llm, &ui, activity_label) else {
             on_queue_full();
             return;
         };
@@ -238,6 +249,7 @@ impl NcRouter {
                 llm,
                 registry,
                 ts_adapter,
+                ui,
             };
             handler(router, msg, session).await;
         });

@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -17,6 +18,7 @@ use crate::llm::provider::LlmFailure;
 use crate::llm::tool_loop::ToolLoopError;
 use crate::llm::{LlmEngine, StreamCallbacks, ToolCall, ToolExecutor};
 use crate::tools::{ToolRegistry, UnifiedExecutionContext};
+use crate::ui::{Activity, ActivityGuard, ActivityLabel, Ui};
 
 /// clid 回退键：clid 会被复用，只在拿不到真实 UID 时使用
 pub(crate) fn ts_caller_clid_uid(clid: u32) -> String {
@@ -74,28 +76,48 @@ pub(crate) enum TurnError {
 /// 字段只为把占位持有到回合结束，容量释放靠 Drop
 pub(crate) struct TurnPermit {
     _capacity: TurnCapacityPermit,
+    activity: Option<ActivityGuard>,
 }
 
 impl TurnPermit {
     pub(crate) fn reserve(llm: &LlmEngine) -> Result<Self, TurnQueueFull> {
-        llm.try_reserve_turn_capacity()
-            .map(|_capacity| Self { _capacity })
+        llm.try_reserve_turn_capacity().map(|_capacity| Self {
+            _capacity,
+            activity: None,
+        })
+    }
+
+    pub(crate) fn reserve_with_ui(
+        llm: &LlmEngine,
+        ui: &Ui,
+        label: ActivityLabel,
+    ) -> Result<Self, TurnQueueFull> {
+        let _capacity = llm.try_reserve_turn_capacity()?;
+        Ok(Self {
+            _capacity,
+            activity: Some(ActivityGuard::new(ui.clone(), label)),
+        })
     }
 
     /// 按到达顺序取会话锁：先等同会话前一条回合结束（票据在到达点生成），再取串行锁。
     /// 票据与容量占位一起放进 `TurnSession`，持有到回复落库完成才放行后继者
     pub(crate) async fn acquire_session(
-        self,
+        mut self,
         llm: &LlmEngine,
         source: &SessionSource,
         ticket: TurnTicket,
     ) -> TurnSession {
         let ticket = ticket.wait_for_predecessor().await;
         let session = llm.acquire_turn_session(source).await;
+        if let Some(activity) = &self.activity {
+            activity.activate();
+        }
+        let activity = self.activity.take();
         TurnSession {
             _permit: self,
             _session: session,
             _ticket: ticket,
+            activity,
         }
     }
 }
@@ -106,6 +128,13 @@ pub(crate) struct TurnSession {
     _permit: TurnPermit,
     _session: TurnSessionGuard,
     _ticket: TurnTicket,
+    activity: Option<ActivityGuard>,
+}
+
+impl TurnSession {
+    pub(crate) fn activity_handle(&self) -> Option<Activity> {
+        self.activity.as_ref().map(ActivityGuard::handle)
+    }
 }
 
 /// 一回合 LLM 请求：提示与输入由调用点准备，门禁、循环与回复策略由本 module 承担
@@ -133,19 +162,24 @@ impl TurnRequest<'_> {
         S: TurnSink,
     {
         // 容量占位与同会话串行锁持有到回复落库完成
+        let activity = session.activity_handle();
+        if let Some(activity) = &activity {
+            activity.thinking();
+        }
         let _session = session;
 
         // system 提示词由回合骨架装配：所有入站路径共用同一份有序段落与变量解析。
         // 装配失败与后端失败同一处理：先尽力送出失败说明，再以 `Failed` 交回调用点
         let system_prompt = match crate::prompt::system_prompt() {
             Ok(system_prompt) => system_prompt,
-            Err(error) => return Err(self.fail_with_notice(sink, error).await),
+            Err(error) => return Err(self.fail_with_notice(sink, error, activity.as_ref()).await),
         };
         let tools = self.registry.to_tool_schemas(self.allowed_tools);
         let executor = TurnExecutor {
             registry: self.registry,
             allowed_tools: self.allowed_tools,
             build_exec_ctx,
+            activity: activity.clone(),
         };
         let mut retries = 0usize;
         // 收缩在重试前落到存储历史上；重试被取消时用这份快照放回
@@ -189,23 +223,44 @@ impl TurnRequest<'_> {
                     reply_chars = result.content.chars().count(),
                     "LLM reply ready"
                 );
-                self.deliver(sink, result.content).await
+                if let Some(activity) = &activity {
+                    activity.replying();
+                }
+                self.deliver(sink, result.content, activity.as_ref()).await
             }
             // provider 未归类的空回复：防御分支，既不送达也不落库
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                if let Some(activity) = &activity {
+                    activity.empty();
+                }
+                Ok(())
+            }
             Err(ToolLoopError::Cancelled) => {
                 // 取消的回合不回复也不落库：把收缩掉的历史放回，别让一次插话永久丢上下文
                 if let Some(history) = undo {
                     self.llm.restore_history(self.source, history);
                 }
+                if let Some(activity) = &activity {
+                    activity.cancelled();
+                }
                 Err(TurnError::Cancelled)
             }
-            Err(error) => Err(self.fail_with_notice(sink, error.into()).await),
+            Err(error) => Err(self
+                .fail_with_notice(sink, error.into(), activity.as_ref())
+                .await),
         }
     }
 
     /// 后端失败：先尽力把失败原因作为文本送达用户，再以 `Failed` 交回调用点
-    async fn fail_with_notice<S: TurnSink>(&self, sink: &S, error: anyhow::Error) -> TurnError {
+    async fn fail_with_notice<S: TurnSink>(
+        &self,
+        sink: &S,
+        error: anyhow::Error,
+        activity: Option<&Activity>,
+    ) -> TurnError {
+        if let Some(activity) = activity {
+            activity.failed("backend");
+        }
         if let Err(send_error) = sink.send(&failure_text(&error)).await {
             warn!(
                 session = %self.source,
@@ -217,18 +272,30 @@ impl TurnRequest<'_> {
     }
 
     /// 送达回复并落上下文：投递失败的内容不入上下文，避免下一轮回放用户没看到的回复
-    async fn deliver<S: TurnSink>(&self, sink: &S, content: String) -> Result<(), TurnError> {
+    async fn deliver<S: TurnSink>(
+        &self,
+        sink: &S,
+        content: String,
+        activity: Option<&Activity>,
+    ) -> Result<(), TurnError> {
+        let chars = content.chars().count();
         if let Err(error) = sink.send(&content).await {
             warn!(
                 session = %self.source,
                 error = %error,
                 "reply delivery failed; turn not saved"
             );
+            if let Some(activity) = activity {
+                activity.failed("reply delivery");
+            }
             return Err(TurnError::ReplyFailed(error));
         }
         match self.input {
             TurnInput::Text(text) => self.llm.save_turn(self.source, text.to_string(), content),
             TurnInput::Audio(wav) => self.llm.save_omni_turn(self.source, wav.to_vec(), content),
+        }
+        if let Some(activity) = activity {
+            activity.replied(chars);
         }
         Ok(())
     }
@@ -252,6 +319,7 @@ struct TurnExecutor<'a, F> {
     registry: &'a ToolRegistry,
     allowed_tools: &'a [String],
     build_exec_ctx: F,
+    activity: Option<Activity>,
 }
 
 #[async_trait]
@@ -260,9 +328,18 @@ where
     F: Fn() -> UnifiedExecutionContext + Send + Sync,
 {
     async fn execute(&self, call: &ToolCall) -> String {
-        self.registry
+        let started = Instant::now();
+        if let Some(activity) = &self.activity {
+            activity.tool_start(&call.name);
+        }
+        let result = self
+            .registry
             .execute_tool(call, (self.build_exec_ctx)(), self.allowed_tools)
-            .await
+            .await;
+        if let Some(activity) = &self.activity {
+            activity.tool_end(&call.name, started.elapsed());
+        }
+        result
     }
 }
 

@@ -35,6 +35,7 @@ use crate::router::{
 };
 
 use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
+use crate::ui::{ActivityLabel, Ui};
 use tokio_util::sync::CancellationToken;
 use voicev1::voice_service_client::VoiceServiceClient;
 
@@ -133,12 +134,24 @@ fn resolve_chat_caller(
 
 // 在事件循环内登记票据与回合：caller 与在线名单查询必须在取得会话锁后执行，
 // 而回合必须在派发任务前就可见，否则音频事件找不到它、取消不掉排队中的文本回复。
+#[cfg(test)]
 fn prepare_chat(
     config: &AppConfig,
     llm: &LlmEngine,
     turns: &TurnRegistry,
     bot_clid: u32,
     chat: &voicev1::ChatEvent,
+) -> Option<PreparedChat> {
+    prepare_chat_with_ui(config, llm, turns, bot_clid, chat, None)
+}
+
+fn prepare_chat_with_ui(
+    config: &AppConfig,
+    llm: &LlmEngine,
+    turns: &TurnRegistry,
+    bot_clid: u32,
+    chat: &voicev1::ChatEvent,
+    ui: Option<&Ui>,
 ) -> Option<PreparedChat> {
     if chat.invoker_name == config.bot.nickname
         || config.is_music_bot_name(&chat.invoker_name)
@@ -171,7 +184,15 @@ fn prepare_chat(
     let admission = if let Some(command) = direct_replay {
         ChatAdmission::DirectReplay(command)
     } else {
-        let Ok(permit) = TurnPermit::reserve(llm) else {
+        let permit = match ui {
+            Some(ui) => TurnPermit::reserve_with_ui(
+                llm,
+                ui,
+                ActivityLabel::new("VOICE", chat.invoker_name.clone()),
+            ),
+            None => TurnPermit::reserve(llm),
+        };
+        let Ok(permit) = permit else {
             warn!("Voice LLM turn queue full; dropping message");
             return None;
         };
@@ -481,6 +502,7 @@ pub struct VoiceRouter {
     turns: TurnRegistry,
     /// 预生成短反馈音频：工具调用提示音与唤醒确认音共用；TTS provider 不可用时为 None
     feedback: Option<Arc<FeedbackPlayer>>,
+    ui: Ui,
 }
 
 /// VoiceRouter 装配句柄（避免构造参数列表过长）
@@ -495,6 +517,7 @@ pub struct VoiceRouterHandles {
     pub(crate) voice_audio: crate::tools::VoiceAudioHandles,
     /// 已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
     pub(crate) wakeword: Option<Arc<WakewordModels>>,
+    pub(crate) ui: Ui,
 }
 
 /// 取消一条回合并按身份从注册表摘除：置 LLM 取消令牌与 TTS 播放取消位，再把这一条摘出集合。
@@ -618,6 +641,7 @@ impl VoiceRouter {
             audio_output,
             voice_audio,
             wakeword,
+            ui,
         } = handles;
         let speech_provider =
             OpenAiSpeechProvider::new(config.clone(), crate::prompt::TTS_STYLE_PROMPT.to_string())
@@ -651,6 +675,7 @@ impl VoiceRouter {
             wakeword,
             turns: TurnRegistry::default(),
             feedback,
+            ui,
         }
     }
 
@@ -737,12 +762,13 @@ impl VoiceRouter {
                     };
                     match payload {
                         voicev1::event::Payload::Chat(chat) => {
-                            let Some(prepared) = prepare_chat(
+                            let Some(prepared) = prepare_chat_with_ui(
                                 &router.config,
                                 &router.llm,
                                 &router.turns,
                                 router.ts_adapter.get_bot_clid(),
                                 &chat,
+                                Some(&router.ui),
                             ) else {
                                 continue;
                             };
@@ -1332,7 +1358,11 @@ impl VoiceRouter {
         let source = SessionSource::TeamSpeak {
             uid: ctx.caller_uid.clone(),
         };
-        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
+        let Ok(permit) = TurnPermit::reserve_with_ui(
+            &self.llm,
+            &self.ui,
+            ActivityLabel::new("VOICE", ctx.caller_name.clone()),
+        ) else {
             warn!(caller_uid = %ctx.caller_uid, "Voice LLM turn queue full; dropping message");
             return Ok(());
         };
@@ -1370,7 +1400,11 @@ impl VoiceRouter {
         let source = SessionSource::TeamSpeak {
             uid: ctx.caller_uid.clone(),
         };
-        let Ok(permit) = TurnPermit::reserve(&self.llm) else {
+        let Ok(permit) = TurnPermit::reserve_with_ui(
+            &self.llm,
+            &self.ui,
+            ActivityLabel::new("VOICE", ctx.caller_name.clone()),
+        ) else {
             warn!(
                 caller_uid = %ctx.caller_uid,
                 "Voice LLM turn queue full; dropping audio chunk"

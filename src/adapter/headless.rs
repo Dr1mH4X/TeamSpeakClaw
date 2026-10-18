@@ -16,6 +16,7 @@ use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::tools::ToolRegistry;
+use crate::ui::Ui;
 
 pub mod tsbot {
     pub mod voice {
@@ -371,6 +372,7 @@ pub(crate) struct HeadlessStartHandles {
     pub(crate) voice_audio: VoiceAudioHandles,
     /// 连接前已加载的唤醒词模型；`[headless.wakeword]` 未启用时为 None
     pub(crate) wakeword_models: Option<Arc<wakeword::WakewordModels>>,
+    pub(crate) ui: Ui,
 }
 
 impl Runtime {
@@ -386,6 +388,7 @@ impl Runtime {
             bridge_state,
             voice_audio,
             wakeword_models,
+            ui,
         } = handles;
         let voice_enabled = voice_features_enabled(&config);
         if !voice_enabled {
@@ -469,6 +472,7 @@ impl Runtime {
         let bridge_audio_output = router_audio_output.clone();
         let bridge_voice_audio = voice_audio;
         let bridge_wakeword = wakeword_models;
+        let bridge_ui = ui;
         let bridge_task = tokio::spawn(async move {
             let _ = bridge_state_for_router.take_stream_established();
             // 循环无界：预先标记会话已建立，连续失败不判定为耗尽。
@@ -488,6 +492,7 @@ impl Runtime {
                         audio_output: bridge_audio_output.clone(),
                         voice_audio: bridge_voice_audio.clone(),
                         wakeword: bridge_wakeword.clone(),
+                        ui: bridge_ui.clone(),
                     };
                     let shutdown = shutdown_for_bridge.clone();
                     let state = bridge_state_for_router.clone();

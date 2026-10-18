@@ -12,7 +12,7 @@ After configuring `settings.toml` and `acl.toml`, run the program directly:
 ./teamspeakclaw
 ```
 
-If configured correctly, you should see logs similar to the following:
+If configured correctly, an interactive terminal shows startup phases, connection state, and a bottom status bar. `auto` mode falls back to plain logs for non-interactive output. Use `--ui plain` to disable the dynamic activity area explicitly.
 
 ```
 INFO Starting TeamSpeakClaw v0.x.x
@@ -24,6 +24,7 @@ At this point, the bot should be connected to your TeamSpeak server.
 ## Command Line Options
 
 - `--log-level <LEVEL>`: Set the console log level (error, warn, info, debug, trace). Default is `info`.
+- `--ui <MODE>`: Set the terminal interface mode. `auto` or `plain`.
 
 ## Interaction Methods
 

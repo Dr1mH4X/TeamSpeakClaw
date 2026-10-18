@@ -9,11 +9,11 @@
 - 语音桥就绪 `BridgeReadiness` 的定义归此模块：组件经 `BridgeComponent` 只上报 Up/Down，Service、Stream、Actor 三者全 Up 才算就绪。
 - `adapter/reconnect.rs` 提供任务回收与限时等待工具：`drain_managed_tasks`、`abort_managed_tasks`、`wait_with_timeout`、`join_or_abort`。
 - 会话收尾在此完成：结束 NapCat 适配器与 headless 运行时，再断开 TeamSpeak 适配器。
-- `cli.rs` 提供 `--log-level` 参数与启动横幅，由 `main.rs` 在装配前调用。
+- `cli.rs` 提供 `--log-level`、`--ui` 参数与启动横幅；`ui.rs` 拥有启动阶段、连接状态、回合与工具 spinner、底部状态栏，非 TTY 或 `--ui plain` 时关闭动态绘制。
 
 ## 关键路径与序列
 
-1. `main.rs` 打印启动横幅、用 `Args::parse()` 取 `--log-level`，`AppConfig::load_all()` 加载配置，建 `PermissionGate`、`ToolRegistry` 与 `LlmEngine`，随后把 `adapter::run()` 与 Ctrl-C / SIGTERM 触发的 `CancellationToken` 取消放在同一个 `tokio::select!` 里等待。
+1. `main.rs` 用 `Args::parse()` 取 `--log-level` 与 `--ui`，建立 UI 后打印启动横幅，`AppConfig::load_all()` 加载配置，建 `PermissionGate`、`ToolRegistry` 与 `LlmEngine`，随后把 `adapter::run()` 与 Ctrl-C / SIGTERM 触发的 `CancellationToken` 取消放在同一个 `tokio::select!` 里等待。
 2. `adapter::run()` 先调 `load_wakeword_models()`：`[headless.wakeword]` 启用时校验并解析各 onnx，任一失败即返回 `Err`，不建连、不进入重连；解析结果交给 `run_connected_session()` 在重连之间复用。
 3. 主循环每轮调 `connect_ts()`：`TsAdapter::connect()` 建连、`take_main_subscriptions()` 取事件与断开订阅；两处失败分别以 `FailureKind::Connection` 与 `FailureKind::Subscription` 上报 `ConnectOutcome::Failed`。
 4. 连接成功后进入 `run_connected_session()`：`napcat::ws::connect_if_enabled()` 按 `config.napcat.enabled` 启动 NapCat（未启用为 `None`），等待期间由 `wait_for_initialization()` 同时观察 TeamSpeak 断线与根取消；随后 `headless::Runtime::start()` 启动 headless 运行时，`EventRouter::new_with_clients()` 与 `router::run_routers()` 并发运行 `EventRouter` 与 `NcRouter`。

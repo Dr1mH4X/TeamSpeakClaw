@@ -7,6 +7,7 @@ mod permission;
 mod prompt;
 mod router;
 mod tools;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,11 +23,17 @@ use crate::tools::ToolRegistry;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    cli::print_banner();
-
     let args = Args::parse();
+    let ui = ui::Ui::new(args.ui);
+    ui.print_line(&cli::banner(ui.rich()));
+    let result = run(args, ui.clone()).await;
+    ui.shutdown(result.is_ok());
+    result
+}
+
+async fn run(args: Args, ui: ui::Ui) -> Result<()> {
     let (cfg, acl_config) = AppConfig::load_all()?;
-    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging);
+    let _guard = crate::log::init_tracing(&args.log_level, &cfg.logging, &ui);
 
     info!("Starting TeamSpeakClaw v{}", env!("CARGO_PKG_VERSION"));
     cfg.log_voice_input_conflicts();
@@ -38,10 +45,19 @@ async fn main() -> Result<()> {
         config.clone(),
         voice_audio.clone(),
     ));
+    ui.step_ok("tools", format!("{} enabled", registry.list_tools().len()));
     let llm = Arc::new(LlmEngine::new(config.clone())?);
 
     let shutdown = CancellationToken::new();
-    let run = crate::adapter::run(config, gate, registry, llm, shutdown.clone(), voice_audio);
+    let run = crate::adapter::run(
+        config,
+        gate,
+        registry,
+        llm,
+        shutdown.clone(),
+        voice_audio,
+        ui.clone(),
+    );
     tokio::pin!(run);
 
     tokio::select! {

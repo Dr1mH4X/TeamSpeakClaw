@@ -23,6 +23,7 @@ use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::router::{EventRouter, RouterContext, RouterExit};
 use crate::tools::ToolRegistry;
+use crate::ui::Ui;
 
 const COMPONENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -55,7 +56,13 @@ enum ConnectOutcome {
 }
 
 /// 一次连接尝试：建立 TeamSpeak 连接并取出主订阅。失败只上报事件，不做重试决策。
-async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> ConnectOutcome {
+async fn connect_ts(
+    config: Arc<AppConfig>,
+    shutdown: &CancellationToken,
+    ui: &Ui,
+) -> ConnectOutcome {
+    ui.ts_connecting();
+    let phase = ui.phase("Server", "connecting");
     let connection = tokio::select! {
         biased;
         _ = shutdown.cancelled() => return ConnectOutcome::Shutdown,
@@ -65,10 +72,11 @@ async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> Con
     let adapter = match connection {
         Ok(adapter) => adapter,
         Err(error) => {
+            phase.fail(format!("failed · {error}"));
             return ConnectOutcome::Failed {
                 kind: FailureKind::Connection,
                 failure: error,
-            }
+            };
         }
     };
 
@@ -78,6 +86,7 @@ async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> Con
             // 已建立连接但订阅取出失败：先断开避免泄漏，再走统一重连计数
             warn!("Failed to take TS subscriptions: {error}");
             disconnect_adapter(&adapter).await;
+            phase.fail(format!("subscription failed · {error}"));
             return ConnectOutcome::Failed {
                 kind: FailureKind::Subscription,
                 failure: error,
@@ -86,6 +95,8 @@ async fn connect_ts(config: Arc<AppConfig>, shutdown: &CancellationToken) -> Con
     };
 
     let (event_rx, disconnect_rx) = subscriptions;
+    ui.ts_connected();
+    phase.ok(format!("connected · clid {}", adapter.get_bot_clid()));
     ConnectOutcome::Connected {
         adapter,
         event_rx,
@@ -100,18 +111,36 @@ pub async fn run(
     llm: Arc<LlmEngine>,
     shutdown: CancellationToken,
     voice_audio: crate::tools::VoiceAudioHandles,
+    ui: Ui,
 ) -> Result<()> {
-    let wakeword_models = load_wakeword_models(&config)?;
+    let wakeword_models = if config.headless.wakeword.enabled {
+        let phase = ui.phase("wakeword", "loading");
+        match load_wakeword_models(&config) {
+            Ok(models) => {
+                drop(phase);
+                models
+            }
+            Err(error) => {
+                phase.fail(format!("failed · {error}"));
+                return Err(error);
+            }
+        }
+    } else {
+        load_wakeword_models(&config)?
+    };
 
     let mut reconnect = ReconnectState::default();
-    let context = RouterContext::new(config, gate, llm, registry, voice_audio.clone());
+    let context = RouterContext::new(config, gate, llm, registry, voice_audio.clone(), ui.clone());
 
     loop {
         // 连接阶段的失败与运行阶段的结果都汇成 (类别, 失败原因)，
         // 由唯一的决策点完成记账、日志与等待。
-        let (kind, failure) = match connect_ts(context.config.clone(), &shutdown).await {
+        let (kind, failure) = match connect_ts(context.config.clone(), &shutdown, &ui).await {
             ConnectOutcome::Shutdown => return Ok(()),
-            ConnectOutcome::Failed { kind, failure } => (kind, failure),
+            ConnectOutcome::Failed { kind, failure } => {
+                ui.reconnect_started();
+                (kind, failure)
+            }
             ConnectOutcome::Connected {
                 adapter,
                 event_rx,
@@ -132,6 +161,9 @@ pub async fn run(
                     entered_running,
                     result,
                 } = session;
+                if !shutdown.is_cancelled() {
+                    ui.reconnect_started();
+                }
                 if entered_running {
                     reconnect.record_session_started();
                 }
@@ -175,6 +207,14 @@ async fn run_connected_session(
     voice_audio: crate::tools::VoiceAudioHandles,
     wakeword_models: Option<Arc<WakewordModels>>,
 ) -> SessionCompletion {
+    let ui = context.ui.clone();
+    let napcat_enabled = context.config.napcat.enabled;
+    if napcat_enabled {
+        ui.nc_connecting();
+    } else {
+        ui.nc_disabled();
+    }
+    let mut nc_phase = napcat_enabled.then(|| ui.phase("NapCat", "connecting"));
     let napcat_shutdown = shutdown.child_token();
     let nc_adapter = match wait_for_initialization(
         napcat::ws::connect_if_enabled(context.config.clone(), napcat_shutdown.clone()),
@@ -183,8 +223,25 @@ async fn run_connected_session(
     )
     .await
     {
-        Ok(InitializationWait::Completed(Ok(adapter))) => adapter,
+        Ok(InitializationWait::Completed(Ok(adapter))) => {
+            if let Some(nc_adapter) = &adapter {
+                ui.nc_connected();
+                if let Some(phase) = nc_phase.take() {
+                    phase.ok(format!("connected · QQ {}", nc_adapter.get_self_id()));
+                }
+            } else {
+                ui.nc_disabled();
+                if let Some(phase) = nc_phase.take() {
+                    phase.ok("disabled");
+                }
+            }
+            adapter
+        }
         Ok(InitializationWait::Completed(Err(error))) => {
+            ui.nc_down();
+            if let Some(phase) = nc_phase.take() {
+                phase.fail(format!("failed · {error}"));
+            }
             napcat_shutdown.cancel();
             disconnect_adapter(&adapter).await;
             return SessionCompletion::initialization(Err(error));
@@ -195,11 +252,19 @@ async fn run_connected_session(
             return SessionCompletion::initialization(Ok(RouterExit::Shutdown));
         }
         Ok(InitializationWait::Disconnected) => {
+            ui.nc_down();
+            if let Some(phase) = nc_phase.take() {
+                phase.fail("disconnected");
+            }
             napcat_shutdown.cancel();
             disconnect_adapter(&adapter).await;
             return SessionCompletion::initialization(Ok(RouterExit::TeamSpeakDisconnected));
         }
         Err(error) => {
+            ui.nc_down();
+            if let Some(phase) = nc_phase.take() {
+                phase.fail(format!("failed · {error}"));
+            }
             napcat_shutdown.cancel();
             disconnect_adapter(&adapter).await;
             return SessionCompletion::initialization(Err(error));
@@ -216,6 +281,13 @@ async fn run_connected_session(
         voice_bridge_state.clone(),
     );
 
+    let voice_enabled = headless::voice_features_enabled(&context.config);
+    if voice_enabled {
+        ui.voice_connecting();
+    } else {
+        ui.voice_disabled();
+    }
+    let mut voice_phase = voice_enabled.then(|| ui.phase("voice", "starting"));
     let headless_runtime = match headless::Runtime::start(
         context.config.clone(),
         context.gate.clone(),
@@ -226,12 +298,23 @@ async fn run_connected_session(
             bridge_state: voice_bridge_state,
             voice_audio,
             wakeword_models,
+            ui: ui.clone(),
         },
     )
     .await
     {
-        Ok(runtime) => runtime,
+        Ok(runtime) => {
+            ui.voice_connected();
+            if let Some(phase) = voice_phase.take() {
+                drop(phase);
+            }
+            runtime
+        }
         Err(error) => {
+            ui.voice_down();
+            if let Some(phase) = voice_phase.take() {
+                phase.fail(format!("failed · {error}"));
+            }
             error!("Headless runtime failed to start: {error}");
             napcat_shutdown.cancel();
             disconnect_adapter(&adapter).await;
@@ -268,6 +351,16 @@ async fn run_connected_session(
     shutdown_napcat(nc_adapter.as_deref(), &napcat_shutdown).await;
     headless_runtime.shutdown().await;
     disconnect_adapter(&adapter).await;
+    if napcat_enabled {
+        ui.nc_down();
+    } else {
+        ui.nc_disabled();
+    }
+    if voice_enabled {
+        ui.voice_down();
+    } else {
+        ui.voice_disabled();
+    }
 
     SessionCompletion::running(result)
 }

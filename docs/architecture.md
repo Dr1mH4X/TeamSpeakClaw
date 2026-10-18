@@ -46,6 +46,7 @@ voice bridge 就绪时 TS 文本经 `VoiceRouter` 而非 `EventRouter` 路由；
 | 改动回合的准入、取消或落库 | `router/turn.rs` 与 `llm/context.rs` |
 | 改动唤醒判定 | `adapter/headless/wakeword.rs` 与唤醒门的说话人状态 |
 | 新增跨适配器的协调逻辑 | `adapter/lifecycle.rs` |
+| 新增终端活动区、连接状态或运行时状态栏 | `ui.rs`；控制台日志接线在 `log.rs` |
 
 ## 组件图
 
