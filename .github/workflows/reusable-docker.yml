@@ -25,6 +25,10 @@ on:
         type: string
         required: false
         default: ""
+      binary-artifact:
+        description: "预构建 Alpine 二进制 artifact 名称"
+        type: string
+        required: true
 
 jobs:
   docker:
@@ -37,11 +41,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Update version in Cargo.toml
-        if: inputs.is-release == true
+      - name: Download prebuilt binary
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ inputs.binary-artifact }}
+          path: docker-artifact
+
+      - name: Extract prebuilt binary
+        shell: bash
         run: |
-          VERSION="${{ inputs.version }}"
-          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+          archive="$(find docker-artifact -type f -name 'TeamSpeakClaw-*-Alpine-amd64.tar.gz' -print -quit)"
+          if [ -z "$archive" ]; then
+            echo "Error: Alpine artifact not found in docker-artifact"
+            exit 1
+          fi
+          tar -xzf "$archive" -C docker-artifact
+          install -m 0755 docker-artifact/teamspeakclaw ./teamspeakclaw
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,6 +84,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -1,29 +1,30 @@
 # CI/CD
 
-GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每个 workflow 的触发条件、职责与产物。
+GitHub Actions 共 9 个 workflow，位于 `.github/workflows/`。下表为每个 workflow 的触发条件、职责与产物。
 
 | workflow | 触发器 | 职责 | 产物 |
 |---|---|---|---|
-| `ci.yml` | push/PR 到 main/master（两者同一份代码路径名单，文档、网站与 `.agents/**` 的改动不触发）、手动 | 质量门 + 三平台构建 | 平台归档（见 reusable-build） |
+| `ci.yml` | push/PR 到 main/master（两者同一份代码路径名单，文档、网站与 `.agents/**` 的改动不触发）、手动 | 质量门 + Ubuntu/Windows/macOS/Debian/Alpine 构建 | 平台归档（见 reusable-build 与 reusable-build-alpine） |
 | `release.yml` | push tag `v*` | 发版：质量门 + 构建 + Docker 镜像 + 建 Release | GitHub Release（正文取 `docs/release/<tag>.md`，标题 `Release v<版本>`）、GHCR 镜像 |
 | `deploy-website.yml` | push/PR 到 main 且改动 `website/**` 或 workflow 本身、手动 | Docusaurus 站点构建与 Pages 部署 | GitHub Pages |
 | `docker-sha.yml` | 手动（可选 `sha-tag` 输入） | 给当前 commit 打 SHA tag 并推 GHCR 镜像 | GHCR 镜像 |
 | `cleanup-untagged.yml` | 手动 | 删 GHCR 未打标镜像 | 无 |
-| `reusable-build.yml` | workflow_call | 三平台 release 构建并打包归档 | zip/tar.gz 归档、ARTIFACT 附件 |
+| `reusable-build.yml` | workflow_call | Ubuntu/Windows/macOS 与可选 Debian release 构建并打包归档 | zip/tar.gz 归档、ARTIFACT 附件 |
+| `reusable-build-alpine.yml` | workflow_call | Alpine/musl 构建并打包归档，供 Docker 直接组装 | 内部 `Alpine-amd64` tar.gz（不进入 Release） |
 | `reusable-docker.yml` | workflow_call | 构建并推送 GHCR 镜像 | GHCR 镜像 |
 | `reusable-meta.yml` | workflow_call | 解析版本与发布属性 | version/tag/is-* 输出 |
 
 ## 主线流程
 
-`ci.yml` 与 `release.yml` 结构一致：`quality` 在 ubuntu 上跑 `cargo fmt --check`、`cargo test --all-targets --locked`、`cargo clippy --all-targets --locked -- -D warnings`（装 `cmake libopus-dev`）；`meta` 调 reusable-meta 解析版本与发布属性（tag `v*` 时 version 取去 `v`，否则为 `0.0.0-dev.<短sha>`）；`build` 依赖前两者调 reusable-build。
+`ci.yml` 与 `release.yml` 结构一致：`quality` 在 ubuntu 上跑 `cargo fmt --check`、`cargo test --all-targets --locked`、`cargo clippy --all-targets --locked -- -D warnings`（装 `cmake libopus-dev`）；`meta` 调 reusable-meta 解析版本与发布属性（tag `v*` 时 version 取去 `v`，否则为 `0.0.0-dev.<短sha>`）；`build` 依赖前两者调 reusable-build，`alpine` 调 reusable-build-alpine。
 
-`reusable-build.yml` 矩阵三平台：windows-amd64 / linux-amd64 / macos-aarch64，各平台装对应系统依赖（macOS `brew install autoconf automake libtool`）。发版时先用 Python 校验 semver 并改写 `Cargo.toml` / `Cargo.lock` 版本，再 `cargo build --release`，把二进制、`examples/config/` 的两个模板与 `models/` 内的模型清单和下载脚本（`README.md`、`fetch-models.sh`、`fetch-models.ps1`）打进 zip 或 tar.gz 归档并上传 artifact；归档不含任何模型文件，唤醒模型与 whisper 模型由使用者按 [models/README.md](../models/README.md) 自行下载。GHCR 镜像不含模型，运行时靠 `./models:/app/models` 挂载供给。
+`reusable-build.yml` 矩阵三平台：windows-amd64 / Ubuntu-amd64 / macos-aarch64；`build-debian` 为 CI 与发布都启用的 Debian-amd64 任务。各平台装对应系统依赖（macOS `brew install autoconf automake libtool`），发版时先用 Python 校验 semver 并改写 `Cargo.toml` / `Cargo.lock` 版本，再 `cargo build --release`，把二进制、`examples/config/` 的两个模板与 `models/` 内的模型清单和下载脚本（`README.md`、`fetch-models.sh`、`fetch-models.ps1`）打进 zip 或 tar.gz 归档并上传 artifact；归档不含任何模型文件，唤醒模型与 whisper 模型由使用者按 [models/README.md](../models/README.md) 自行下载。`reusable-build-alpine.yml` 在 `rust:1.98.0-alpine` 中构建 `x86_64-unknown-linux-musl`，产出仅供 Docker 使用的内部 `Alpine-amd64` 归档。GHCR 镜像不含模型，运行时靠 `./models:/app/models` 挂载供给。
 
-`release.yml` 在 `build` 之外，`docker` 调 reusable-docker 推送镜像，最终 `release` 先取 `docs/release/<tag>.md`（缺失或首行不合格式即失败），把归档挂到 `softprops/action-gh-release` 创建的 GitHub Release，正文取该文件、标题是 `Release v<版本>`，`-beta` tag 标记为 prerelease。
+`release.yml` 在 `build` 与 `alpine` 之外，`docker` 调 reusable-docker 推送镜像，最终 `release` 先取 `docs/release/<tag>.md`（缺失或首行不合格式即失败），把归档挂到 `softprops/action-gh-release` 创建的 GitHub Release，正文取该文件、标题是 `Release v<版本>`，`-beta` tag 标记为 prerelease。
 
 ## Docker 与清理
 
-`reusable-docker.yml` 构建并推送 `ghcr.io/<owner>/teamspeakclaw`：发版（含 `-beta`）打 semver tag；稳定版另打 `latest`；手动/非发版打 `sha-<短sha>` 或传入的自定义 sha-tag。`docker-sha.yml` 与 `cleanup-untagged.yml` 手动触发，后者经 `gh api` 遍历容器版本并删除无 tag 项（自动适配个人账号与组织路径）。
+`reusable-docker.yml` 构建并推送 `ghcr.io/<owner>/teamspeakclaw`：发版（含 `-beta`）打 semver tag；稳定版另打 `latest`；手动/非发版打 `sha-<短sha>` 或传入的自定义 sha-tag。发布与手动镜像都下载内部 `Alpine-amd64` 归档，使用 `Dockerfile` 只组装 `alpine:3.20` 运行镜像。`docker-sha.yml` 与 `cleanup-untagged.yml` 手动触发，后者经 `gh api` 遍历容器版本并删除无 tag 项（自动适配个人账号与组织路径）。
 
 ## 发版日志
 

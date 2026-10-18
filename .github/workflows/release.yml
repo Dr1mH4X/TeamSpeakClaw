@@ -54,9 +54,17 @@ jobs:
     with:
       version: ${{ needs.meta.outputs.version }}
       is-release: true
+      build-debian: true
+
+  alpine:
+    needs: [quality, meta]
+    uses: ./.github/workflows/reusable-build-alpine.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      is-release: true
 
   docker:
-    needs: [quality, meta]
+    needs: [quality, meta, alpine]
     permissions:
       contents: read
       packages: write
@@ -65,11 +73,12 @@ jobs:
       version: ${{ needs.meta.outputs.version }}
       is-release: true
       is-stable-release: ${{ needs.meta.outputs.is-stable-release == 'true' }}
+      binary-artifact: docker-binary-Alpine-amd64
     secrets: inherit
 
   release:
     name: Create Release
-    needs: [quality, meta, build, docker]
+    needs: [quality, meta, build, alpine, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -1,6 +1,12 @@
 # Rust构建产物
 target/
 
+# 预构建二进制下载目录
+.docker-cargo/
+docker-artifact/
+staging/
+dist/
+
 # 日志文件
 logs/
 

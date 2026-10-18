@@ -1,23 +1,11 @@
-FROM rust:alpine AS builder
-RUN apk add --no-cache musl-dev cmake make gcc protoc
-WORKDIR /app
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY .cargo ./.cargo
-COPY src ./src
-COPY proto ./proto
-ENV PROTOC=/usr/bin/protoc
-RUN cargo build --release
-
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates opus ffmpeg tzdata
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -D -h /home/appuser -s /sbin/nologin appuser
 WORKDIR /app
-COPY --from=builder /app/target/release/teamspeakclaw /app/teamspeakclaw
-COPY examples/config/ /app/config/
-RUN chmod +x /app/teamspeakclaw && \
-    mkdir -p /app/logs && \
-    chown -R appuser:appgroup /app
+COPY --chmod=0755 --chown=appuser:appgroup teamspeakclaw /app/teamspeakclaw
+COPY --chown=appuser:appgroup examples/config/ /app/config/
+RUN mkdir -p /app/logs && chown appuser:appgroup /app/logs
 USER appuser
 ENV RUST_LOG=info
 ENTRYPOINT ["/app/teamspeakclaw"]
