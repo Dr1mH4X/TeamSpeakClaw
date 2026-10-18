@@ -39,11 +39,11 @@ jobs:
             bin_suffix: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
         if: inputs.is-release == true
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -136,7 +136,7 @@ jobs:
           echo "Artifact prepared: $ARCHIVE_NAME"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts-${{ matrix.platform }}
           path: dist/*

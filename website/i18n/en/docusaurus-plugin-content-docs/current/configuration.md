@@ -45,7 +45,13 @@ provider = "parallel"
 
 Anonymous Parallel search uses Fast mode with server-managed search settings, so the tool accepts only `query`; `numResults` and `type` apply only to Exa. The free service has usage limits. Quota and network failures return a tool error to the model without switching providers automatically.
 
-Grant `web_search` to the relevant user groups in `config/acl.toml`, then ask the bot to "Search for the latest stable Rust release and its release notes." In the example ACL, administrators already have this permission through `*`; normal users and guests need it added explicitly. Queries are sent to the selected external search service.
+Grant `web_search` to the relevant user groups in `config/acl.toml`, then ask the bot your question. In the example ACL, administrators already have this permission through `*`; normal users and guests need it added explicitly. Queries are sent to the selected external search service.
+
+### Web Fetch
+
+`web_fetch` retrieves the body of a specific HTTP(S) URL and converts HTML to Markdown. Grant `web_fetch` to the relevant user groups in `config/acl.toml`; administrators already have it through `*` in the example ACL. Fetching accepts public destinations only: if any DNS answer is loopback, private, link-local, reserved, or a translation address, the whole fetch fails. Only same-origin redirects are followed automatically, up to five hops.
+
+One fetch reads at most 5 MiB of response bytes, decodes at most 100000 characters, and returns at most 20000 model-visible characters; truncation adds a notice. Scripts, styles, hidden nodes, and embedded objects are removed before Markdown conversion; HTML that cannot be converted safely becomes a fixed omission marker. Every result begins with a notice identifying the page content as external, untrusted data.
 
 ### NapCat Configuration Details
 
