@@ -7,7 +7,8 @@ TeamSpeakClaw 是 Rust 编写的单二进制聊天机器人：集成 TeamSpeak �
 ```
 src/
 ├── main.rs                  # 入口：装配 config、适配器、路由器、关闭流程
-├── cli.rs                   # --log-level
+├── cli.rs                   # --log-level / --ui
+├── ui.rs                    # 启动阶段、连接状态、回合/工具活动区与状态栏
 ├── log.rs                   # 按日轮转文件日志 + tracing 初始化
 ├── config.rs                # 加载 config/settings.toml、acl.toml
 ├── config/                  # 子模块（acl, bot, headless, llm, logging, music_backend, napcat, voice_replay）

@@ -3,16 +3,17 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tracing::level_filters::LevelFilter;
+use tracing::{level_filters::LevelFilter, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    fmt::{self, format::Writer, time::FormatTime},
+    fmt::{self, format::Writer, time::FormatTime, writer::MakeWriter},
     layer::SubscriberExt,
     util::SubscriberInitExt,
     EnvFilter, Layer,
 };
 
 use crate::config::LogConfig;
+use crate::ui::Ui;
 
 fn cleanup_old_logs(log_dir: &PathBuf, max_days: u32) {
     let now = chrono::Local::now();
@@ -51,6 +52,83 @@ impl FormatTime for CustomTime {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
         write!(w, "{}", chrono::Local::now().format(TIMESTAMP_FMT))
     }
+}
+
+struct ConsoleWriter {
+    ui: Ui,
+}
+
+struct ConsoleWriterGuard {
+    ui: Ui,
+    buffer: Vec<u8>,
+    level: Option<Level>,
+}
+
+impl<'a> MakeWriter<'a> for ConsoleWriter {
+    type Writer = ConsoleWriterGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        ConsoleWriterGuard {
+            ui: self.ui.clone(),
+            buffer: Vec::new(),
+            level: None,
+        }
+    }
+
+    fn make_writer_for(&'a self, metadata: &tracing::Metadata<'_>) -> Self::Writer {
+        ConsoleWriterGuard {
+            ui: self.ui.clone(),
+            buffer: Vec::new(),
+            level: Some(*metadata.level()),
+        }
+    }
+}
+
+impl Write for ConsoleWriterGuard {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_buffer();
+        Ok(())
+    }
+}
+
+impl Drop for ConsoleWriterGuard {
+    fn drop(&mut self) {
+        self.flush_buffer();
+    }
+}
+
+impl ConsoleWriterGuard {
+    fn flush_buffer(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+        let lines = buffered_lines(&self.buffer);
+        self.buffer.clear();
+        if self.ui.suppress_console_logs() {
+            match self.level {
+                Some(Level::WARN) => self.ui.note_warning(),
+                Some(Level::ERROR) => self.ui.note_error(),
+                _ => {}
+            }
+            return;
+        }
+        self.ui.write_console_lines(&lines);
+    }
+}
+
+fn buffered_lines(buffer: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(buffer)
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .split('\n')
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// 第三方 crate 的噪声 target，用模块路径（下划线），与 `module_path!()` 一致。
@@ -178,7 +256,7 @@ fn with_noise_suppressed(filter: EnvFilter, global: Option<LevelFilter>) -> EnvF
         })
 }
 
-pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
+pub fn init_tracing(console_level: &str, log_cfg: &LogConfig, ui: &Ui) -> WorkerGuard {
     // 噪声抑制级别必须与 base filter 的全局级别同源：RUST_LOG 合法时两者都取 RUST_LOG，
     // 否则都取 --log-level。环境变量只读一次，两条判定共用。
     let rust_log = std::env::var(EnvFilter::DEFAULT_ENV).ok();
@@ -187,9 +265,12 @@ pub fn init_tracing(console_level: &str, log_cfg: &LogConfig) -> WorkerGuard {
         effective_global_level(console_level, rust_log.as_deref()),
     );
 
+    // plain 控制台只保留时间、级别与消息；target 与结构化字段保留在文件日志中。
     let console_layer = fmt::layer()
-        .with_target(true)
+        .with_target(false)
         .compact()
+        .with_ansi(ui.color_enabled())
+        .with_writer(ConsoleWriter { ui: ui.clone() })
         .with_timer(CustomTime)
         .with_filter(console_filter);
 
@@ -296,8 +377,8 @@ impl Write for DailyFileAppender {
 #[cfg(test)]
 mod tests {
     use super::{
-        console_base_filter, effective_global_level, global_level_from, noise_directives,
-        noise_suppression_level, with_noise_suppressed, HTTP_NOISE_TARGETS,
+        buffered_lines, console_base_filter, effective_global_level, global_level_from,
+        noise_directives, noise_suppression_level, with_noise_suppressed, HTTP_NOISE_TARGETS,
         INFERENCE_NOISE_TARGETS,
     };
     use std::sync::{Arc, Mutex};
@@ -305,6 +386,18 @@ mod tests {
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer};
 
     type CapturedEvents = Arc<Mutex<Vec<(&'static str, tracing::Level)>>>;
+
+    #[test]
+    fn console_writer_splits_buffered_output_into_lines() {
+        assert_eq!(
+            buffered_lines(b"first line\nsecond line\n"),
+            vec!["first line".to_string(), "second line".to_string()]
+        );
+        assert_eq!(
+            buffered_lines("宽字符\n".as_bytes()),
+            vec!["宽字符".to_string()]
+        );
+    }
 
     struct CaptureEvents(CapturedEvents);
 

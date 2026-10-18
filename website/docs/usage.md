@@ -12,7 +12,7 @@ sidebar_position: 4
 ./teamspeakclaw
 ```
 
-如果配置正确，您应该会看到类似以下的日志：
+如果配置正确，交互终端会显示启动阶段、连接状态与底部运行状态栏；`auto` 模式在非交互输出中自动回退为普通日志。使用 `--ui plain` 也可以显式关闭动态活动区。
 
 ```
 INFO Starting TeamSpeakClaw v0.x.x
@@ -24,6 +24,7 @@ INFO Bot ready. Listening for TS + NapCat events.
 ## 命令行选项
 
 - `--log-level <LEVEL>`: 设置控制台日志级别（error, warn, info, debug, trace），默认为 info。
+- `--ui <MODE>`: 设置终端界面模式。`auto` 或 `plain`
 
 ## 交互方式
 

@@ -32,6 +32,7 @@ use crate::config::AppConfig;
 use crate::llm::LlmEngine;
 use crate::permission::PermissionGate;
 use crate::tools::{ToolRegistry, VoiceAudioHandles};
+use crate::ui::Ui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouterExit {
@@ -46,6 +47,7 @@ pub(crate) struct RouterContext {
     pub(crate) llm: Arc<LlmEngine>,
     pub(crate) registry: Arc<ToolRegistry>,
     pub(crate) voice_audio: VoiceAudioHandles,
+    pub(crate) ui: Ui,
 }
 
 impl RouterContext {
@@ -55,6 +57,7 @@ impl RouterContext {
         llm: Arc<LlmEngine>,
         registry: Arc<ToolRegistry>,
         voice_audio: VoiceAudioHandles,
+        ui: Ui,
     ) -> Self {
         Self {
             config,
@@ -62,6 +65,7 @@ impl RouterContext {
             llm,
             registry,
             voice_audio,
+            ui,
         }
     }
 }
@@ -79,6 +83,7 @@ pub(crate) async fn run_routers(
         llm,
         registry,
         voice_audio: _,
+        ui,
     } = context;
     let napcat_enabled = nc_adapter.is_some();
     if !napcat_enabled {
@@ -100,10 +105,11 @@ pub(crate) async fn run_routers(
         ReadyWait::Shutdown => return Ok(RouterExit::Shutdown),
     };
     info!("{bot_ctx}");
+    ui.listening("receiving messages");
 
     if let Some(nc_adapter) = nc_adapter {
         let nc_router =
-            NcRouter::new_with_ts(config, nc_adapter, gate, llm, registry, Some(adapter));
+            NcRouter::new_with_ts(config, nc_adapter, gate, llm, registry, Some(adapter), ui);
 
         tokio::select! {
             biased;

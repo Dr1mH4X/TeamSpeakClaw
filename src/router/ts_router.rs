@@ -14,6 +14,7 @@ use crate::router::{
     TurnInput, TurnPermit, TurnRequest, TurnSession, TurnSink, UnifiedInboundEvent,
 };
 use crate::tools::{ToolRegistry, TsCaller, UnifiedExecutionContext};
+use crate::ui::{ActivityLabel, Ui};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ pub struct EventRouter {
     voice_bridge_state: BridgeReadiness,
     voice_audio: crate::tools::VoiceAudioHandles,
     subscriptions: Arc<Mutex<Option<MainSubscriptions>>>,
+    ui: Ui,
 }
 
 impl EventRouter {
@@ -50,6 +52,7 @@ impl EventRouter {
             llm,
             registry,
             voice_audio,
+            ui,
         } = context;
 
         Self {
@@ -65,6 +68,7 @@ impl EventRouter {
                 events: event_rx,
                 disconnected: disconnect_rx,
             }))),
+            ui,
         }
     }
 
@@ -96,7 +100,11 @@ impl EventRouter {
                     let source = SessionSource::TeamSpeak {
                         uid: ts_caller_admission_uid(&msg.invoker_uid, msg.invoker_id),
                     };
-                    let Ok(permit) = TurnPermit::reserve(&this.llm) else {
+                    let Ok(permit) = TurnPermit::reserve_with_ui(
+                        &this.llm,
+                        &this.ui,
+                        ActivityLabel::new("TS", msg.invoker_name.clone()),
+                    ) else {
                         warn!(
                             invoker = %msg.invoker_name,
                             "TS LLM turn queue full; dropping message"
@@ -221,6 +229,9 @@ impl EventRouter {
                     .adapter
                     .send_text_message(reply_mode, reply_target, &ack)
                     .await;
+                if let Some(activity) = session.activity_handle() {
+                    activity.completed("replayed");
+                }
                 return;
             }
         }

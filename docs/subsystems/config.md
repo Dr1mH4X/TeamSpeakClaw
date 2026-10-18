@@ -6,7 +6,7 @@
 
 - `AppConfig::load_all()` 加载 `config/settings.toml` 与 `config/acl.toml`，目录由 `config_dir()` 求得（可执行文件同级的 `config`）。
 - 按配置域划分子模块：`acl`、`bot`、`headless`、`llm`、`logging`、`music_backend`、`napcat`、`voice_replay`、`web_search`，每个子模块拥有自己那段的字段与默认值。
-- `log.rs` 初始化 tracing 与按日轮转的文件日志，级别来自启动参数与日志配置。
+- `log.rs` 初始化 tracing 与按日轮转的文件日志，级别来自启动参数与日志配置；rich 模式不输出 tracing 控制台日志，只把 `warn/error` 计数交给 `ui.rs`，plain 模式保留控制台日志。
 - 约定敏感配置的位置：API key 一类只在 config 目录内，不进 git、不写日志。
 
 ## 关键路径与序列
