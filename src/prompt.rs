@@ -151,6 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn web_source_links_are_opt_in() {
+        let prompt = system_prompt().unwrap();
+        assert_eq!(
+            prompt
+                .matches("除非用户明确要求来源，否则不要在回复中输出 URL")
+                .count(),
+            2
+        );
+        assert!(!prompt.contains("引用相关 URL"));
+        assert!(!prompt.contains("使用其内容时引用 URL"));
+    }
+
+    #[test]
     fn sections_render_in_order_and_blank_lines_separate_them() {
         let sections = [
             section("later", 200, "second"),

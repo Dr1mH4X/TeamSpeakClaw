@@ -9,7 +9,7 @@
 - `PermissionGate`：把 `acl.toml` 的规则匹配成工具白名单，并对受保护组给出目标授权判定。
 - 工具分组：`communication`、`information`、`moderation`、`music`（后端 `ts3audiobot`、`tsbot_http`、`tsmusicbot`）、`web_search`、`web_fetch`、`voice_audio`、`voice_replay`。
 - 工具间共享设施：按超时参数化复用的 HTTP 客户端，以及聊天类音乐后端的串行锁。
-- `WebSearch` 在注册时读取搜索服务选择，并按所选服务生成参数 schema；执行仍经过相同的 ACL 与结果包装。两条 provider 路径先归一化为 source 列表，再以固定的外部内容提示、来源列表和引用要求渲染；Exa MCP 的文本布局与 Parallel 的 `structuredContent` 在各自 provider 模块内解析。配置用法见[用户配置指南](../../website/docs/configuration.md#联网搜索)。
+- `WebSearch` 在注册时读取搜索服务选择，并按所选服务生成参数 schema；执行仍经过相同的 ACL 与结果包装。两条 provider 路径先归一化为 source 列表，再以固定的外部内容提示与来源列表渲染；Exa MCP 的文本布局与 Parallel 的 `structuredContent` 在各自 provider 模块内解析。配置用法见[用户配置指南](../../website/docs/configuration.md#联网搜索)。
 - `WebFetch` 只接受 HTTP(S) 公网地址：解析并钉扎地址、拒绝非公网答案、只跟随同源重定向，并对响应字节、解码字符和模型可见输出设上限。HTML 转 Markdown 前移除脚本、样式、隐藏节点与活动嵌入内容。
 
 ## 关键路径与序列
