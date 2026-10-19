@@ -14,10 +14,6 @@ on:
       is-release:
         type: boolean
         required: true
-      build-debian:
-        type: boolean
-        required: false
-        default: false
 
 jobs:
   build:
@@ -33,8 +29,8 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             bin_suffix: ".exe"
-          - platform: Ubuntu-amd64
-            os: ubuntu-24.04
+          - platform: linux-amd64
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_suffix: ""
           - platform: macos-aarch64
@@ -95,7 +91,6 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          prefix-key: ${{ matrix.platform }}
           key: ${{ matrix.target }}
           cache-on-failure: true
 
@@ -144,117 +139,4 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: artifacts-${{ matrix.platform }}
-          path: dist/*
-
-  build-debian:
-    name: Build Debian-amd64
-    if: ${{ inputs.build-debian }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Python
-        if: inputs.is-release == true
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-
-      - name: Update release version
-        if: inputs.is-release == true
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          if not re.fullmatch(
-              r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
-              version,
-          ):
-              raise SystemExit(f"invalid release version: {version}")
-
-          def replace_once(path: Path, pattern: str) -> None:
-              content = path.read_text(encoding="utf-8")
-              updated, count = re.subn(
-                  pattern,
-                  lambda match: f'{match.group(1)}{version}"',
-                  content,
-              )
-              if count != 1:
-                  raise SystemExit(f"failed to update version in {path}")
-              path.write_text(updated, encoding="utf-8")
-
-          replace_once(Path("Cargo.toml"), r'(?m)^(version = ")[^"]+"')
-          replace_once(
-              Path("Cargo.lock"),
-              r'(\[\[package\]\]\nname = "teamspeakclaw"\nversion = ")[^"]+"',
-          )
-          PY
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          prefix-key: Debian-amd64
-          key: x86_64-unknown-linux-gnu
-          cache-on-failure: true
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            .docker-cargo/registry
-            .docker-cargo/git
-          key: Debian-amd64-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: Debian-amd64-cargo-
-
-      - name: Build Debian binary
-        shell: bash
-        run: |
-          mkdir -p .docker-cargo/registry .docker-cargo/git
-          docker run --rm \
-            -v "$PWD:/app" -w /app \
-            -v "$PWD/.docker-cargo/registry:/usr/local/cargo/registry" \
-            -v "$PWD/.docker-cargo/git:/usr/local/cargo/git" \
-            rust:1.98.0-bookworm bash -c '
-              apt-get update &&
-              apt-get install -y --no-install-recommends cmake pkg-config libopus-dev &&
-              cargo build --release --locked --target x86_64-unknown-linux-gnu
-            '
-
-      - name: Prepare artifacts
-        shell: bash
-        run: |
-          VERSION="${{ inputs.version }}"
-          PLATFORM="Debian-amd64"
-          STAGING="staging"
-          mkdir -p "$STAGING/config" "$STAGING/models"
-          SRC="target/x86_64-unknown-linux-gnu/release/${{ env.BIN_NAME }}"
-          if [ -f "$SRC" ]; then
-            cp "$SRC" "$STAGING/"
-          else
-            echo "Error: Binary not found at $SRC"
-            exit 1
-          fi
-          cp examples/config/settings.toml "$STAGING/config/"
-          cp examples/config/acl.toml "$STAGING/config/"
-          cp models/README.md models/fetch-models.sh models/fetch-models.ps1 "$STAGING/models/"
-          mkdir -p dist
-          ARCHIVE_NAME="dist/${{ env.PROJECT_NAME }}-v${VERSION}-${PLATFORM}.tar.gz"
-          tar czf "$ARCHIVE_NAME" -C staging .
-          echo "Artifact prepared: $ARCHIVE_NAME"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: artifacts-Debian-amd64
           path: dist/*

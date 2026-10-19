@@ -16,18 +16,10 @@ permissions:
   packages: write
 
 jobs:
-  alpine:
-    uses: ./.github/workflows/reusable-build-alpine.yml
-    with:
-      version: ${{ format('0.0.0-dev.{0}', github.sha) }}
-      is-release: false
-
   docker:
-    needs: alpine
     uses: ./.github/workflows/reusable-docker.yml
     with:
       is-release: false
       is-stable-release: false
       sha-tag: ${{ inputs.sha-tag }}
-      binary-artifact: docker-binary-Alpine-amd64
     secrets: inherit

@@ -13,7 +13,7 @@
 
 `build.rs` 用 `protoc-bin-vendored` 定位 protoc 并交给 `tonic_build` 编译 `proto/voice.proto`，本机无需预装 protoc。`.cargo/config.toml` 设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`，供受此策略约束的构建脚本正常工作，勿删除该配置。
 
-各平台系统依赖：Linux 需 `cmake` 与 `libopus-dev`（运行镜像另需 opus/ffmpeg）；macOS 需 `autoconf automake libtool`。Docker 运行镜像基于 `alpine:3.20`；发布与手动镜像先由 `reusable-build-alpine.yml` 在 `rust:1.98.0-alpine` 中构建 musl 二进制，再用 `Dockerfile` 组装。`Dockerfile` 不包含源码编译，本地构建需要先把 `teamspeakclaw` 放到 Docker context 根目录。具体装包步骤见 CI 各 workflow，见 [ci-cd.md](ci-cd.md)。
+各平台系统依赖：Linux 需 `cmake` 与 `libopus-dev`（运行镜像另需 opus/ffmpeg）；macOS 需 `autoconf automake libtool`；Docker 构建在 `rust:alpine` 内安装 `musl-dev cmake make gcc protoc`（显式 `ENV PROTOC=/usr/bin/protoc`），运行时镜像基于 `alpine:3.20`。具体装包步骤见 CI 各 workflow，见 [ci-cd.md](ci-cd.md)。
 
 ## 开发流程
 

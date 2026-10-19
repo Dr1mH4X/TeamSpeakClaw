@@ -88,11 +88,3 @@ jobs:
     with:
       version: ${{ needs.meta.outputs.version }}
       is-release: false
-      build-debian: true
-
-  alpine:
-    needs: [quality, meta]
-    uses: ./.github/workflows/reusable-build-alpine.yml
-    with:
-      version: ${{ needs.meta.outputs.version }}
-      is-release: false
