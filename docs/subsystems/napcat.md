@@ -29,6 +29,7 @@ NapCat OneBot 11 适配器是 QQ 侧的入站通道：它作为 OneBot 11 WebSoc
 - 动作成功以 `status == "ok"` 且 `retcode == 0` 同时成立为准，失败响应不会当成已送达。
 - 上行 JSON 解析失败或缺必要字段时归为 `Heartbeat`，非文本消息段不进入文本内容，畸形帧不会变成可回复消息。
 - 只有 `config.napcat.enabled` 为真才建立连接，未配置的部署不会尝试外连 NapCat。
+- 连接状态随实际 WebSocket 生命周期变化：断开后为 Reconnecting，新连接安装后为 Connected，supervisor 退出后为 Down。
 
 ## 相关决策
 

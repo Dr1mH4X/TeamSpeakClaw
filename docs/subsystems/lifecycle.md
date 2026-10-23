@@ -26,6 +26,7 @@
 - 尝试次数上限只对未进入过运行会话的启动周期生效；调过 `record_session_started()` 后重连无界，否则运行期断线会被误判为启动失败而退出进程。
 - 所有失败都经 `retry_after_failure()` 记账、选择日志措辞并等待退避，调用方只用 `FailureKind`（Connection/Subscription/Initialization/Running）声明失败来源。
 - `BridgeReadiness` 只在 Service、Stream、Actor 三者全 Up 时 `is_ready()`，组件只上报 Up/Down、读方不改写标志位，否则文本会在语音桥未就绪时误交或漏交。
+- 语音指示器只在 `BridgeReadiness::is_ready()` 为真时显示已连接；配置未启用语音时保持 Disabled，任一组件转 Down 后不再显示绿色。
 - 每条会话结束路径都在返回 `SessionCompletion` 前释放本轮已建立的资源（NapCat 的取消令牌、headless 运行时、TeamSpeak 适配器），否则重连会累积未释放的连接与任务。
 - 连接尝试与退避等待都以根取消令牌为优先分支（`biased`），取消触发时立即结束循环，不进入下一次尝试。
 

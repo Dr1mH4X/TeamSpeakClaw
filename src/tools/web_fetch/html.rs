@@ -4,7 +4,7 @@
 //! 转换受到源字符数和元素深度的限制；对于转换器无法安全表示的页面，
 //! 将以固定的 omission marker 代替。
 
-use scraper::{ElementRef, Html, Node, Selector};
+use scraper::{ElementRef, Html, Node};
 use url::Url;
 
 const MAX_DEPTH: usize = 512;
@@ -152,7 +152,7 @@ impl Renderer<'_> {
             }
             "a" => self.render_link(element, depth),
             "img" => self.render_image(&element),
-            "table" => self.render_table(&element),
+            "table" => self.render_table(&element, depth),
             _ => self.render_children(element, depth),
         }
     }
@@ -195,18 +195,32 @@ impl Renderer<'_> {
         self.out.push(')');
     }
 
-    fn render_table(&mut self, table: &ElementRef<'_>) {
-        let Ok(row_selector) = Selector::parse("tr") else {
-            return;
-        };
-        let Ok(cell_selector) = Selector::parse("th, td") else {
-            return;
-        };
-        let rows = table
-            .select(&row_selector)
-            .map(|row| {
-                row.select(&cell_selector)
-                    .map(|cell| plain_text(&cell, self.base))
+    fn render_table(&mut self, table: &ElementRef<'_>, depth: usize) {
+        let mut rows = Vec::new();
+        for child in table.children().filter_map(ElementRef::wrap) {
+            match child.value().name() {
+                "thead" | "tbody" | "tfoot" => {
+                    if should_skip(&child) {
+                        continue;
+                    }
+                    for row in child.children().filter_map(ElementRef::wrap) {
+                        if row.value().name() == "tr" && !should_skip(&row) {
+                            rows.push((row, depth + 2));
+                        }
+                    }
+                }
+                "tr" if !should_skip(&child) => rows.push((child, depth + 1)),
+                _ => {}
+            }
+        }
+
+        let rows = rows
+            .into_iter()
+            .map(|(row, row_depth)| {
+                row.children()
+                    .filter_map(ElementRef::wrap)
+                    .filter(|cell| matches!(cell.value().name(), "th" | "td") && !should_skip(cell))
+                    .map(|cell| self.render_table_cell(cell, row_depth + 1))
                     .collect::<Vec<_>>()
             })
             .filter(|cells| !cells.is_empty())
@@ -232,6 +246,22 @@ impl Renderer<'_> {
             }
         }
         self.blank_line();
+    }
+
+    fn render_table_cell(&mut self, cell: ElementRef<'_>, depth: usize) -> String {
+        let outer_out = std::mem::take(&mut self.out);
+        let outer_list_stack = std::mem::take(&mut self.list_stack);
+        let outer_pre_depth = self.pre_depth;
+        let outer_pending_space = self.pending_space;
+        self.pre_depth = 0;
+        self.pending_space = false;
+        self.render_children(cell, depth);
+        let text = normalize_output(&self.out).replace('\n', " ");
+        self.out = outer_out;
+        self.list_stack = outer_list_stack;
+        self.pre_depth = outer_pre_depth;
+        self.pending_space = outer_pending_space;
+        text
     }
 
     fn push_text(&mut self, text: &str) {
@@ -315,31 +345,26 @@ fn should_skip(element: &ElementRef<'_>) -> bool {
     {
         return true;
     }
-    element.attr("style").is_some_and(|style| {
-        let style = style
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        style.contains("display:none")
-            || style.contains("visibility:hidden")
-            || style.contains("visibility:collapse")
-    })
+    element.attr("style").is_some_and(style_declares_hidden)
 }
 
-fn plain_text(element: &ElementRef<'_>, base: &Url) -> String {
-    let mut renderer = Renderer {
-        out: String::new(),
-        base,
-        list_stack: Vec::new(),
-        pre_depth: 0,
-        pending_space: false,
-        depth_exceeded: false,
-    };
-    for child in element.children() {
-        renderer.render_node(child, 0);
-    }
-    normalize_output(&renderer.out).replace('\n', " ")
+fn style_declares_hidden(style: &str) -> bool {
+    style.split(';').any(|declaration| {
+        let Some((property, value)) = declaration.split_once(':') else {
+            return false;
+        };
+        let property = property.trim();
+        let value = value.trim();
+        let lower_value = value.to_ascii_lowercase();
+        let value = if lower_value.ends_with("!important") {
+            value[..value.len() - "!important".len()].trim_end()
+        } else {
+            value
+        };
+        (property.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
+            || (property.eq_ignore_ascii_case("visibility")
+                && (value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse")))
+    })
 }
 
 fn resolve_link(base: &Url, raw: &str) -> Option<String> {
@@ -431,6 +456,64 @@ mod tests {
         assert!(text.contains("| Name | Value |"));
         assert!(text.contains("| --- | --- |"));
         assert!(text.contains("| a | b |"));
+    }
+
+    #[test]
+    fn nested_tables_render_inner_content_once() {
+        let mut html = "leaf".to_string();
+        for _ in 0..10 {
+            html = format!("<table><tr><td>{html}</td></tr></table>");
+        }
+
+        let text = convert(&html);
+
+        assert_eq!(text.matches("leaf").count(), 1, "{text}");
+        assert!(text.len() < 4096, "{text}");
+    }
+
+    #[test]
+    fn tables_drop_hidden_sections_rows_cells_and_children() {
+        let text = convert(
+            r#"<table><tbody hidden><tr><td>HIDDEN_BODY</td></tr></tbody></table>
+            <table><tr hidden><td>HIDDEN_ROW</td></tr>
+            <tr aria-hidden="true"><td>HIDDEN_ARIA_ROW</td></tr>
+            <tr><td hidden>HIDDEN_CELL</td>
+            <td style="display: none !important">HIDDEN_STYLE_CELL</td>
+            <td><span hidden>HIDDEN_CHILD</span>
+            <table hidden><tr><td>HIDDEN_TABLE</td></tr></table>VISIBLE</td></tr></table>"#,
+        );
+
+        for hidden in [
+            "HIDDEN_BODY",
+            "HIDDEN_ROW",
+            "HIDDEN_ARIA_ROW",
+            "HIDDEN_CELL",
+            "HIDDEN_STYLE_CELL",
+            "HIDDEN_CHILD",
+            "HIDDEN_TABLE",
+        ] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+        assert!(text.contains("VISIBLE"), "{text}");
+    }
+
+    #[test]
+    fn style_text_that_mentions_hidden_values_does_not_hide_content() {
+        let text = convert(
+            r#"<p style="content: 'display:none; visibility:hidden'">VISIBLE_STYLE_TEXT</p>"#,
+        );
+
+        assert_eq!(text, "VISIBLE_STYLE_TEXT");
+    }
+
+    #[test]
+    fn deeply_nested_tables_share_the_conversion_depth_limit() {
+        let mut html = "leaf".to_string();
+        for _ in 0..MAX_DEPTH {
+            html = format!("<table><tr><td>{html}</td></tr></table>");
+        }
+
+        assert_eq!(convert(&html), OMITTED);
     }
 
     #[test]
