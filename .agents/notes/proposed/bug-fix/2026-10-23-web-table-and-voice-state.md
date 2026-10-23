@@ -10,19 +10,21 @@ Status: proposed
 
 `src/tools/web_fetch/html.rs` 的 `Renderer::render_table` 使用后代选择器收集所有 `tr` 和 `th, td`，再通过 `plain_text` 递归渲染单元格内的嵌套表格。同一子表格会被多条遍历路径重复处理，输出和处理成本随嵌套层数快速增长。`plain_text` 创建新的渲染器并重置深度计数，现有深度限制无法约束跨表格递归。
 
-使用受审提交中的原始转换文件，在独立 Rust 程序中测试合法嵌套表格：4 层、133 字节输入生成 402 字节输出；6 层、199 字节输入生成 3313 字节输出；8 层、265 字节输入生成 26459 字节输出；10 层、331 字节输入生成 206996 字节输出，最后一项在本次环境耗时约 2.23 秒。输入形式是重复嵌套的 `<table><tr><td>`，最内层为一个字符，再按相反顺序闭合标签。耗时受机器和构建模式影响，输出大小是本次复现的确定结果。
+使用受审提交中的原始转换文件，在独立 Rust 程序中测试合法嵌套表格：4 层、133 字节输入生成 402 字节输出；6 层、199 字节输入生成 3313 字节输出；8 层、265 字节输入生成 26459 字节输出；10 层、331 字节输入生成 206996 字节输出，最后一项首次测量耗时约 2.23 秒。输入形式是重复嵌套的 `<table><tr><td>`，最内层为一个字符，再按相反顺序闭合标签。使用相同原始转换文件再次测量，10 层仍生成 206996 字节，但耗时约 0.32 秒；11 层、364 字节输入生成 575478 字节，其中最内层字符重复 17711 次。两轮使用调试构建，未测发布构建性能；耗时受环境影响，不作为固定性能指标。转换文件与受审版本的 SHA-256 一致，输出大小与重复次数可稳定复现。
 
-`src/tools/web_fetch.rs` 的模型输出上限在 HTML 转换完成后生效，无法限制转换阶段的中间分配和同步 CPU 开销。更深嵌套可能造成工作线程长时间阻塞或内存耗尽；本次未执行耗尽内存的测试。
+`src/tools/web_fetch.rs` 的模型输出上限在 HTML 转换完成后生效，无法限制转换阶段的中间分配和同步 CPU 开销。最终送给模型的文本仍有 20000 字符上限，本问题是转换过程的资源开销，不能将转换输出大小当成模型实际收到的大小。工具循环直接等待工具执行，HTTP 请求超时不能中断其后的同步 HTML 转换。触发前提是调用者获准使用 web_fetch，且实际抓取到含此类表格的公网 HTML。更深嵌套可能造成工作线程长时间阻塞或内存耗尽；本次未执行耗尽内存的测试。
 
 ### 隐藏表格内容仍被输出
 
 `Renderer::render_table` 收集行和单元格时未调用 `should_skip`，`plain_text` 又直接从单元格的子节点开始处理。因此行、单元格以及行组的隐藏属性不会参与过滤。
 
-最小复现输入为 `<table><tr hidden><td>HIDDEN_ROW</td></tr><tr><td hidden>HIDDEN_CELL</td><td>VISIBLE</td></tr></table>`。实际输出同时包含 `HIDDEN_ROW`、`HIDDEN_CELL` 和 `VISIBLE`。`<table><tbody hidden><tr><td>HIDDEN_BODY</td></tr></tbody></table>` 同样输出 `HIDDEN_BODY`。这些内容随后会进入模型上下文，隐藏内容清洗未达到预期。
+最小复现输入为 `<table><tr hidden><td>HIDDEN_ROW</td></tr><tr><td hidden>HIDDEN_CELL</td><td>VISIBLE</td></tr></table>`。实际输出同时包含 `HIDDEN_ROW`、`HIDDEN_CELL` 和 `VISIBLE`。`<table><tbody hidden><tr><td>HIDDEN_BODY</td></tr></tbody></table>` 同样输出 `HIDDEN_BODY`。再次复核还确认 aria-hidden 行、display:none 单元格及可见表格内部的隐藏嵌套表格存在同类泄漏；普通隐藏 div、顶层隐藏表格及单元格内隐藏 span 的对照测试均成功过滤文字。这些内容随后会进入模型上下文，隐藏内容清洗未达到预期；本次只证明文本泄漏，未验证模型是否会服从其中的指令。
 
 ### 语音关闭时显示已连接
 
 `src/adapter.rs` 的 `run_connected_session` 在 `headless::Runtime::start` 返回成功后无条件调用 `ui.voice_connected()`。`src/adapter/headless.rs` 的 `Runtime::start` 在 STT、TTS、omni 和语音回放全部关闭时也会返回成功的空运行时，因此先前设置的禁用状态立即被覆盖。
+
+明确触发配置为关闭 STT、TTS、omni，并显式设置 voice_replay.enabled=false。语音回放默认开启，因此不能将此触发条件描述为默认配置；配置校验允许全部关闭。
 
 启用语音时，运行时成功返回也不等于后台语音桥已经连接或订阅成功。状态显示应跟随真实桥就绪状态，避免连接中和断流重试期间持续显示已连接。
 
