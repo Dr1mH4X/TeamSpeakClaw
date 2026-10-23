@@ -3,5 +3,5 @@ pub mod event;
 pub mod types;
 pub mod ws;
 
-pub(crate) use ws::ConnectionExit;
 pub use ws::NapCatAdapter;
+pub(crate) use ws::{ConnectionExit, NapCatConnectionState};

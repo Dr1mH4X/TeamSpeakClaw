@@ -285,6 +285,10 @@ impl Ui {
         self.set_link(Link::Nc, LinkState::Connected);
     }
 
+    pub(crate) fn nc_reconnecting(&self) {
+        self.set_link(Link::Nc, LinkState::Reconnecting);
+    }
+
     pub(crate) fn nc_down(&self) {
         self.set_link(Link::Nc, LinkState::Down);
     }

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -276,9 +277,20 @@ struct BridgeReadinessInner {
 
 /// 语音桥组件就绪的唯一归属：三者全 Up 才算就绪；订阅流转入 Up 时顺带置位
 /// 「本轮尝试内建立过订阅流」闩，供桥接重试循环取走（取走即清零）。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct BridgeReadiness {
     inner: Arc<BridgeReadinessInner>,
+    ready_tx: watch::Sender<bool>,
+}
+
+impl Default for BridgeReadiness {
+    fn default() -> Self {
+        let (ready_tx, _) = watch::channel(false);
+        Self {
+            inner: Arc::new(BridgeReadinessInner::default()),
+            ready_tx,
+        }
+    }
 }
 
 impl BridgeReadiness {
@@ -295,10 +307,16 @@ impl BridgeReadiness {
                 .stream_established_since_retry
                 .store(true, Ordering::Release);
         }
+        self.publish_ready();
     }
 
     pub(crate) fn set_down(&self, component: BridgeComponent) {
         self.flag(component).store(false, Ordering::Release);
+        self.publish_ready();
+    }
+
+    pub(crate) fn ready_receiver(&self) -> watch::Receiver<bool> {
+        self.ready_tx.subscribe()
     }
 
     /// 取走「本轮尝试内建立过订阅流」闩：Stream 每次转入 Up 都会重新置位。
@@ -314,6 +332,10 @@ impl BridgeReadiness {
             BridgeComponent::Stream => &self.inner.stream_up,
             BridgeComponent::Actor => &self.inner.actor_up,
         }
+    }
+
+    fn publish_ready(&self) {
+        self.ready_tx.send_replace(self.is_ready());
     }
 }
 
@@ -418,6 +440,22 @@ mod tests {
             readiness.set_up(component);
             assert!(readiness.is_ready());
         }
+    }
+
+    #[tokio::test]
+    async fn bridge_readiness_publishes_aggregate_state() {
+        let readiness = BridgeReadiness::default();
+        let mut ready = readiness.ready_receiver();
+
+        readiness.set_up(BridgeComponent::Service);
+        readiness.set_up(BridgeComponent::Stream);
+        readiness.set_up(BridgeComponent::Actor);
+        ready.changed().await.unwrap();
+        assert!(*ready.borrow_and_update());
+
+        readiness.set_down(BridgeComponent::Stream);
+        ready.changed().await.unwrap();
+        assert!(!*ready.borrow_and_update());
     }
 
     #[tokio::test(start_paused = true)]

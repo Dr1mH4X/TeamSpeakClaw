@@ -56,6 +56,14 @@ pub(crate) enum ConnectionExit {
     Disconnected,
 }
 
+/// NapCat 当前连接状态，供会话层同步状态栏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NapCatConnectionState {
+    Connected,
+    Reconnecting,
+    Down,
+}
+
 /// 将 connection_loop 的失败标记映射为 supervisor 退出信号：正常退出为 None，异常退出为 Some
 fn supervisor_exit_signal(failed: bool) -> Option<ConnectionExit> {
     failed.then_some(ConnectionExit::Disconnected)
@@ -109,6 +117,7 @@ pub struct NapCatAdapter {
     active_generation: AtomicU64,
     last_signaled_generation: AtomicU64,
     runtime_task: Mutex<Option<JoinHandle<()>>>,
+    connection_tx: watch::Sender<NapCatConnectionState>,
     /// supervisor 退出状态通道：None 表示正常（运行中或正常关闭），Some 表示异常退出
     supervisor_tx: watch::Sender<Option<ConnectionExit>>,
 }
@@ -154,6 +163,7 @@ impl NapCatAdapter {
         let (sink, stream) = ws_stream.split();
         let (event_tx, _) = broadcast::channel::<NcEvent>(256);
         let (reconnect_tx, reconnect_rx) = mpsc::unbounded_channel::<u64>();
+        let (connection_tx, _) = watch::channel(NapCatConnectionState::Connected);
         let (supervisor_tx, _) = watch::channel(None);
 
         let adapter = Arc::new(Self {
@@ -167,6 +177,7 @@ impl NapCatAdapter {
             active_generation: AtomicU64::new(1),
             last_signaled_generation: AtomicU64::new(0),
             runtime_task: Mutex::new(None),
+            connection_tx,
             supervisor_tx,
         });
 
@@ -208,7 +219,9 @@ impl NapCatAdapter {
             let Some(adapter) = weak.upgrade() else {
                 return;
             };
-            adapter.mark_disconnected(generation).await;
+            if adapter.mark_disconnected(generation).await && !shutdown.is_cancelled() {
+                adapter.set_connection_state(NapCatConnectionState::Reconnecting);
+            }
             drop(adapter);
 
             info!("NapCat reconnecting...");
@@ -233,6 +246,7 @@ impl NapCatAdapter {
                                 break 'runtime;
                             }
                         };
+                        adapter.set_connection_state(NapCatConnectionState::Connected);
                         drop(adapter);
                         stream = next_stream;
                         retry.record_session_started();
@@ -261,6 +275,7 @@ impl NapCatAdapter {
 
         if let Some(adapter) = weak.upgrade() {
             adapter.mark_disconnected(generation).await;
+            adapter.set_connection_state(NapCatConnectionState::Down);
             adapter.report_supervisor_exit(failed);
         }
     }
@@ -400,7 +415,7 @@ impl NapCatAdapter {
         Ok(generation)
     }
 
-    async fn mark_disconnected(&self, generation: u64) {
+    async fn mark_disconnected(&self, generation: u64) -> bool {
         let disconnected = {
             let mut writer = self.writer.lock().await;
             if self.active_generation.load(Ordering::Acquire) != generation {
@@ -413,6 +428,7 @@ impl NapCatAdapter {
         if disconnected {
             close_pending_requests(&self.pending);
         }
+        disconnected
     }
 
     fn signal_disconnect(&self, generation: u64) {
@@ -569,6 +585,14 @@ impl NapCatAdapter {
         self.event_tx.subscribe()
     }
 
+    pub(crate) fn connection_state(&self) -> watch::Receiver<NapCatConnectionState> {
+        self.connection_tx.subscribe()
+    }
+
+    fn set_connection_state(&self, state: NapCatConnectionState) {
+        self.connection_tx.send_replace(state);
+    }
+
     /// 上报 supervisor 退出状态：异常退出置位失败信号，正常关闭复位
     fn report_supervisor_exit(&self, failed: bool) {
         let _ = self.supervisor_tx.send(supervisor_exit_signal(failed));
@@ -583,6 +607,7 @@ impl NapCatAdapter {
         self.shutdown.cancel();
         let generation = self.active_generation.load(Ordering::Acquire);
         self.mark_disconnected(generation).await;
+        self.set_connection_state(NapCatConnectionState::Down);
 
         let runtime_task = self.runtime_task.lock().await.take();
         if let Some(runtime_task) = runtime_task {
