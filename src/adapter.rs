@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -288,6 +289,19 @@ async fn run_connected_session(
         ui.voice_disabled();
     }
     let mut voice_phase = voice_enabled.then(|| ui.phase("voice", "starting"));
+    let mut status_tasks: Vec<JoinHandle<()>> = Vec::new();
+    if voice_enabled {
+        status_tasks.push(tokio::spawn(observe_voice_bridge(
+            ui.clone(),
+            voice_bridge_state.clone(),
+        )));
+    }
+    if let Some(nc_adapter) = &nc_adapter {
+        status_tasks.push(tokio::spawn(observe_napcat_connection(
+            ui.clone(),
+            nc_adapter.connection_state(),
+        )));
+    }
     let headless_runtime = match headless::Runtime::start(
         context.config.clone(),
         context.gate.clone(),
@@ -304,13 +318,13 @@ async fn run_connected_session(
     .await
     {
         Ok(runtime) => {
-            ui.voice_connected();
             if let Some(phase) = voice_phase.take() {
                 drop(phase);
             }
             runtime
         }
         Err(error) => {
+            stop_status_tasks(&mut status_tasks).await;
             ui.voice_down();
             if let Some(phase) = voice_phase.take() {
                 phase.fail(format!("failed · {error}"));
@@ -348,6 +362,7 @@ async fn run_connected_session(
         }
     };
 
+    stop_status_tasks(&mut status_tasks).await;
     shutdown_napcat(nc_adapter.as_deref(), &napcat_shutdown).await;
     headless_runtime.shutdown().await;
     disconnect_adapter(&adapter).await;
@@ -363,6 +378,43 @@ async fn run_connected_session(
     }
 
     SessionCompletion::running(result)
+}
+
+async fn observe_voice_bridge(ui: Ui, readiness: lifecycle::BridgeReadiness) {
+    let mut ready = readiness.ready_receiver();
+    loop {
+        if *ready.borrow_and_update() {
+            ui.voice_connected();
+        } else if readiness.has_been_ready() {
+            ui.voice_down();
+        }
+        if ready.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn observe_napcat_connection(
+    ui: Ui,
+    mut state: watch::Receiver<napcat::NapCatConnectionState>,
+) {
+    loop {
+        match *state.borrow_and_update() {
+            napcat::NapCatConnectionState::Connected => ui.nc_connected(),
+            napcat::NapCatConnectionState::Reconnecting => ui.nc_reconnecting(),
+            napcat::NapCatConnectionState::Down => ui.nc_down(),
+        }
+        if state.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn stop_status_tasks(tasks: &mut Vec<JoinHandle<()>>) {
+    for task in tasks.drain(..) {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 /// 等待 NapCat supervisor 异常退出信号；NapCat 禁用时永不触发
