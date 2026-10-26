@@ -14,11 +14,11 @@ Status: implemented
 
 `src/tools/web_fetch/html.rs` 的 `Renderer::render_table` 只遍历当前表格直接拥有的 `thead`、`tbody`、`tfoot` 或 `tr`，只遍历当前行直接拥有的 `th`、`td`。行组、行和单元格都经过 `should_skip`，嵌套表格的文本因此只进入它真正所属的单元格一次。
 
-单元格内容由同一个 `Renderer` 渲染，表格结构逐层传递累计深度；嵌套表格不再创建独立渲染器。单元格结果压平为一行并转义 `|`，所以 GFM 不支持的嵌套表格格式退化为内层文本，同时保留 `MAX_DEPTH` 对跨表格递归的约束。
+单元格内容由同一个 `Renderer` 渲染，表格结构逐层传递累计深度。单元格内的嵌套表格按纯文本展开，只保留各单元格的内容，不输出 GFM 定界符与分隔行；外层单元格统一转义字面 `|`，同时保留 `MAX_DEPTH` 对跨表格递归的约束。
 
-`style_declares_hidden` 按分号拆分样式声明，再按属性和值识别 `display:none`、`visibility:hidden` 与 `visibility:collapse`。字符串内容中提到这些值不会误删可见节点。
+`style_declares_hidden` 按 CSS 词法切分声明：引号、转义、函数括号与注释内的分号不参与分隔。`display` 与 `visibility` 按 `!important` 和后写优先确定有效值，再识别 `display:none`、`visibility:hidden` 与 `visibility:collapse`。字符串内容中提到这些值不会误删可见节点。
 
-`src/adapter.rs` 的 `run_connected_session` 通过观察任务同步连接状态。语音状态只在 `BridgeReadiness` 的 Service、Stream、Actor 全部就绪时显示已连接；NapCat 状态跟随 `NapCatConnectionState` 的 Connected、Reconnecting 与 Down，并在会话结束时回收观察任务。
+`src/adapter.rs` 的 `run_connected_session` 通过观察任务同步连接状态。语音状态只在 `BridgeReadiness` 的 Service、Stream、Actor 全部就绪时显示已连接；`has_been_ready` 闩让观察者补上订阅前发生的就绪→断开转换，启动期未就绪时保持 Connecting。`BridgeReadiness` 的组件标志更新、聚合快照与发布在同一把锁内串行化，旧快照不会覆盖新快照。NapCat 状态跟随 `NapCatConnectionState` 的 Connected、Reconnecting 与 Down，并在会话结束时回收观察任务。
 
 网页清洗的提供方归一化、公网抓取及 ACL 决策见[网页搜索与抓取的不可信内容渲染](../../implemented/feature/2026-10-18-web-fetch-and-untrusted-web-results.md)。
 
@@ -38,8 +38,8 @@ Status: implemented
 
 简单表格继续输出 GFM 表格。嵌套表格不输出为嵌套 Markdown 表格，内层文本在所属单元格中出现一次；`colspan` 与 `rowspan` 仍不展开。超过 `MAX_DEPTH` 的文档整体替换为固定 omission marker。
 
-隐藏行组、行、单元格和子元素不再进入转换结果，样式判定只识别实际声明。连接状态不再由运行时对象或外层会话生命周期推断，旧 NapCat 连接代次也不能覆盖新连接状态。
+隐藏行组、行、单元格和子元素被排除在转换结果之外，样式判定只识别实际生效的声明。连接状态由 `BridgeReadiness` 与 `NapCatConnectionState` 决定，旧 NapCat 连接代次不能覆盖新连接状态。
 
 ## Testing
 
-`tools::web_fetch::html::tests` 覆盖简单表格、10 层嵌套表格只出现一次内层文本、隐藏行组/行/单元格/子节点、CSS 文本不被误判为隐藏声明，以及深层嵌套表格触发共享深度限制。`adapter::lifecycle::tests` 覆盖语音桥聚合就绪状态通知；全量测试和 clippy 质量门通过。
+`tools::web_fetch::html::tests` 覆盖简单表格、10 层嵌套表格只出现一次内层文本、嵌套表格按纯文本展开、隐藏行组/行/单元格/子节点、引号与注释中的分号不参与声明分隔、`display`/`visibility` 的有效声明优先级、CSS 文本不被误判为隐藏声明，以及深层嵌套表格触发共享深度限制。`adapter::lifecycle::tests` 覆盖语音桥聚合就绪状态通知与就绪闩 `has_been_ready`；全量测试和 clippy 质量门通过。

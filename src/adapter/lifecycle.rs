@@ -12,7 +12,7 @@
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -273,6 +273,8 @@ struct BridgeReadinessInner {
     stream_up: AtomicBool,
     actor_up: AtomicBool,
     stream_established_since_retry: AtomicBool,
+    ever_ready: AtomicBool,
+    publish_lock: Mutex<()>,
 }
 
 /// 语音桥组件就绪的唯一归属：三者全 Up 才算就绪；订阅流转入 Up 时顺带置位
@@ -301,6 +303,7 @@ impl BridgeReadiness {
     }
 
     pub(crate) fn set_up(&self, component: BridgeComponent) {
+        let _guard = self.lock_updates();
         self.flag(component).store(true, Ordering::Release);
         if component == BridgeComponent::Stream {
             self.inner
@@ -311,12 +314,19 @@ impl BridgeReadiness {
     }
 
     pub(crate) fn set_down(&self, component: BridgeComponent) {
+        let _guard = self.lock_updates();
         self.flag(component).store(false, Ordering::Release);
         self.publish_ready();
     }
 
     pub(crate) fn ready_receiver(&self) -> watch::Receiver<bool> {
         self.ready_tx.subscribe()
+    }
+
+    /// 聚合状态是否达到过就绪。观察者在订阅前可能错过就绪与断开的转换，
+    /// 用这个闩补齐断开状态，同时避免把启动中的未就绪误报成 Down。
+    pub(crate) fn has_been_ready(&self) -> bool {
+        self.inner.ever_ready.load(Ordering::Acquire)
     }
 
     /// 取走「本轮尝试内建立过订阅流」闩：Stream 每次转入 Up 都会重新置位。
@@ -334,8 +344,20 @@ impl BridgeReadiness {
         }
     }
 
+    /// 更新、聚合快照与发布在同一把锁内串行化：较早取得的快照不能晚于较新的快照发布。
     fn publish_ready(&self) {
-        self.ready_tx.send_replace(self.is_ready());
+        let ready = self.is_ready();
+        if ready {
+            self.inner.ever_ready.store(true, Ordering::Release);
+        }
+        self.ready_tx.send_replace(ready);
+    }
+
+    fn lock_updates(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.inner
+            .publish_lock
+            .lock()
+            .expect("bridge readiness lock poisoned")
     }
 }
 
@@ -456,6 +478,26 @@ mod tests {
         readiness.set_down(BridgeComponent::Stream);
         ready.changed().await.unwrap();
         assert!(!*ready.borrow_and_update());
+    }
+
+    #[test]
+    fn readiness_latch_covers_transitions_missed_before_subscription() {
+        let readiness = BridgeReadiness::default();
+        assert!(!readiness.has_been_ready());
+
+        for component in [
+            BridgeComponent::Service,
+            BridgeComponent::Stream,
+            BridgeComponent::Actor,
+        ] {
+            readiness.set_up(component);
+        }
+        assert!(readiness.has_been_ready());
+
+        readiness.set_down(BridgeComponent::Actor);
+        let ready = readiness.ready_receiver();
+        assert!(!*ready.borrow());
+        assert!(readiness.has_been_ready());
     }
 
     #[tokio::test(start_paused = true)]

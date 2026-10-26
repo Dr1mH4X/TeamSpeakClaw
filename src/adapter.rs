@@ -293,7 +293,7 @@ async fn run_connected_session(
     if voice_enabled {
         status_tasks.push(tokio::spawn(observe_voice_bridge(
             ui.clone(),
-            voice_bridge_state.ready_receiver(),
+            voice_bridge_state.clone(),
         )));
     }
     if let Some(nc_adapter) = &nc_adapter {
@@ -380,20 +380,17 @@ async fn run_connected_session(
     SessionCompletion::running(result)
 }
 
-async fn observe_voice_bridge(ui: Ui, mut ready: watch::Receiver<bool>) {
-    let mut was_ready = *ready.borrow_and_update();
-    if was_ready {
-        ui.voice_connected();
-    }
-
-    while ready.changed().await.is_ok() {
-        let is_ready = *ready.borrow_and_update();
-        if is_ready {
+async fn observe_voice_bridge(ui: Ui, readiness: lifecycle::BridgeReadiness) {
+    let mut ready = readiness.ready_receiver();
+    loop {
+        if *ready.borrow_and_update() {
             ui.voice_connected();
-        } else if was_ready {
+        } else if readiness.has_been_ready() {
             ui.voice_down();
         }
-        was_ready = is_ready;
+        if ready.changed().await.is_err() {
+            break;
+        }
     }
 }
 

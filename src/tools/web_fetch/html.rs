@@ -26,6 +26,7 @@ pub(crate) fn html_to_markdown(html: &str, base: &Url, max_input_chars: usize) -
         pre_depth: 0,
         pending_space: false,
         depth_exceeded: false,
+        in_table_cell: false,
     };
     let document = Html::parse_document(&source);
     renderer.render_element(document.root_element(), 0);
@@ -53,6 +54,7 @@ struct Renderer<'a> {
     pre_depth: usize,
     pending_space: bool,
     depth_exceeded: bool,
+    in_table_cell: bool,
 }
 
 impl Renderer<'_> {
@@ -196,30 +198,16 @@ impl Renderer<'_> {
     }
 
     fn render_table(&mut self, table: &ElementRef<'_>, depth: usize) {
-        let mut rows = Vec::new();
-        for child in table.children().filter_map(ElementRef::wrap) {
-            match child.value().name() {
-                "thead" | "tbody" | "tfoot" => {
-                    if should_skip(&child) {
-                        continue;
-                    }
-                    for row in child.children().filter_map(ElementRef::wrap) {
-                        if row.value().name() == "tr" && !should_skip(&row) {
-                            rows.push((row, depth + 2));
-                        }
-                    }
-                }
-                "tr" if !should_skip(&child) => rows.push((child, depth + 1)),
-                _ => {}
-            }
+        if self.in_table_cell {
+            self.render_table_text(table, depth);
+            return;
         }
 
-        let rows = rows
+        let rows = table_rows(table, depth)
             .into_iter()
             .map(|(row, row_depth)| {
-                row.children()
-                    .filter_map(ElementRef::wrap)
-                    .filter(|cell| matches!(cell.value().name(), "th" | "td") && !should_skip(cell))
+                table_cells(&row)
+                    .into_iter()
                     .map(|cell| self.render_table_cell(cell, row_depth + 1))
                     .collect::<Vec<_>>()
             })
@@ -248,19 +236,44 @@ impl Renderer<'_> {
         self.blank_line();
     }
 
+    /// 表格单元格内的嵌套表格压平为纯文本：保留各单元格的文字，不输出
+    /// GFM 定界符与分隔行，外层单元格统一转义字面 `|`。
+    fn render_table_text(&mut self, table: &ElementRef<'_>, depth: usize) {
+        let mut rendered = false;
+        for (row, row_depth) in table_rows(table, depth) {
+            for cell in table_cells(&row) {
+                let text = self.render_table_cell(cell, row_depth + 1);
+                if text.is_empty() {
+                    continue;
+                }
+                if !self.out.is_empty() && !self.out.ends_with(' ') && !self.out.ends_with('\n') {
+                    self.out.push(' ');
+                }
+                self.out.push_str(&text);
+                rendered = true;
+            }
+        }
+        if rendered {
+            self.pending_space = true;
+        }
+    }
+
     fn render_table_cell(&mut self, cell: ElementRef<'_>, depth: usize) -> String {
         let outer_out = std::mem::take(&mut self.out);
         let outer_list_stack = std::mem::take(&mut self.list_stack);
         let outer_pre_depth = self.pre_depth;
         let outer_pending_space = self.pending_space;
+        let outer_in_table_cell = self.in_table_cell;
         self.pre_depth = 0;
         self.pending_space = false;
+        self.in_table_cell = true;
         self.render_children(cell, depth);
         let text = normalize_output(&self.out).replace('\n', " ");
         self.out = outer_out;
         self.list_stack = outer_list_stack;
         self.pre_depth = outer_pre_depth;
         self.pending_space = outer_pending_space;
+        self.in_table_cell = outer_in_table_cell;
         text
     }
 
@@ -313,6 +326,33 @@ impl Renderer<'_> {
     }
 }
 
+fn table_rows<'a>(table: &ElementRef<'a>, depth: usize) -> Vec<(ElementRef<'a>, usize)> {
+    let mut rows = Vec::new();
+    for child in table.child_elements() {
+        match child.value().name() {
+            "thead" | "tbody" | "tfoot" => {
+                if should_skip(&child) {
+                    continue;
+                }
+                for row in child.child_elements() {
+                    if row.value().name() == "tr" && !should_skip(&row) {
+                        rows.push((row, depth + 2));
+                    }
+                }
+            }
+            "tr" if !should_skip(&child) => rows.push((child, depth + 1)),
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn table_cells<'a>(row: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
+    row.child_elements()
+        .filter(|cell| matches!(cell.value().name(), "th" | "td") && !should_skip(cell))
+        .collect()
+}
+
 fn should_skip(element: &ElementRef<'_>) -> bool {
     let name = element.value().name();
     if matches!(
@@ -349,22 +389,149 @@ fn should_skip(element: &ElementRef<'_>) -> bool {
 }
 
 fn style_declares_hidden(style: &str) -> bool {
-    style.split(';').any(|declaration| {
+    let mut display = None;
+    let mut visibility = None;
+
+    for declaration in StyleDeclarations::new(style) {
         let Some((property, value)) = declaration.split_once(':') else {
-            return false;
+            continue;
         };
         let property = property.trim();
-        let value = value.trim();
-        let lower_value = value.to_ascii_lowercase();
-        let value = if lower_value.ends_with("!important") {
-            value[..value.len() - "!important".len()].trim_end()
-        } else {
-            value
-        };
-        (property.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
-            || (property.eq_ignore_ascii_case("visibility")
-                && (value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse")))
-    })
+        let (value, important) = strip_important(value.trim());
+        if property.eq_ignore_ascii_case("display") {
+            record_declaration(&mut display, value.eq_ignore_ascii_case("none"), important);
+        } else if property.eq_ignore_ascii_case("visibility") {
+            record_declaration(
+                &mut visibility,
+                value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse"),
+                important,
+            );
+        }
+    }
+
+    display.is_some_and(|declaration| declaration.hidden)
+        || visibility.is_some_and(|declaration| declaration.hidden)
+}
+
+/// 同名属性的有效声明：`!important` 压过普通声明，同优先级下后写覆盖先写。
+#[derive(Clone, Copy)]
+struct EffectiveDeclaration {
+    hidden: bool,
+    important: bool,
+}
+
+fn record_declaration(slot: &mut Option<EffectiveDeclaration>, hidden: bool, important: bool) {
+    let replace = match *slot {
+        None => true,
+        Some(current) => important || !current.important,
+    };
+    if replace {
+        *slot = Some(EffectiveDeclaration { hidden, important });
+    }
+}
+
+fn strip_important(value: &str) -> (&str, bool) {
+    let value = value.trim_end();
+    let Some(position) = value.rfind('!') else {
+        return (value, false);
+    };
+    let (head, marker) = value.split_at(position);
+    if marker[1..].trim().eq_ignore_ascii_case("important") {
+        (head.trim_end(), true)
+    } else {
+        (value, false)
+    }
+}
+
+/// 按 CSS 声明边界切分内联样式。引号、转义、函数括号与注释内的分号
+/// 不属于声明分隔符；注释替换为空格，避免把相邻 token 拼成一个值。
+struct StyleDeclarations<'a> {
+    style: &'a str,
+    offset: usize,
+}
+
+impl<'a> StyleDeclarations<'a> {
+    fn new(style: &'a str) -> Self {
+        Self { style, offset: 0 }
+    }
+}
+
+impl Iterator for StyleDeclarations<'_> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        while self.offset <= self.style.len() {
+            let start = self.offset;
+            let mut declaration = String::new();
+            let mut quote = None;
+            let mut escaped = false;
+            let mut paren_depth = 0usize;
+            let mut in_comment = false;
+            let mut chars = self.style[start..].char_indices().peekable();
+            let mut end = self.style.len();
+
+            while let Some((index, ch)) = chars.next() {
+                if in_comment {
+                    if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                        chars.next();
+                        in_comment = false;
+                    }
+                    continue;
+                }
+                if escaped {
+                    declaration.push(ch);
+                    escaped = false;
+                    continue;
+                }
+                if let Some(quote_char) = quote {
+                    declaration.push(ch);
+                    if ch == '\\' {
+                        escaped = true;
+                    } else if ch == quote_char {
+                        quote = None;
+                    }
+                    continue;
+                }
+                match ch {
+                    '\\' => {
+                        declaration.push(ch);
+                        escaped = true;
+                    }
+                    '\'' | '"' => {
+                        quote = Some(ch);
+                        declaration.push(ch);
+                    }
+                    '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                        chars.next();
+                        in_comment = true;
+                        declaration.push(' ');
+                    }
+                    '(' => {
+                        paren_depth += 1;
+                        declaration.push(ch);
+                    }
+                    ')' => {
+                        paren_depth = paren_depth.saturating_sub(1);
+                        declaration.push(ch);
+                    }
+                    ';' if paren_depth == 0 => {
+                        end = start + index;
+                        self.offset = end + 1;
+                        break;
+                    }
+                    _ => declaration.push(ch),
+                }
+            }
+
+            if end == self.style.len() {
+                self.offset = self.style.len() + 1;
+            }
+            if !declaration.trim().is_empty() {
+                return Some(declaration);
+            }
+        }
+        None
+    }
 }
 
 fn resolve_link(base: &Url, raw: &str) -> Option<String> {
@@ -472,6 +639,17 @@ mod tests {
     }
 
     #[test]
+    fn nested_tables_render_as_text_inside_the_owning_cell() {
+        let text = convert(
+            r#"<table><tr><td>OUTER<table><tr><td>INNER_ONE</td><td>INNER_TWO</td></tr></table>TAIL</td></tr></table>"#,
+        );
+
+        assert!(text.contains("OUTER INNER_ONE INNER_TWO TAIL"), "{text}");
+        assert!(!text.contains("\\|"), "{text}");
+        assert_eq!(text.matches(" --- ").count(), 1, "{text}");
+    }
+
+    #[test]
     fn tables_drop_hidden_sections_rows_cells_and_children() {
         let text = convert(
             r#"<table><tbody hidden><tr><td>HIDDEN_BODY</td></tr></tbody></table>
@@ -504,6 +682,42 @@ mod tests {
         );
 
         assert_eq!(text, "VISIBLE_STYLE_TEXT");
+    }
+
+    #[test]
+    fn quoted_semicolons_do_not_create_hidden_declarations() {
+        let text = convert(
+            r#"<p style="font-family: 'a; visibility:hidden; b'">VISIBLE_QUOTE</p>
+            <p style="background: url('x;visibility:hidden'); color: red">VISIBLE_URL</p>
+            <p style="color: red /* ; visibility:hidden */">VISIBLE_COMMENT</p>"#,
+        );
+
+        for visible in ["VISIBLE_QUOTE", "VISIBLE_URL", "VISIBLE_COMMENT"] {
+            assert!(text.contains(visible), "{text}");
+        }
+    }
+
+    #[test]
+    fn effective_visibility_declarations_follow_css_precedence() {
+        let text = convert(
+            r#"<p style="display:none; display:block">VISIBLE_DISPLAY</p>
+            <p style="visibility:hidden; visibility:visible">VISIBLE_VISIBILITY</p>
+            <p style="display:none; display:block !important">VISIBLE_IMPORTANT</p>
+            <p style="display:none !important; display:block !important">VISIBLE_BOTH_IMPORTANT</p>
+            <p style="display:none !important; display:block">HIDDEN_IMPORTANT</p>
+            <p style="/* x */ display:none">HIDDEN_COMMENT_DECL</p>"#,
+        );
+
+        for visible in [
+            "VISIBLE_DISPLAY",
+            "VISIBLE_VISIBILITY",
+            "VISIBLE_IMPORTANT",
+            "VISIBLE_BOTH_IMPORTANT",
+        ] {
+            assert!(text.contains(visible), "{text}");
+        }
+        assert!(!text.contains("HIDDEN_IMPORTANT"), "{text}");
+        assert!(!text.contains("HIDDEN_COMMENT_DECL"), "{text}");
     }
 
     #[test]
