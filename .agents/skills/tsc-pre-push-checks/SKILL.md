@@ -26,7 +26,7 @@ git diff --stat origin/main...HEAD
 2. **按改动面选最小证据**（每个行为改动都要有「回归时会失败」的那条测试或检查）：
    - `src/` 中某个模块的行为：定向跑拥有它的测试，例如 `cargo test --locked <测试名或模块前缀>`；改动共享契约时再补相邻模块的测试。
    - 上下文、回合、并发门禁、生命周期、音频与语音桥、重连：先按 [docs/defensive-patterns.md](../../../docs/defensive-patterns.md) 的清单逐条自查，再跑这些模块的定向测试，最后跑一次 `cargo test --all-targets --locked`。
-   - `docs/`、`.agents/notes/`、`AGENTS.md`、`CONTRIBUTING.md`：仓库内相对链接与路径是否解析（见下面验证命令），笔记还要按[核查清单](../../notes/README.md#核查清单)过一遍。
+   - `docs/`、`.agents/notes/`、`AGENTS.md`、`CONTRIBUTING.md`：仓库内相对链接与路径是否解析（见下面验证命令），笔记还要按[核查清单](../../notes/AGENTS.md#核查清单)过一遍。
    - `.github/workflows/`、`Dockerfile`、`.cargo/`：本机无法复现的，推到 PR 后看 `gh pr checks`，不要在本地假装验证过。
    - `examples/config/`、`website/docs/` 与配置键：确认三处同步（示例配置、中文文档、英文镜像）。
 3. **只在必要时做全量排练**：用户明确要求、正在诊断 CI 失败、或改动跨到没有更窄集合可信时才跑 `cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --all-targets --locked`。不要因为「反正要提交」重复一遍刚通过的检查。

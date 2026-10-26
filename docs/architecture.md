@@ -2,7 +2,7 @@
 
 TeamSpeakClaw 是 Rust 编写的单二进制 `teamspeakclaw` 聊天机器人，集成 TeamSpeak 无头客户端与 NapCat OneBot 11（QQ）两族入站适配器，通过 OpenAI 兼容接口驱动 LLM 工具调用。
 
-本文是索引与拓扑：分层规则、入口流、子系统一览与组件图。每个子系统的契约、关键序列与不变量见其专页；取舍的理由与代价见 [.agents/notes/](../.agents/notes/README.md)，目录级规则只出现在模块 `AGENTS.md` 中。
+本文是索引与拓扑：分层规则、入口流、子系统一览与组件图。每个子系统的契约、关键序列与不变量见其专页；取舍的理由与代价见 [.agents/notes/](../.agents/notes/AGENTS.md)，目录级规则只出现在模块 `AGENTS.md` 中。
 
 ## 分层规范
 

@@ -12,7 +12,7 @@ Status: implemented
 - 类型与函数改名：`Skill` → `Tool`，`SkillRegistry` → `ToolRegistry`，`SkillFactory` → `ToolFactory`，`SkillContext` → `ToolContext`，`DEFAULT_SKILLS` → `DEFAULT_TOOLS`，`get_allowed_skills` → `get_allowed_tools`，`is_skill_allowed` → `is_tool_allowed`，`list_skills` → `list_tools`，`execute_skill` → `execute_tool`；`ActiveTurn` 之外的音频片段类型 `SkillClip` → `ToolClip`，参数 `skill_scoped` → `tool_scoped`。`TurnRequest` 的 `allowed_skills` 字段与各调用点的同名局部变量一并改为 `allowed_tools`。
 - 日志与模型可见文案跟上：`Tools registered`、`Tool '{}' disabled`、`Tool execution denied`、`Tool not found`、`Tool execution failed`，`NC allowed tools`。
 - 技能名（`poke_client`、`send_message`、`music_control` …）、`website/` 文档与 issue 模板里的「技能」照旧。ACL 配置键从 `allowed_skills` 改为 `allowed_tools`（`examples/config/acl.toml` 一并更新），`AclRule` 字段写 `#[serde(rename = "allowed_tools", alias = "allowed_skills")]`，既有部署的旧键照常解析，`PermissionGate` 内部统一说工具。
-- 内部文档同步：根 `AGENTS.md` 的目录树与 standing orders、`docs/architecture.md` 的对应小节（该文档现为索引，工具系统的归属说明在 [工具系统与权限门](../../../../docs/subsystems/tools.md)）、mermaid 节点、`get_allowed_tools()`、`.agents/notes/README.md` 里指向代码实体的那一句；顺带删掉 `docs/architecture.md` 与 `AGENTS.md` 中并不存在的 `permission/gate.rs`、`permission/` 条目。`website/` 未改（其中不出现该配置键，只讲技能名）。
+- 内部文档同步：根 `AGENTS.md` 的目录树与 standing orders、`docs/architecture.md` 的对应小节（该文档现为索引，工具系统的归属说明在 [工具系统与权限门](../../../../docs/subsystems/tools.md)）、mermaid 节点、`get_allowed_tools()`、`.agents/notes/AGENTS.md` 里指向代码实体的那一句；顺带删掉 `docs/architecture.md` 与 `AGENTS.md` 中并不存在的 `permission/gate.rs`、`permission/` 条目。`website/` 未改（其中不出现该配置键，只讲技能名）。
 
 ## Alternatives considered
 

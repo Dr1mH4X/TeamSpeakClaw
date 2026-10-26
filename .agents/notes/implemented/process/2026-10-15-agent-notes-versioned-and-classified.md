@@ -14,9 +14,9 @@ Status: implemented
 
 `.agents/notes/` 与 `.agents/skills/` 随仓库入库，只有 `.claude/`、`opencode.json`、`plan.md`、`skills-lock.json` 保持忽略。`Status:` 行只写生命周期本身，否决原因才附在状态行上。笔记之间的引用一律从笔记根写起，例如 `../../implemented/architecture/2026-10-03-llm-turn-module.md`，这样文件在生命周期之间移动后链接仍然有效。
 
-规范不放在一篇大文档里，而是拆成 `.agents/notes/README.md`（布局、分类、归档、文件内格式、核查清单）与三个目录级 `AGENTS.md`（笔记树、`implemented/`、`archived/`），这样在 notes 下的任何会话都会自动加载对应规则。活跃目录树本身就是清单，不建集中的 `INDEX.md`。
+规范收在 `.agents/notes/AGENTS.md`（布局、分类、归档、文件内格式、核查清单），目录级规则另有 `implemented/` 与 `archived/` 两个 `AGENTS.md`，这样在 notes 下的任何会话都会自动加载对应规则。活跃目录树本身就是清单，不建集中的 `INDEX.md`。
 
-`docs/agent-notes.md` 因此被 `.agents/notes/README.md` 取代；技能相关的规范移入 `.agents/skills/AGENTS.md`。
+`docs/agent-notes.md` 因此被 `.agents/notes/AGENTS.md` 取代；技能相关的规范移入 `.agents/skills/AGENTS.md`。
 
 ## Alternatives considered
 
@@ -30,6 +30,6 @@ Status: implemented
 
 新增或移动一篇笔记时，状态变更体现为跨目录移动；引用必须写成从笔记根出发的相对路径，否则移动后失效。
 
-`.agents/notes/README.md` 的核查清单是唯一的人工门禁，没有脚本兜底，评审时要按清单过一遍。`.agents/` 进入版本控制后，笔记的改动与代码改动在同一提交里出现。
+`.agents/notes/AGENTS.md` 的核查清单是唯一的人工门禁，没有脚本兜底，评审时要按清单过一遍。`.agents/` 进入版本控制后，笔记的改动与代码改动在同一提交里出现。
 
-`docs/agent-notes.md` 作为文档层级对外的入口消失，根 `AGENTS.md`、`docs/AGENTS.md`、`CONTRIBUTING.md` 与 `docs/architecture.md` 的指针改为指向 `.agents/notes/README.md`。
+`docs/agent-notes.md` 作为文档层级对外的入口消失，根 `AGENTS.md`、`docs/AGENTS.md`、`CONTRIBUTING.md` 与 `docs/architecture.md` 的指针改为指向 `.agents/notes/AGENTS.md`。

@@ -9,7 +9,7 @@ description: 新增、审计、清理、归档、恢复或评审 .agents/notes/ 
 
 ## Sources of truth
 
-先读 [笔记规则](../../notes/README.md)、[归档规则](../../notes/archived/AGENTS.md)、[已落地笔记规则](../../notes/implemented/AGENTS.md) 与 [docs/AGENTS.md](../../../docs/AGENTS.md)。用当前代码、配置、文档更新、更新的笔记与入站链接判断一条依据是否还在约束什么。
+先读 [笔记规则](../../notes/AGENTS.md)、[归档规则](../../notes/archived/AGENTS.md)、[已落地笔记规则](../../notes/implemented/AGENTS.md) 与 [docs/AGENTS.md](../../../docs/AGENTS.md)。用当前代码、配置、文档更新、更新的笔记与入站链接判断一条依据是否还在约束什么。
 
 ## 工作流步骤
 
@@ -35,7 +35,7 @@ grep -rn "^Status: implemented$" .agents/notes/archived
 grep -rn "^Archived: " .agents/notes/archived
 ```
 
-本仓库没有归档校验脚本，上述检查与[笔记规则](../../notes/README.md)末尾的核查清单是唯一门禁。
+本仓库没有归档校验脚本，上述检查与[笔记规则](../../notes/AGENTS.md)末尾的核查清单是唯一门禁。
 
 ## 报告要求
 

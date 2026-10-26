@@ -34,7 +34,7 @@ src/
 
 proto/voice.proto            # 语音桥 gRPC protobuf
 .agents/
-├── notes/                   # 决策记录，按 {lifecycle}/{class}/ 分树；规则见 .agents/notes/README.md
+├── notes/                   # 决策记录，按 {lifecycle}/{class}/ 分树；规则见 .agents/notes/AGENTS.md
 └── skills/                  # agent 侧复用工作流（SKILL.md）；规则见 .agents/skills/AGENTS.md
 docs/
 ├── AGENTS.md                # 文档标准
@@ -88,7 +88,7 @@ API key 等敏感配置放在 config 目录（加载自 `config_dir()` = `exe_di
 - [docs/defensive-patterns.md](docs/defensive-patterns.md) — 编码反面准则：最高原则、FAILFAST、YAGNI、DRY、警告压制处置、类型安全优先、审查与调试。
 - [docs/ci-cd.md](docs/ci-cd.md) — CI/CD：各 GitHub Actions workflow 的触发条件、职责与产物，以及发版日志如何成为 Release 正文。
 - [docs/release/AGENTS.md](docs/release/AGENTS.md) — 发版日志：每个 tag 一篇、由 git 提交归纳，作为 Release 正文。
-- [.agents/notes/README.md](.agents/notes/README.md) — 决策记录：为什么这么做、放弃了什么、如何验证，路径编码生命周期与类目。
+- [.agents/notes/AGENTS.md](.agents/notes/AGENTS.md) — 决策记录：为什么这么做、放弃了什么、如何验证，路径编码生命周期与类目。
 - [.agents/skills/AGENTS.md](.agents/skills/AGENTS.md) — agent 侧复用工作流（SKILL.md）的目录与正文规范。
 
 ## LLM / Provider

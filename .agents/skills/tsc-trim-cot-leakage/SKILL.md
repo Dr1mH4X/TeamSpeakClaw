@@ -12,7 +12,7 @@ description: 审计或清理读起来像推理过程泄漏的文字时使用—�
 ## Sources of truth
 
 - [docs/AGENTS.md](../../../docs/AGENTS.md)：写作规则与 slop checklist，本技能的上位归属。
-- [.agents/notes/README.md](../../notes/README.md)：笔记的写作规则与核查清单。
+- [.agents/notes/AGENTS.md](../../notes/AGENTS.md)：笔记的写作规则与核查清单。
 - 被审范围内的源码注释、`docs/`、`.agents/notes/`、`website/`。
 
 ## 一条判据
