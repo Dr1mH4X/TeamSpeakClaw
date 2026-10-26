@@ -20,7 +20,7 @@ Status: implemented
 
 `src/adapter.rs` 的 `run_connected_session` 通过观察任务同步连接状态。语音状态只在 `BridgeReadiness` 的 Service、Stream、Actor 全部就绪时显示已连接；NapCat 状态跟随 `NapCatConnectionState` 的 Connected、Reconnecting 与 Down，并在会话结束时回收观察任务。
 
-网页清洗的提供方归一化、公网抓取及 ACL 决策见[网页搜索与抓取的不可信内容渲染](../feature/2026-10-18-web-fetch-and-untrusted-web-results.md)。
+网页清洗的提供方归一化、公网抓取及 ACL 决策见[网页搜索与抓取的不可信内容渲染](../../implemented/feature/2026-10-18-web-fetch-and-untrusted-web-results.md)。
 
 ## Alternatives considered
 
