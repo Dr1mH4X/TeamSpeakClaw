@@ -21,6 +21,9 @@
 
 <div align="center">
   <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a>
+
+由 [tsclient-rs](https://github.com/Dr1mH4X/tsclient-rs) 驱动
+
 </div>
 
 > ⚠️ 自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。
