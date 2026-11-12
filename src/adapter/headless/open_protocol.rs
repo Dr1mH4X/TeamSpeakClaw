@@ -77,7 +77,7 @@ pub struct OpenProtocolManager {
 impl OpenProtocolManager {
     pub fn new(config: &AppConfig) -> Self {
         let commands = Self::build_commands(config);
-        let capabilities = Self::build_capabilities(config, !commands.is_empty());
+        let capabilities = Self::build_capabilities(!commands.is_empty());
 
         Self {
             client: Mutex::new(None),
@@ -89,13 +89,10 @@ impl OpenProtocolManager {
         }
     }
 
-    fn build_capabilities(config: &AppConfig, has_commands: bool) -> Vec<String> {
+    fn build_capabilities(has_commands: bool) -> Vec<String> {
         let mut caps = Vec::new();
         if has_commands {
             caps.push("chat:slash_commands".to_string());
-        }
-        if super::voice_features_enabled(config) {
-            caps.push("audio:stereo".to_string());
         }
         caps
     }
@@ -329,7 +326,7 @@ mod tests {
             client_type: "bot".into(),
             app_name: "TeamSpeakClaw".into(),
             app_version: "1.2.3".into(),
-            capabilities: vec!["chat:slash_commands".into(), "audio:stereo".into()],
+            capabilities: vec!["chat:slash_commands".into()],
         };
 
         let json = serde_json::to_string(&payload).expect("serialize identity");
@@ -342,7 +339,7 @@ mod tests {
         assert_eq!(parsed["app_version"], "1.2.3");
         assert_eq!(
             parsed["capabilities"],
-            serde_json::json!(["chat:slash_commands", "audio:stereo"])
+            serde_json::json!(["chat:slash_commands"])
         );
     }
 
@@ -458,6 +455,7 @@ mod tests {
         assert!(manager
             .capabilities()
             .contains(&"chat:slash_commands".to_string()));
+        assert!(!manager.capabilities().contains(&"audio:stereo".to_string()));
         let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
         // 仅宣称 bot 自身直呼命令，不包含第三方音乐机器人或通用 LLM 技能（如 play, skip, poke）
         assert_eq!(names, vec!["replay", "回放"]);

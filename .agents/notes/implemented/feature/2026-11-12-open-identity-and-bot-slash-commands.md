@@ -12,7 +12,7 @@ TeamSpeak 服务端与客户端标准协议不区分第三方客户端实现与�
 
 通过 `tsclient-rs` 升级至 `0.2.7`，在 `src/adapter/headless/open_protocol.rs` 中引入两阶段 `PluginCommand` 开放协议管理模块 `OpenProtocolManager`，并在 `src/adapter/headless/event.rs` 的生命周期与事件流中接线：
 
-1. 身份互认子协议 `tsclient:identity`：进入频道或切换频道时向当前频道（`TargetMode::CurrentChannel`）广播 `announce`；收到对端广播 `announce` 或定向探测 `query` 时，经防刷频限流后单播回执 `announce_ack`。声明客户端类型为 `"bot"`，软件名为 `"TeamSpeakClaw"`，版本号动态读取 `CARGO_PKG_VERSION`，并在语音功能开启时上报 `"audio:stereo"` 与 `"chat:slash_commands"` 能力标签。
+1. 身份互认子协议 `tsclient:identity`：进入频道或切换频道时向当前频道（`TargetMode::CurrentChannel`）广播 `announce`；收到对端广播 `announce` 或定向探测 `query` 时，经防刷频限流后单播回执 `announce_ack`。声明客户端类型为 `"bot"`，软件名为 `"TeamSpeakClaw"`，版本号动态读取 `CARGO_PKG_VERSION`，并在存在直呼命令时上报 `"chat:slash_commands"` 能力标签（不主动宣称无协商必要的音频扩展能力）。
 2. 斜杠命令拉取子协议 `tsclient:commands`：收到对端单播查询 `list_req` 时，单播回执 `list_ack` 与精简命令清单。命令严格限制为机器人原生直呼命令（从 `config.voice_replay.direct_commands` 动态去除前缀并去重衍生，默认提供 `replay` 与 `回放`），不宣称外部音乐机器人或大模型通用技能（如 `poke`、`play`、`skip`）。在未开启语音回放时命令清单为空，且能力集动态排除 `chat:slash_commands`。单条回执总数截断于 12 条，省略空 `args` 字段，确保报文远低于 1024 字节。
 3. 防刷频与限流约束：
    - 过滤自身回显：丢弃 `invoker_id == self_id` 的插件命令广播。
@@ -32,7 +32,7 @@ TeamSpeak 服务端与客户端标准协议不区分第三方客户端实现与�
   "client_type": "bot",
   "app_name": "TeamSpeakClaw",
   "app_version": "0.0.0",
-  "capabilities": ["chat:slash_commands", "audio:stereo"]
+  "capabilities": ["chat:slash_commands"]
 }
 ```
 
