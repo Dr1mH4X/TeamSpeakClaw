@@ -35,6 +35,7 @@ mod actor;
 pub mod audio_codec;
 pub mod audio_output;
 mod event;
+pub mod open_protocol;
 pub mod speaker_ring;
 pub mod speech;
 pub(crate) mod text_util;

@@ -100,6 +100,19 @@ pub(crate) struct MainSubscriptions {
     pub(crate) disconnected: watch::Receiver<bool>,
 }
 
+pub(crate) fn format_client_summary(c: &tsclient_rs::ClientInfo) -> serde_json::Value {
+    json!({
+        "name": c.nickname,
+        "clid": c.id,
+        "channel_id": c.channel_id,
+        "away": c.away.unwrap_or(false),
+        "away_message": c.away_message,
+        "input_muted": c.input_muted.unwrap_or(false),
+        "output_muted": c.output_muted.unwrap_or(false),
+        "channel_commander": c.channel_commander.unwrap_or(false),
+    })
+}
+
 impl TsAdapter {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Arc<Self>> {
         let hc = &config.headless;
@@ -132,11 +145,13 @@ impl TsAdapter {
             let (event_tx, event_rx) = broadcast::channel::<TsEvent>(256);
             let (disconnect_tx, disconnect_rx) = watch::channel(false);
             let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let open_protocol = Arc::new(super::open_protocol::OpenProtocolManager::new(&config));
             Self::register_event_handlers(
                 &client,
                 event_tx.clone(),
                 disconnect_tx,
                 Arc::clone(&closing),
+                open_protocol.clone(),
             );
 
             client
@@ -184,6 +199,9 @@ impl TsAdapter {
                     let bot_clid = u32::try_from(clid)
                         .map_err(|_| anyhow!("invalid TeamSpeak bot client ID: {clid}"))?;
                     let client = Arc::new(client);
+
+                    open_protocol.bind(Arc::downgrade(&client), clid);
+                    open_protocol.announce_identity().await;
 
                     let adapter = Arc::new(Self {
                         client,
@@ -234,6 +252,7 @@ impl TsAdapter {
         tx: broadcast::Sender<TsEvent>,
         disconnect_tx: watch::Sender<bool>,
         closing: Arc<std::sync::atomic::AtomicBool>,
+        open_protocol: Arc<super::open_protocol::OpenProtocolManager>,
     ) {
         {
             let tx = tx.clone();
@@ -266,6 +285,30 @@ impl TsAdapter {
                         invoker_groups: msg.invoker_groups.clone(),
                         message: msg.message.clone(),
                     }));
+                }
+            }));
+        }
+
+        {
+            let protocol = open_protocol.clone();
+            client.on_plugin_command(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::PluginCommand(ev) = event {
+                    let protocol = protocol.clone();
+                    tokio::spawn(async move {
+                        protocol.handle_plugin_command(ev).await;
+                    });
+                }
+            }));
+        }
+
+        {
+            let protocol = open_protocol;
+            client.on_client_moved(Arc::new(move |event: tsclient_rs::Event| {
+                if let tsclient_rs::Event::ClientMoved(ev) = event {
+                    let protocol = protocol.clone();
+                    tokio::spawn(async move {
+                        protocol.handle_client_moved(ev.id).await;
+                    });
                 }
             }));
         }
@@ -427,10 +470,8 @@ impl TsAdapter {
     pub async fn list_clients_json(&self, caller_clid: u32) -> (String, u64) {
         match self.list_clients().await {
             Ok(clients) => {
-                let arr: Vec<serde_json::Value> = clients
-                    .iter()
-                    .map(|c| json!({"name": c.nickname, "clid": c.id, "channel_id": c.channel_id}))
-                    .collect();
+                let arr: Vec<serde_json::Value> =
+                    clients.iter().map(format_client_summary).collect();
                 let caller_channel = clients
                     .iter()
                     .find(|c| c.id as u32 == caller_clid)
@@ -509,8 +550,8 @@ pub enum TextMessageTarget {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_identity_level, parse_client_channel_group_id, parse_client_uid,
-        should_upgrade_identity, write_identity_file,
+        format_client_summary, next_identity_level, parse_client_channel_group_id,
+        parse_client_uid, should_upgrade_identity, write_identity_file,
     };
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -556,6 +597,53 @@ mod tests {
     #[test]
     fn identity_upgrade_uses_regular_step() {
         assert_eq!(next_identity_level(8), Some(13));
+    }
+
+    #[test]
+    fn format_client_summary_includes_all_status_fields() {
+        let client = tsclient_rs::ClientInfo {
+            nickname: "Alice".to_string(),
+            uid: "alice_uid".to_string(),
+            server_groups: vec!["6".to_string()],
+            channel_id: 3,
+            r#type: 0,
+            id: 7,
+            away: Some(true),
+            away_message: Some("brb".to_string()),
+            input_muted: Some(true),
+            output_muted: Some(false),
+            channel_commander: Some(true),
+        };
+
+        let summary = format_client_summary(&client);
+        assert_eq!(summary["name"], "Alice");
+        assert_eq!(summary["clid"], 7);
+        assert_eq!(summary["channel_id"], 3);
+        assert_eq!(summary["away"], true);
+        assert_eq!(summary["away_message"], "brb");
+        assert_eq!(summary["input_muted"], true);
+        assert_eq!(summary["output_muted"], false);
+        assert_eq!(summary["channel_commander"], true);
+
+        let default_client = tsclient_rs::ClientInfo {
+            nickname: "Bob".to_string(),
+            uid: "bob_uid".to_string(),
+            server_groups: vec![],
+            channel_id: 1,
+            r#type: 0,
+            id: 8,
+            away: None,
+            away_message: None,
+            input_muted: None,
+            output_muted: None,
+            channel_commander: None,
+        };
+        let summary_def = format_client_summary(&default_client);
+        assert_eq!(summary_def["away"], false);
+        assert!(summary_def["away_message"].is_null());
+        assert_eq!(summary_def["input_muted"], false);
+        assert_eq!(summary_def["output_muted"], false);
+        assert_eq!(summary_def["channel_commander"], false);
     }
 
     #[test]

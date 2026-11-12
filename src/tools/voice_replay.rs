@@ -252,7 +252,36 @@ pub enum SpeakerMatch {
     None { candidates: Vec<String> },
 }
 
-/// 直呼解析：`!replay [N] [@name with spaces]`；`stop`/`status` 等子命令一律按非法命令拒绝
+fn match_command_prefix<'a>(text: &'a str, cmd: &str) -> Option<&'a str> {
+    if text == cmd {
+        return Some("");
+    }
+    if let Some(rest) = text.strip_prefix(cmd) {
+        if let Some(rest) = rest.strip_prefix(' ') {
+            return Some(rest.trim_start());
+        }
+    }
+
+    let alt_cmd = if let Some(stripped) = cmd.strip_prefix('!') {
+        format!("/{stripped}")
+    } else {
+        let stripped = cmd.strip_prefix('/')?;
+        format!("!{stripped}")
+    };
+
+    if text == alt_cmd {
+        return Some("");
+    }
+    if let Some(rest) = text.strip_prefix(&alt_cmd) {
+        if let Some(rest) = rest.strip_prefix(' ') {
+            return Some(rest.trim_start());
+        }
+    }
+
+    None
+}
+
+/// 直呼解析：`!replay [N] [@name with spaces]` 或 `/replay [N] [@name with spaces]`；`stop`/`status` 等子命令一律按非法命令拒绝
 pub fn parse_direct_command(text: &str, commands: &[String]) -> Option<DirectReplayCommand> {
     let text = text.trim();
     for cmd in commands {
@@ -260,15 +289,8 @@ pub fn parse_direct_command(text: &str, commands: &[String]) -> Option<DirectRep
         if cmd.is_empty() {
             continue;
         }
-        if text == cmd {
-            return Some(DirectReplayCommand::Replay {
-                seconds: None,
-                speaker: None,
-            });
-        }
-        let prefix = format!("{cmd} ");
-        if let Some(rest) = text.strip_prefix(&prefix) {
-            return parse_direct_args(rest.trim());
+        if let Some(rest) = match_command_prefix(text, cmd) {
+            return parse_direct_args(rest);
         }
     }
     None
@@ -702,6 +724,34 @@ mod tests {
             parse_direct_command("!replay 999", &cmds()),
             Some(DirectReplayCommand::Invalid { .. })
         ));
+        assert_eq!(
+            parse_direct_command("/replay", &cmds()),
+            Some(DirectReplayCommand::Replay {
+                seconds: None,
+                speaker: None
+            })
+        );
+        assert_eq!(
+            parse_direct_command("/replay 10", &cmds()),
+            Some(DirectReplayCommand::Replay {
+                seconds: Some(10),
+                speaker: None
+            })
+        );
+        assert_eq!(
+            parse_direct_command("/replay @Alice", &cmds()),
+            Some(DirectReplayCommand::Replay {
+                seconds: None,
+                speaker: Some("Alice".into())
+            })
+        );
+        assert_eq!(
+            parse_direct_command("/回放 5", &cmds()),
+            Some(DirectReplayCommand::Replay {
+                seconds: Some(5),
+                speaker: None
+            })
+        );
         assert_eq!(parse_direct_command("hello", &cmds()), None);
         assert_eq!(parse_direct_command("!replay", &[]), None);
     }

@@ -4099,9 +4099,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsclient-rs"
-version = "0.1.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4092cafd6bc85cb39c763f9d9568b49d6cedcdfbe8c49b558c5184390608fee0"
+checksum = "6dc5d9955bfd006f512661f49f6120524dd8179d4d7ac077b26c322687baaeb4"
 dependencies = [
  "aes",
  "async-trait",

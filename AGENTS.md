@@ -19,7 +19,7 @@ src/
 │   ├── lifecycle.rs         # 会话生命周期与重连退避策略的唯一归属地
 │   ├── reconnect.rs         # 任务回收与限时等待工具
 │   ├── headless.rs          # 无头 TS 客户端 + gRPC 语音桥；voice_features_enabled、should_route_text_through_bridge
-│   ├── headless/            # (actor, event, speech, text_util, types, voice_service, wakeword)
+│   ├── headless/            # (actor, event, open_protocol, speech, text_util, types, voice_service, wakeword)
 │   ├── napcat.rs            # OneBot 11 WebSocket 根
 │   └── napcat/              # (api, ws, event, types)
 ├── llm.rs                   # OpenAI 兼容 LLM 引擎、上下文、工具循环

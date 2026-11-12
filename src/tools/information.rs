@@ -8,6 +8,31 @@ use tracing::debug;
 
 pub struct GetClientInfo;
 
+pub(crate) fn format_client_status_summary(client: &tsclient_rs::ClientInfo) -> String {
+    let mut status_flags = Vec::new();
+    if client.away.unwrap_or(false) {
+        if let Some(msg) = &client.away_message {
+            status_flags.push(format!("away ({msg})"));
+        } else {
+            status_flags.push("away".to_string());
+        }
+    }
+    if client.input_muted.unwrap_or(false) {
+        status_flags.push("mic_muted".to_string());
+    }
+    if client.output_muted.unwrap_or(false) {
+        status_flags.push("speaker_muted".to_string());
+    }
+    if client.channel_commander.unwrap_or(false) {
+        status_flags.push("channel_commander".to_string());
+    }
+    if status_flags.is_empty() {
+        "active".to_string()
+    } else {
+        status_flags.join(", ")
+    }
+}
+
 #[async_trait]
 impl Tool for GetClientInfo {
     fn name(&self) -> &'static str {
@@ -31,19 +56,64 @@ impl Tool for GetClientInfo {
 
         if ctx.platform == Platform::NapCat {
             let (client, groups) = resolve_ts_client(ctx, clid).await?;
+            let status_str = format_client_status_summary(&client);
             let reply = format!(
-                "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}",
-                client.nickname, client.id, groups, client.channel_id
+                "TS user info - nickname:{}, ID:{}, server groups:{:?}, channel ID:{}, status:{}",
+                client.nickname, client.id, groups, client.channel_id, status_str
             );
             return Ok(json!({
                 "status": "ok",
                 "message": reply,
-                "platform": "teamspeak"
+                "platform": "teamspeak",
+                "away": client.away.unwrap_or(false),
+                "away_message": client.away_message,
+                "input_muted": client.input_muted.unwrap_or(false),
+                "output_muted": client.output_muted.unwrap_or(false),
+                "channel_commander": client.channel_commander.unwrap_or(false),
             }));
         }
 
         let ts_adapter = unified_ts_adapter(ctx)?;
         let mut info = ts_adapter.get_client_info(clid).await?;
+
+        if let Ok(clients) = ts_adapter.list_clients().await {
+            if let Some(client) = clients.into_iter().find(|c| c.id as u32 == clid) {
+                info.entry("client_away".to_string()).or_insert_with(|| {
+                    if client.away.unwrap_or(false) {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    }
+                });
+                if let Some(msg) = client.away_message {
+                    info.entry("client_away_message".to_string()).or_insert(msg);
+                }
+                info.entry("client_input_muted".to_string())
+                    .or_insert_with(|| {
+                        if client.input_muted.unwrap_or(false) {
+                            "1".into()
+                        } else {
+                            "0".into()
+                        }
+                    });
+                info.entry("client_output_muted".to_string())
+                    .or_insert_with(|| {
+                        if client.output_muted.unwrap_or(false) {
+                            "1".into()
+                        } else {
+                            "0".into()
+                        }
+                    });
+                info.entry("client_is_channel_commander".to_string())
+                    .or_insert_with(|| {
+                        if client.channel_commander.unwrap_or(false) {
+                            "1".into()
+                        } else {
+                            "0".into()
+                        }
+                    });
+            }
+        }
 
         debug!(?info, clid, "GetClientInfo raw response");
 
@@ -105,5 +175,49 @@ impl Tool for GetClientInfo {
         }
 
         Ok(json!({"status": "ok", "client_info": info}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_client_status_summary_formats_active_when_all_flags_clear() {
+        let client = tsclient_rs::ClientInfo {
+            nickname: "Bob".to_string(),
+            uid: "bob_uid".to_string(),
+            server_groups: vec![],
+            channel_id: 1,
+            r#type: 0,
+            id: 8,
+            away: Some(false),
+            away_message: None,
+            input_muted: Some(false),
+            output_muted: Some(false),
+            channel_commander: Some(false),
+        };
+        assert_eq!(format_client_status_summary(&client), "active");
+    }
+
+    #[test]
+    fn format_client_status_summary_formats_multiple_flags() {
+        let client = tsclient_rs::ClientInfo {
+            nickname: "Alice".to_string(),
+            uid: "alice_uid".to_string(),
+            server_groups: vec!["6".to_string()],
+            channel_id: 3,
+            r#type: 0,
+            id: 7,
+            away: Some(true),
+            away_message: Some("eating".to_string()),
+            input_muted: Some(true),
+            output_muted: Some(true),
+            channel_commander: Some(true),
+        };
+        assert_eq!(
+            format_client_status_summary(&client),
+            "away (eating), mic_muted, speaker_muted, channel_commander"
+        );
     }
 }
