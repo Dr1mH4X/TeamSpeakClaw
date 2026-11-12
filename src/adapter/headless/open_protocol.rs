@@ -76,8 +76,8 @@ pub struct OpenProtocolManager {
 
 impl OpenProtocolManager {
     pub fn new(config: &AppConfig) -> Self {
-        let capabilities = Self::build_capabilities(config);
         let commands = Self::build_commands(config);
+        let capabilities = Self::build_capabilities(config, !commands.is_empty());
 
         Self {
             client: Mutex::new(None),
@@ -89,8 +89,11 @@ impl OpenProtocolManager {
         }
     }
 
-    fn build_capabilities(config: &AppConfig) -> Vec<String> {
-        let mut caps = vec!["chat:slash_commands".to_string()];
+    fn build_capabilities(config: &AppConfig, has_commands: bool) -> Vec<String> {
+        let mut caps = Vec::new();
+        if has_commands {
+            caps.push("chat:slash_commands".to_string());
+        }
         if super::voice_features_enabled(config) {
             caps.push("audio:stereo".to_string());
         }
@@ -100,42 +103,18 @@ impl OpenProtocolManager {
     fn build_commands(config: &AppConfig) -> Vec<BotCommandItem> {
         let mut cmds = Vec::new();
         if config.voice_replay.enabled {
-            cmds.push(BotCommandItem {
-                name: "replay".into(),
-                args: Some("[秒数] [@昵称]".into()),
-                desc: "回放最近语音片段".into(),
-            });
+            let mut seen = std::collections::HashSet::new();
+            for raw in &config.voice_replay.direct_commands {
+                let normalized = raw.trim_start_matches(['!', '/']).trim();
+                if !normalized.is_empty() && seen.insert(normalized.to_string()) {
+                    cmds.push(BotCommandItem {
+                        name: normalized.to_string(),
+                        args: Some("[秒数] [@昵称]".into()),
+                        desc: "回放最近语音片段".into(),
+                    });
+                }
+            }
         }
-        let music_enabled = config.music_backend.as_ref().is_some_and(|mc| {
-            crate::config::music_backend::VALID_BACKENDS.contains(&mc.backend.as_str())
-        });
-        if music_enabled {
-            cmds.push(BotCommandItem {
-                name: "play".into(),
-                args: Some("<歌名|链接>".into()),
-                desc: "点播音乐并加入播放队列".into(),
-            });
-            cmds.push(BotCommandItem {
-                name: "skip".into(),
-                args: None,
-                desc: "跳过当前播放曲目".into(),
-            });
-            cmds.push(BotCommandItem {
-                name: "stop".into(),
-                args: None,
-                desc: "停止播放音乐".into(),
-            });
-            cmds.push(BotCommandItem {
-                name: "volume".into(),
-                args: Some("<1-100>".into()),
-                desc: "设置音乐输出音量".into(),
-            });
-        }
-        cmds.push(BotCommandItem {
-            name: "poke".into(),
-            args: Some("<目标> <消息>".into()),
-            desc: "戳一戳指定成员".into(),
-        });
 
         cmds.truncate(MAX_COMMANDS);
         cmds
@@ -464,10 +443,11 @@ mod tests {
         config.music_backend = None;
 
         let manager = OpenProtocolManager::new(&config);
-        assert_eq!(manager.capabilities(), &["chat:slash_commands"]);
-        assert_eq!(manager.commands().len(), 1);
-        assert_eq!(manager.commands()[0].name, "poke");
+        // voice_replay 关闭时无直呼命令，不宣称 chat:slash_commands
+        assert!(manager.capabilities().is_empty());
+        assert!(manager.commands().is_empty());
 
+        // voice_replay 开启，使用默认配置 vec!["!replay", "!回放"]
         config.voice_replay.enabled = true;
         config.music_backend = Some(crate::config::MusicBackendConfig {
             backend: "ts3audiobot".to_string(),
@@ -475,12 +455,17 @@ mod tests {
             musicbot_name: String::new(),
         });
         let manager = OpenProtocolManager::new(&config);
-        assert!(manager.capabilities().contains(&"audio:stereo".to_string()));
+        assert!(manager
+            .capabilities()
+            .contains(&"chat:slash_commands".to_string()));
         let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["replay", "play", "skip", "stop", "volume", "poke"]
-        );
+        // 仅宣称 bot 自身直呼命令，不包含第三方音乐机器人或通用 LLM 技能（如 play, skip, poke）
+        assert_eq!(names, vec!["replay", "回放"]);
+        assert!(!names.contains(&"poke"));
+        assert!(!names.contains(&"play"));
+        assert!(!names.contains(&"skip"));
+        assert!(!names.contains(&"stop"));
+        assert!(!names.contains(&"volume"));
 
         for cmd in manager.commands() {
             assert!(cmd.name.chars().count() <= MAX_COMMAND_NAME_CHARS);

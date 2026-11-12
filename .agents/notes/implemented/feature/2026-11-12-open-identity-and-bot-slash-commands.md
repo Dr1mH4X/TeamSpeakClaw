@@ -13,7 +13,7 @@ TeamSpeak 服务端与客户端标准协议不区分第三方客户端实现与�
 通过 `tsclient-rs` 升级至 `0.2.7`，在 `src/adapter/headless/open_protocol.rs` 中引入两阶段 `PluginCommand` 开放协议管理模块 `OpenProtocolManager`，并在 `src/adapter/headless/event.rs` 的生命周期与事件流中接线：
 
 1. 身份互认子协议 `tsclient:identity`：进入频道或切换频道时向当前频道（`TargetMode::CurrentChannel`）广播 `announce`；收到对端广播 `announce` 或定向探测 `query` 时，经防刷频限流后单播回执 `announce_ack`。声明客户端类型为 `"bot"`，软件名为 `"TeamSpeakClaw"`，版本号动态读取 `CARGO_PKG_VERSION`，并在语音功能开启时上报 `"audio:stereo"` 与 `"chat:slash_commands"` 能力标签。
-2. 斜杠命令拉取子协议 `tsclient:commands`：收到对端单播查询 `list_req` 时，单播回执 `list_ack` 与精简命令清单。命令按运行时配置动态装配（`voice_replay` 开启时提供 `replay`，`music_backend` 开启时提供 `play`、`skip`、`stop`、`volume`，通用提供 `poke`），总数不超过 12 条，省略空 `args` 字段，确保报文远低于 1024 字节。
+2. 斜杠命令拉取子协议 `tsclient:commands`：收到对端单播查询 `list_req` 时，单播回执 `list_ack` 与精简命令清单。命令严格限制为机器人原生直呼命令（从 `config.voice_replay.direct_commands` 动态去除前缀并去重衍生，默认提供 `replay` 与 `回放`），不宣称外部音乐机器人或大模型通用技能（如 `poke`、`play`、`skip`）。在未开启语音回放时命令清单为空，且能力集动态排除 `chat:slash_commands`。单条回执总数截断于 12 条，省略空 `args` 字段，确保报文远低于 1024 字节。
 3. 防刷频与限流约束：
    - 过滤自身回显：丢弃 `invoker_id == self_id` 的插件命令广播。
    - 进房广播防抖：通过 `SELF_ANNOUNCE_DEBOUNCE`（2 秒）阻止短时间频繁切换频道的全频道广播。
@@ -44,16 +44,14 @@ TeamSpeak 服务端与客户端标准协议不区分第三方客户端实现与�
   "action": "list_ack",
   "commands": [
     { "name": "replay", "args": "[秒数] [@昵称]", "desc": "回放最近语音片段" },
-    { "name": "play", "args": "<歌名|链接>", "desc": "点播音乐并加入播放队列" },
-    { "name": "skip", "desc": "跳过当前播放曲目" },
-    { "name": "stop", "desc": "停止播放音乐" },
-    { "name": "volume", "args": "<1-100>", "desc": "设置音乐输出音量" },
-    { "name": "poke", "args": "<目标> <消息>", "desc": "戳一戳指定成员" }
+    { "name": "回放", "args": "[秒数] [@昵称]", "desc": "回放最近语音片段" }
   ]
 }
 ```
 
 ## Alternatives considered
+
+**在斜杠命令清单中包含音乐机器人工具或通用技能。** 音乐机器人如 TS3AudioBot 等通常作为独立实例或通过 LLM Function Calling 调度，并非 TeamSpeakClaw 自身的直达硬解析命令；通用工具（如戳一戳 `poke`）也属于大模型自主规划的技能范畴。在斜杠菜单中虚假宣称这些工具会误导客户端将其视作机器人的原生直呼命令，且破坏了斜杠命令与本地直接分发的语义一致性；因此仅暴露机器人自身支持的直呼指令。
 
 **在身份广播中直接携带完整命令数组。** 每个支持多条命令的 Bot 在进出频道或回应广播时都会发送接近 1 KB 的载荷，容易触碰 TeamSpeak 服务端单个插件命令长度上限并消耗 Anti-Flood 积分，造成踢出风险；分层拆为第一阶段轻量互认与第二阶段私信按需拉取。
 
