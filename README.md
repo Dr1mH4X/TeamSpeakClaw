@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a> · 由 <a href="https://github.com/Dr1mH4X/tsclient-rs">tsclient-rs</a> 驱动
+  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a> · 由 <a href="https://github.com/Dr1mH4X/tsclient-rs">tsclient-rs</a> 驱动 · 已接入 <a href="https://github.com/Dr1mH4X/tsclient-rs/blob/master/docs/open-protocol.md">OpenProtocol</a>
 </div>
 
 > ⚠️ 自 v0.5.0 起，配置文件与 `identity.json` 不再兼容旧版本。升级前请参考最新的[配置模板](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples)重新编写配置文件。
