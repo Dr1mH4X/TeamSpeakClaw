@@ -20,7 +20,7 @@
 </div>
 
 <div align="center">
-  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a> · Powered by <a href="https://github.com/Dr1mH4X/tsclient-rs">tsclient-rs</a>
+  <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README.md">中文</a> · <a href="https://github.com/Dr1mH4X/TeamSpeakClaw/blob/main/README_EN.md">English</a> · Powered by <a href="https://github.com/Dr1mH4X/tsclient-rs">tsclient-rs</a> · Supports <a href="https://github.com/Dr1mH4X/tsclient-rs/blob/master/docs/open-protocol.md">OpenProtocol</a>
 </div>
 
 > ⚠️ Since v0.5.0, config files and `identity.json` are no longer compatible with older versions. Please refer to the latest [config templates](https://github.com/Dr1mH4X/TeamSpeakClaw/tree/main/examples) before upgrading.

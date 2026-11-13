@@ -967,7 +967,7 @@ mod tests {
 
         // 活跃语音开启新 utterance；不足最短长度时不冲刷
         let speech = pipeline
-            .process_audio_frame(&audio_event(opus_frame_bytes(0.4)))
+            .process_audio_frame(&audio_event(opus_frame_bytes(0.9)))
             .expect("decode speech")
             .expect("speech frame produces an outcome");
         assert!(speech.voiced);
@@ -988,7 +988,16 @@ mod tests {
     fn opus_frame_bytes(amplitude: f32) -> Vec<u8> {
         let encoder =
             crate::adapter::headless::audio_codec::new_opus_stereo_encoder().expect("opus encoder");
-        let pcm = vec![amplitude; crate::adapter::headless::audio_codec::PCM_FRAME_SAMPLES_STEREO];
+        let samples_per_channel =
+            crate::adapter::headless::audio_codec::PCM_FRAME_SAMPLES_STEREO / 2;
+        // 1kHz 正弦波避开直流信号被不同版本 libopus 的高通滤波衰减
+        let mut pcm = Vec::with_capacity(samples_per_channel * 2);
+        for i in 0..samples_per_channel {
+            let t = i as f32 / 48_000.0;
+            let sample = amplitude * (2.0 * std::f32::consts::PI * 1000.0 * t).sin();
+            pcm.push(sample);
+            pcm.push(sample);
+        }
         let mut out = [0u8; 1275];
         let encoded = encoder
             .encode_float(&pcm, &mut out)

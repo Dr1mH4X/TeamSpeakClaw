@@ -2158,6 +2158,11 @@ mod tests {
             channel_id: 3,
             r#type: 0,
             id: 7,
+            away: None,
+            away_message: None,
+            input_muted: None,
+            output_muted: None,
+            channel_commander: None,
         }
     }
 
