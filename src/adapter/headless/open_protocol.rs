@@ -487,12 +487,8 @@ mod tests {
     fn commands_pick_first_non_empty_entry_from_config() {
         let mut config = AppConfig::default();
         config.voice_replay.enabled = true;
-        config.voice_replay.direct_commands = vec![
-            "!".into(),
-            "  /  ".into(),
-            "!回放".into(),
-            "!replay".into(),
-        ];
+        config.voice_replay.direct_commands =
+            vec!["!".into(), "  /  ".into(), "!回放".into(), "!replay".into()];
 
         let manager = OpenProtocolManager::new(&config);
         let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
