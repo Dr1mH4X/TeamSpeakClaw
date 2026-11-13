@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use tracing::debug;
+use tracing::{debug, warn};
 use tsclient_rs::{PluginCommandEvent, PluginCommandTarget};
 
 use crate::config::AppConfig;
 
+pub const PROTOCOL_VERSION: u32 = 1;
 pub const IDENTITY_PLUGIN: &str = "tsclient:identity";
 pub const COMMANDS_PLUGIN: &str = "tsclient:commands";
 
@@ -21,12 +22,17 @@ pub const COMMANDS_ACK_COOLDOWN: Duration = Duration::from_secs(5);
 pub const SELF_ANNOUNCE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 pub const MAX_COMMANDS: usize = 12;
-#[cfg(test)]
-const MAX_COMMAND_NAME_CHARS: usize = 24;
+pub const MAX_COMMAND_NAME_CHARS: usize = 24;
+pub const MAX_PAYLOAD_BYTES: usize = 1024;
 #[cfg(test)]
 const MAX_COMMAND_ARGS_CHARS: usize = 32;
 #[cfg(test)]
 const MAX_COMMAND_DESC_CHARS: usize = 64;
+
+const ACK_GLOBAL_BURST: f64 = 4.0;
+const ACK_GLOBAL_RATE_PER_SEC: f64 = 2.0;
+
+const SELF_ANNOUNCE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityPayload {
@@ -36,12 +42,6 @@ pub struct IdentityPayload {
     pub app_name: String,
     pub app_version: String,
     pub capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct IdentityInboundReq {
-    pub v: u32,
-    pub action: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -59,10 +59,178 @@ pub struct CommandsAckPayload {
     pub commands: Vec<BotCommandItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CommandsInboundReq {
-    pub v: u32,
-    pub action: String,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct InboundRequest {
+    v: u32,
+    action: String,
+}
+
+fn parse_inbound_action(data: &str) -> Option<String> {
+    let req = serde_json::from_str::<InboundRequest>(data).ok()?;
+    if req.v != PROTOCOL_VERSION {
+        debug!(
+            version = req.v,
+            expected = PROTOCOL_VERSION,
+            "Ignore unsupported open protocol version"
+        );
+        return None;
+    }
+    Some(req.action)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CooldownAction {
+    IdentityAnnounce,
+    IdentityQuery,
+    CommandsList,
+}
+
+impl CooldownAction {
+    fn cooldown(self) -> Duration {
+        match self {
+            Self::IdentityAnnounce => ANNOUNCE_ACK_COOLDOWN,
+            Self::IdentityQuery => QUERY_ACK_COOLDOWN,
+            Self::CommandsList => COMMANDS_ACK_COOLDOWN,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CooldownKey {
+    peer: String,
+    action: CooldownAction,
+}
+
+/// 维护按 `(peer, action)` 隔离的冷却窗口，并用全局令牌桶上限约束出站 ACK 洪峰。
+struct AckRateLimiter {
+    cooldowns: HashMap<CooldownKey, Instant>,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl AckRateLimiter {
+    fn new(now: Instant) -> Self {
+        Self {
+            cooldowns: HashMap::new(),
+            tokens: ACK_GLOBAL_BURST,
+            last_refill: now,
+        }
+    }
+
+    fn try_acquire(&mut self, peer: &str, action: CooldownAction, now: Instant) -> bool {
+        self.cooldowns
+            .retain(|key, &mut last| now.saturating_duration_since(last) < key.action.cooldown());
+
+        let key = CooldownKey {
+            peer: peer.to_string(),
+            action,
+        };
+        if let Some(&last) = self.cooldowns.get(&key) {
+            if now.saturating_duration_since(last) < action.cooldown() {
+                return false;
+            }
+        }
+
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.tokens = (self.tokens + elapsed * ACK_GLOBAL_RATE_PER_SEC).min(ACK_GLOBAL_BURST);
+        self.last_refill = self.last_refill.max(now);
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+
+        self.cooldowns.insert(key, now);
+        true
+    }
+
+    fn rollback(&mut self, peer: &str, action: CooldownAction, acquired_at: Instant) {
+        let key = CooldownKey {
+            peer: peer.to_string(),
+            action,
+        };
+        if self.cooldowns.get(&key) == Some(&acquired_at) {
+            self.cooldowns.remove(&key);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnounceDecision {
+    SendNow {
+        attempt_at: Instant,
+        seq_at_start: u64,
+    },
+    ScheduleTrailing {
+        wait: Duration,
+    },
+    AlreadyScheduled,
+}
+
+#[derive(Default)]
+struct AnnounceState {
+    last_attempt: Option<Instant>,
+    trailing_scheduled: bool,
+    success_seq: u64,
+}
+
+impl AnnounceState {
+    fn try_begin(&mut self, now: Instant) -> AnnounceDecision {
+        if let Some(last) = self.last_attempt {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < SELF_ANNOUNCE_DEBOUNCE {
+                if !self.trailing_scheduled {
+                    self.trailing_scheduled = true;
+                    return AnnounceDecision::ScheduleTrailing {
+                        wait: SELF_ANNOUNCE_DEBOUNCE - elapsed,
+                    };
+                }
+                return AnnounceDecision::AlreadyScheduled;
+            }
+        }
+
+        self.last_attempt = Some(now);
+        self.trailing_scheduled = false;
+        AnnounceDecision::SendNow {
+            attempt_at: now,
+            seq_at_start: self.success_seq,
+        }
+    }
+
+    fn begin_trailing(&mut self, now: Instant) -> AnnounceDecision {
+        self.trailing_scheduled = false;
+        self.try_begin(now)
+    }
+
+    fn record_success(&mut self) {
+        self.success_seq = self.success_seq.wrapping_add(1);
+    }
+
+    fn rollback_failure(&mut self, attempt_at: Instant, seq_at_start: u64) -> bool {
+        if self.last_attempt == Some(attempt_at) {
+            self.last_attempt = None;
+        }
+        self.success_seq == seq_at_start
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AttemptMode {
+    Normal,
+    Trailing,
+}
+
+struct DelayedAnnounce {
+    delay: Duration,
+    mode: AttemptMode,
+    allow_failure_retry: bool,
+    expected_seq: Option<u64>,
+}
+
+enum AnnounceStep {
+    Done,
+    Delayed(DelayedAnnounce),
 }
 
 pub struct OpenProtocolManager {
@@ -70,8 +238,8 @@ pub struct OpenProtocolManager {
     self_client_id: AtomicI32,
     capabilities: Vec<String>,
     commands: Vec<BotCommandItem>,
-    ack_cooldowns: Mutex<HashMap<String, Instant>>,
-    last_announce: Mutex<Option<Instant>>,
+    ack_limiter: Mutex<AckRateLimiter>,
+    announce_state: Mutex<AnnounceState>,
 }
 
 impl OpenProtocolManager {
@@ -84,8 +252,8 @@ impl OpenProtocolManager {
             self_client_id: AtomicI32::new(-1),
             capabilities,
             commands,
-            ack_cooldowns: Mutex::new(HashMap::new()),
-            last_announce: Mutex::new(None),
+            ack_limiter: Mutex::new(AckRateLimiter::new(Instant::now())),
+            announce_state: Mutex::new(AnnounceState::default()),
         }
     }
 
@@ -99,20 +267,49 @@ impl OpenProtocolManager {
 
     fn build_commands(config: &AppConfig) -> Vec<BotCommandItem> {
         let mut cmds = Vec::new();
-        if config.voice_replay.enabled {
-            if let Some(primary) = config
-                .voice_replay
-                .direct_commands
-                .iter()
-                .map(|raw| raw.trim().trim_start_matches(['!', '/']).trim())
-                .find(|normalized| !normalized.is_empty())
-            {
-                cmds.push(BotCommandItem {
-                    name: primary.to_string(),
-                    args: Some("[秒数] [@昵称]".into()),
-                    desc: "回放最近语音片段".into(),
-                });
+        if !config.voice_replay.enabled {
+            return cmds;
+        }
+
+        for raw in &config.voice_replay.direct_commands {
+            let normalized = raw.trim().trim_start_matches(['!', '/']).trim();
+            if normalized.is_empty() {
+                continue;
             }
+            if normalized.chars().count() > MAX_COMMAND_NAME_CHARS {
+                warn!(
+                    command = normalized,
+                    max_chars = MAX_COMMAND_NAME_CHARS,
+                    "Skip oversized voice_replay direct command for open protocol"
+                );
+                continue;
+            }
+
+            let candidate = BotCommandItem {
+                name: normalized.to_string(),
+                args: Some("[秒数] [@昵称]".into()),
+                desc: "回放最近语音片段".into(),
+            };
+            let probe = CommandsAckPayload {
+                v: PROTOCOL_VERSION,
+                action: "list_ack".into(),
+                commands: vec![candidate.clone()],
+            };
+            let Ok(encoded) = serde_json::to_string(&probe) else {
+                continue;
+            };
+            if encoded.len() >= MAX_PAYLOAD_BYTES {
+                warn!(
+                    command = normalized,
+                    bytes = encoded.len(),
+                    max_bytes = MAX_PAYLOAD_BYTES,
+                    "Skip voice_replay direct command exceeding open protocol payload limit"
+                );
+                continue;
+            }
+
+            cmds.push(candidate);
+            break;
         }
 
         cmds.truncate(MAX_COMMANDS);
@@ -140,27 +337,59 @@ impl OpenProtocolManager {
         guard.as_ref().and_then(|w| w.upgrade())
     }
 
-    pub fn should_announce(&self, now: Instant) -> bool {
-        let mut guard = self.last_announce.lock().unwrap();
-        if let Some(last) = *guard {
-            if now.duration_since(last) < SELF_ANNOUNCE_DEBOUNCE {
-                return false;
-            }
+    fn try_begin_announce(&self, mode: AttemptMode, now: Instant) -> AnnounceDecision {
+        let mut guard = self.announce_state.lock().unwrap();
+        match mode {
+            AttemptMode::Normal => guard.try_begin(now),
+            AttemptMode::Trailing => guard.begin_trailing(now),
         }
-        *guard = Some(now);
-        true
     }
 
-    pub async fn announce_identity(&self) {
-        let Some(client) = self.upgrade_client() else {
-            return;
-        };
-        if !self.should_announce(Instant::now()) {
-            return;
+    fn record_announce_success(&self) {
+        let mut guard = self.announce_state.lock().unwrap();
+        guard.record_success();
+    }
+
+    fn rollback_announce_failure(&self, attempt_at: Instant, seq_at_start: u64) -> bool {
+        let mut guard = self.announce_state.lock().unwrap();
+        guard.rollback_failure(attempt_at, seq_at_start)
+    }
+
+    fn should_run_failure_retry(&self, seq_at_start: u64) -> bool {
+        let guard = self.announce_state.lock().unwrap();
+        guard.success_seq == seq_at_start
+    }
+
+    pub async fn announce_identity(self: &Arc<Self>) {
+        if let AnnounceStep::Delayed(next) = self.announce_step(AttemptMode::Normal, true).await {
+            Self::spawn_delayed_announce(Arc::downgrade(self), next);
         }
+    }
+
+    async fn announce_step(&self, mode: AttemptMode, allow_failure_retry: bool) -> AnnounceStep {
+        let Some(client) = self.upgrade_client() else {
+            return AnnounceStep::Done;
+        };
+
+        let now = Instant::now();
+        let (attempt_at, seq_at_start) = match self.try_begin_announce(mode, now) {
+            AnnounceDecision::SendNow {
+                attempt_at,
+                seq_at_start,
+            } => (attempt_at, seq_at_start),
+            AnnounceDecision::ScheduleTrailing { wait } => {
+                return AnnounceStep::Delayed(DelayedAnnounce {
+                    delay: wait,
+                    mode: AttemptMode::Trailing,
+                    allow_failure_retry: true,
+                    expected_seq: None,
+                });
+            }
+            AnnounceDecision::AlreadyScheduled => return AnnounceStep::Done,
+        };
 
         let payload = IdentityPayload {
-            v: 1,
+            v: PROTOCOL_VERSION,
             action: "announce".into(),
             client_type: "bot".into(),
             app_name: "TeamSpeakClaw".into(),
@@ -168,53 +397,130 @@ impl OpenProtocolManager {
             capabilities: self.capabilities.clone(),
         };
 
-        if let Ok(data) = serde_json::to_string(&payload) {
-            if let Err(e) = tsclient_rs::send_plugin_command(
-                &client,
-                IDENTITY_PLUGIN,
-                &data,
-                PluginCommandTarget::CurrentChannel,
-                None,
-            )
-            .await
-            {
+        let Ok(data) = serde_json::to_string(&payload) else {
+            return AnnounceStep::Done;
+        };
+        if data.len() >= MAX_PAYLOAD_BYTES {
+            warn!(
+                bytes = data.len(),
+                max_bytes = MAX_PAYLOAD_BYTES,
+                "Skip sending oversized open protocol announce"
+            );
+            return AnnounceStep::Done;
+        }
+
+        match tsclient_rs::send_plugin_command(
+            &client,
+            IDENTITY_PLUGIN,
+            &data,
+            PluginCommandTarget::CurrentChannel,
+            None,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.record_announce_success();
+                AnnounceStep::Done
+            }
+            Err(e) => {
+                let should_retry = self.rollback_announce_failure(attempt_at, seq_at_start);
                 debug!(error = %e, "Broadcast identity announce failed");
+                if allow_failure_retry && should_retry {
+                    AnnounceStep::Delayed(DelayedAnnounce {
+                        delay: SELF_ANNOUNCE_RETRY_DELAY,
+                        mode: AttemptMode::Normal,
+                        allow_failure_retry: false,
+                        expected_seq: Some(seq_at_start),
+                    })
+                } else {
+                    AnnounceStep::Done
+                }
             }
         }
     }
 
-    pub async fn handle_client_moved(&self, clid: i32) {
+    fn spawn_delayed_announce(weak: Weak<Self>, mut next: DelayedAnnounce) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(next.delay).await;
+                let Some(mgr) = weak.upgrade() else {
+                    return;
+                };
+                if let Some(seq) = next.expected_seq {
+                    if !mgr.should_run_failure_retry(seq) {
+                        return;
+                    }
+                }
+                match mgr.announce_step(next.mode, next.allow_failure_retry).await {
+                    AnnounceStep::Done => return,
+                    AnnounceStep::Delayed(following) => next = following,
+                }
+            }
+        });
+    }
+
+    pub async fn handle_client_moved(self: &Arc<Self>, clid: i32) {
         let self_id = self.self_client_id.load(Ordering::Relaxed);
         if self_id >= 0 && clid == self_id {
             self.announce_identity().await;
         }
     }
 
-    pub fn should_reply_identity_ack(&self, key: &str, action: &str, now: Instant) -> bool {
-        let cooldown = match action {
-            "announce" => ANNOUNCE_ACK_COOLDOWN,
-            "query" => QUERY_ACK_COOLDOWN,
-            _ => return false,
-        };
-        let mut guard = self.ack_cooldowns.lock().unwrap();
-        if let Some(&last) = guard.get(key) {
-            if now.duration_since(last) < cooldown {
-                return false;
-            }
-        }
-        guard.insert(key.to_string(), now);
-        true
+    pub(crate) fn try_acquire_ack(&self, peer: &str, action: CooldownAction, now: Instant) -> bool {
+        let mut guard = self.ack_limiter.lock().unwrap();
+        guard.try_acquire(peer, action, now)
     }
 
-    pub fn should_reply_commands_ack(&self, key: &str, now: Instant) -> bool {
-        let mut guard = self.ack_cooldowns.lock().unwrap();
-        if let Some(&last) = guard.get(key) {
-            if now.duration_since(last) < COMMANDS_ACK_COOLDOWN {
-                return false;
-            }
+    fn rollback_ack(&self, peer: &str, action: CooldownAction, acquired_at: Instant) {
+        let mut guard = self.ack_limiter.lock().unwrap();
+        guard.rollback(peer, action, acquired_at);
+    }
+
+    async fn send_ack<T: serde::Serialize>(
+        &self,
+        plugin: &str,
+        peer: &str,
+        invoker_id: i32,
+        action: CooldownAction,
+        payload: &T,
+    ) {
+        let Ok(data) = serde_json::to_string(payload) else {
+            return;
+        };
+        if data.len() >= MAX_PAYLOAD_BYTES {
+            warn!(
+                plugin,
+                bytes = data.len(),
+                max_bytes = MAX_PAYLOAD_BYTES,
+                "Skip sending oversized open protocol ack"
+            );
+            return;
         }
-        guard.insert(key.to_string(), now);
-        true
+        let Some(client) = self.upgrade_client() else {
+            return;
+        };
+        let now = Instant::now();
+        if !self.try_acquire_ack(peer, action, now) {
+            return;
+        }
+
+        if let Err(e) = tsclient_rs::send_plugin_command(
+            &client,
+            plugin,
+            &data,
+            PluginCommandTarget::Client,
+            Some(invoker_id),
+        )
+        .await
+        {
+            self.rollback_ack(peer, action, now);
+            debug!(
+                error = %e,
+                plugin,
+                invoker_id,
+                "Send open protocol ack failed"
+            );
+        }
     }
 
     pub async fn handle_plugin_command(&self, event: PluginCommandEvent) {
@@ -223,93 +529,55 @@ impl OpenProtocolManager {
             return;
         }
 
+        let peer_fallback;
+        let peer = if !event.invoker_uid.is_empty() {
+            event.invoker_uid.as_str()
+        } else {
+            peer_fallback = event.invoker_id.to_string();
+            peer_fallback.as_str()
+        };
+
         match event.name.as_str() {
             IDENTITY_PLUGIN => {
-                let Ok(req) = serde_json::from_str::<IdentityInboundReq>(&event.data) else {
+                let Some(action_str) = parse_inbound_action(&event.data) else {
                     return;
                 };
-                if req.action != "announce" && req.action != "query" {
-                    return;
-                }
-
-                let cooldown_key = if !event.invoker_uid.is_empty() {
-                    event.invoker_uid
-                } else {
-                    event.invoker_id.to_string()
+                let action = match action_str.as_str() {
+                    "announce" => CooldownAction::IdentityAnnounce,
+                    "query" => CooldownAction::IdentityQuery,
+                    _ => return,
                 };
-
-                if !self.should_reply_identity_ack(&cooldown_key, &req.action, Instant::now()) {
-                    return;
-                }
-
-                let Some(client) = self.upgrade_client() else {
-                    return;
-                };
-
                 let ack = IdentityPayload {
-                    v: 1,
+                    v: PROTOCOL_VERSION,
                     action: "announce_ack".into(),
                     client_type: "bot".into(),
                     app_name: "TeamSpeakClaw".into(),
                     app_version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: self.capabilities.clone(),
                 };
-
-                if let Ok(data) = serde_json::to_string(&ack) {
-                    if let Err(e) = tsclient_rs::send_plugin_command(
-                        &client,
-                        IDENTITY_PLUGIN,
-                        &data,
-                        PluginCommandTarget::Client,
-                        Some(event.invoker_id),
-                    )
-                    .await
-                    {
-                        debug!(error = %e, invoker_id = event.invoker_id, "Send identity announce_ack failed");
-                    }
-                }
+                self.send_ack(IDENTITY_PLUGIN, peer, event.invoker_id, action, &ack)
+                    .await;
             }
             COMMANDS_PLUGIN => {
-                let Ok(req) = serde_json::from_str::<CommandsInboundReq>(&event.data) else {
+                let Some(action_str) = parse_inbound_action(&event.data) else {
                     return;
                 };
-                if req.action != "list_req" {
+                if action_str != "list_req" {
                     return;
                 }
-
-                let cooldown_key = if !event.invoker_uid.is_empty() {
-                    event.invoker_uid
-                } else {
-                    event.invoker_id.to_string()
-                };
-
-                if !self.should_reply_commands_ack(&cooldown_key, Instant::now()) {
-                    return;
-                }
-
-                let Some(client) = self.upgrade_client() else {
-                    return;
-                };
-
                 let ack = CommandsAckPayload {
-                    v: 1,
+                    v: PROTOCOL_VERSION,
                     action: "list_ack".into(),
                     commands: self.commands.clone(),
                 };
-
-                if let Ok(data) = serde_json::to_string(&ack) {
-                    if let Err(e) = tsclient_rs::send_plugin_command(
-                        &client,
-                        COMMANDS_PLUGIN,
-                        &data,
-                        PluginCommandTarget::Client,
-                        Some(event.invoker_id),
-                    )
-                    .await
-                    {
-                        debug!(error = %e, invoker_id = event.invoker_id, "Send commands list_ack failed");
-                    }
-                }
+                self.send_ack(
+                    COMMANDS_PLUGIN,
+                    peer,
+                    event.invoker_id,
+                    CooldownAction::CommandsList,
+                    &ack,
+                )
+                .await;
             }
             _ => {}
         }
@@ -378,58 +646,187 @@ mod tests {
     }
 
     #[test]
-    fn identity_cooldown_distinguishes_announce_and_query() {
+    fn identity_and_commands_cooldowns_are_isolated_per_peer_and_action() {
         let mut config = AppConfig::default();
         config.voice_replay.enabled = false;
         let manager = OpenProtocolManager::new(&config);
 
         let t0 = Instant::now();
-        // 第一次 announce 回复允许
-        assert!(manager.should_reply_identity_ack("uid_1", "announce", t0));
-        // 10秒内再次 announce 回复拒绝
-        assert!(!manager.should_reply_identity_ack(
+        // 同一 peer 的 announce 不阻塞紧随其后的 list_req 与 query
+        assert!(manager.try_acquire_ack("uid_1", CooldownAction::IdentityAnnounce, t0));
+        assert!(manager.try_acquire_ack("uid_1", CooldownAction::CommandsList, t0));
+        assert!(manager.try_acquire_ack("uid_1", CooldownAction::IdentityQuery, t0));
+
+        // 冷却期内同 action 拒绝，到期后恢复
+        assert!(!manager.try_acquire_ack(
             "uid_1",
-            "announce",
+            CooldownAction::IdentityAnnounce,
             t0 + Duration::from_secs(9)
         ));
-        // 10秒后 announce 回复允许
-        assert!(manager.should_reply_identity_ack(
+        assert!(manager.try_acquire_ack(
             "uid_1",
-            "announce",
+            CooldownAction::IdentityAnnounce,
             t0 + Duration::from_secs(11)
         ));
 
-        // query 5秒冷却测试
         let t1 = t0 + Duration::from_secs(20);
-        assert!(manager.should_reply_identity_ack("uid_2", "query", t1));
-        assert!(!manager.should_reply_identity_ack("uid_2", "query", t1 + Duration::from_secs(4)));
-        assert!(manager.should_reply_identity_ack("uid_2", "query", t1 + Duration::from_secs(6)));
+        assert!(manager.try_acquire_ack("uid_2", CooldownAction::IdentityQuery, t1));
+        assert!(!manager.try_acquire_ack(
+            "uid_2",
+            CooldownAction::IdentityQuery,
+            t1 + Duration::from_secs(4)
+        ));
+        assert!(manager.try_acquire_ack(
+            "uid_2",
+            CooldownAction::IdentityQuery,
+            t1 + Duration::from_secs(6)
+        ));
 
-        // 未知 action 拒绝
-        assert!(!manager.should_reply_identity_ack("uid_3", "unknown", t1));
+        let t2 = t1 + Duration::from_secs(10);
+        assert!(manager.try_acquire_ack("uid_3", CooldownAction::CommandsList, t2));
+        assert!(!manager.try_acquire_ack(
+            "uid_3",
+            CooldownAction::CommandsList,
+            t2 + Duration::from_secs(3)
+        ));
+        assert!(manager.try_acquire_ack(
+            "uid_3",
+            CooldownAction::CommandsList,
+            t2 + Duration::from_secs(6)
+        ));
     }
 
     #[test]
-    fn commands_cooldown_enforces_five_seconds_rate_limit() {
+    fn global_ack_budget_limits_burst_and_preserves_rejected_peer_cooldown() {
         let config = AppConfig::default();
         let manager = OpenProtocolManager::new(&config);
 
         let t0 = Instant::now();
-        assert!(manager.should_reply_commands_ack("uid_1", t0));
-        assert!(!manager.should_reply_commands_ack("uid_1", t0 + Duration::from_secs(3)));
-        assert!(manager.should_reply_commands_ack("uid_1", t0 + Duration::from_secs(6)));
+        // 突发上限 4 次放行，第 5 个 peer 被全局限流拒绝
+        assert!(manager.try_acquire_ack("uid_1", CooldownAction::IdentityAnnounce, t0));
+        assert!(manager.try_acquire_ack("uid_2", CooldownAction::IdentityAnnounce, t0));
+        assert!(manager.try_acquire_ack("uid_3", CooldownAction::IdentityAnnounce, t0));
+        assert!(manager.try_acquire_ack("uid_4", CooldownAction::IdentityAnnounce, t0));
+        assert!(!manager.try_acquire_ack("uid_5", CooldownAction::IdentityAnnounce, t0));
+
+        // 0.6 秒补充约 1.2 个令牌：未被记入冷却的 uid_5 可立即补位通过，仍在冷却的 uid_1 仍被拒绝
+        let t1 = t0 + Duration::from_millis(600);
+        assert!(!manager.try_acquire_ack("uid_1", CooldownAction::IdentityAnnounce, t1));
+        assert!(manager.try_acquire_ack("uid_5", CooldownAction::IdentityAnnounce, t1));
     }
 
     #[test]
-    fn self_announce_debounce_prevents_rapid_broadcasts() {
+    fn expired_cooldown_entries_are_pruned_and_failure_rollback_allows_retry() {
         let config = AppConfig::default();
         let manager = OpenProtocolManager::new(&config);
 
         let t0 = Instant::now();
-        assert!(manager.should_announce(t0));
-        assert!(!manager.should_announce(t0 + Duration::from_millis(500)));
-        assert!(!manager.should_announce(t0 + Duration::from_secs(1)));
-        assert!(manager.should_announce(t0 + Duration::from_millis(2100)));
+        assert!(manager.try_acquire_ack("uid_1", CooldownAction::IdentityQuery, t0));
+        // 发送失败回滚后无需等待 5 秒冷却
+        manager.rollback_ack("uid_1", CooldownAction::IdentityQuery, t0);
+        assert!(manager.try_acquire_ack(
+            "uid_1",
+            CooldownAction::IdentityQuery,
+            t0 + Duration::from_millis(100)
+        ));
+
+        // 11 秒后旧记录被清理
+        let t_later = t0 + Duration::from_secs(11);
+        assert!(manager.try_acquire_ack("uid_fresh", CooldownAction::CommandsList, t_later));
+        let limiter = manager.ack_limiter.lock().unwrap();
+        assert_eq!(limiter.cooldowns.len(), 1);
+        assert!(limiter.cooldowns.contains_key(&CooldownKey {
+            peer: "uid_fresh".to_string(),
+            action: CooldownAction::CommandsList,
+        }));
+    }
+
+    #[test]
+    fn parse_inbound_action_enforces_protocol_version() {
+        assert_eq!(
+            parse_inbound_action(r#"{"v":1,"action":"announce"}"#),
+            Some("announce".to_string())
+        );
+        assert_eq!(parse_inbound_action(r#"{"v":2,"action":"announce"}"#), None);
+        assert_eq!(parse_inbound_action(r#"{"v":0,"action":"list_req"}"#), None);
+        assert_eq!(parse_inbound_action(r#"{"action":"announce"}"#), None);
+    }
+
+    #[test]
+    fn announce_state_schedules_trailing_and_rolls_back_on_failure() {
+        let config = AppConfig::default();
+        let manager = OpenProtocolManager::new(&config);
+
+        let t0 = Instant::now();
+        let first = manager.try_begin_announce(AttemptMode::Normal, t0);
+        assert_eq!(
+            first,
+            AnnounceDecision::SendNow {
+                attempt_at: t0,
+                seq_at_start: 0,
+            }
+        );
+
+        // 去抖窗口内仅调度一次尾随广播
+        let trailing =
+            manager.try_begin_announce(AttemptMode::Normal, t0 + Duration::from_millis(500));
+        assert_eq!(
+            trailing,
+            AnnounceDecision::ScheduleTrailing {
+                wait: Duration::from_millis(1500),
+            }
+        );
+        let dedup = manager.try_begin_announce(AttemptMode::Normal, t0 + Duration::from_secs(1));
+        assert_eq!(dedup, AnnounceDecision::AlreadyScheduled);
+
+        // 尾随触发时若已过 2 秒则立即发送
+        let fire_trailing =
+            manager.try_begin_announce(AttemptMode::Trailing, t0 + Duration::from_secs(2));
+        assert_eq!(
+            fire_trailing,
+            AnnounceDecision::SendNow {
+                attempt_at: t0 + Duration::from_secs(2),
+                seq_at_start: 0,
+            }
+        );
+
+        // 发送失败回滚 last_attempt，允许重试且未成功前可触发单次重试
+        assert!(manager.rollback_announce_failure(t0 + Duration::from_secs(2), 0));
+        assert!(manager.should_run_failure_retry(0));
+
+        let retry =
+            manager.try_begin_announce(AttemptMode::Normal, t0 + Duration::from_millis(2100));
+        assert_eq!(
+            retry,
+            AnnounceDecision::SendNow {
+                attempt_at: t0 + Duration::from_millis(2100),
+                seq_at_start: 0,
+            }
+        );
+        manager.record_announce_success();
+        assert!(!manager.should_run_failure_retry(0));
+    }
+
+    #[test]
+    fn build_commands_skips_oversized_entries_and_respects_payload_limit() {
+        let mut config = AppConfig::default();
+        config.voice_replay.enabled = true;
+        config.voice_replay.direct_commands = vec![
+            format!("!{}", "a".repeat(MAX_COMMAND_NAME_CHARS + 5)),
+            "!replay".into(),
+        ];
+
+        let manager = OpenProtocolManager::new(&config);
+        let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["replay"]);
+
+        let ack = CommandsAckPayload {
+            v: PROTOCOL_VERSION,
+            action: "list_ack".into(),
+            commands: manager.commands().to_vec(),
+        };
+        let encoded = serde_json::to_string(&ack).expect("serialize ack");
+        assert!(encoded.len() < MAX_PAYLOAD_BYTES);
     }
 
     #[test]

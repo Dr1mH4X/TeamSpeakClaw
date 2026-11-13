@@ -105,11 +105,10 @@ pub(crate) fn format_client_summary(c: &tsclient_rs::ClientInfo) -> serde_json::
         "name": c.nickname,
         "clid": c.id,
         "channel_id": c.channel_id,
-        "away": c.away.unwrap_or(false),
-        "away_message": c.away_message,
-        "input_muted": c.input_muted.unwrap_or(false),
-        "output_muted": c.output_muted.unwrap_or(false),
-        "channel_commander": c.channel_commander.unwrap_or(false),
+        "away": c.away,
+        "input_muted": c.input_muted,
+        "output_muted": c.output_muted,
+        "channel_commander": c.channel_commander,
     })
 }
 
@@ -620,7 +619,7 @@ mod tests {
         assert_eq!(summary["clid"], 7);
         assert_eq!(summary["channel_id"], 3);
         assert_eq!(summary["away"], true);
-        assert_eq!(summary["away_message"], "brb");
+        assert!(summary.get("away_message").is_none());
         assert_eq!(summary["input_muted"], true);
         assert_eq!(summary["output_muted"], false);
         assert_eq!(summary["channel_commander"], true);
@@ -639,11 +638,20 @@ mod tests {
             channel_commander: None,
         };
         let summary_def = format_client_summary(&default_client);
-        assert_eq!(summary_def["away"], false);
-        assert!(summary_def["away_message"].is_null());
-        assert_eq!(summary_def["input_muted"], false);
-        assert_eq!(summary_def["output_muted"], false);
-        assert_eq!(summary_def["channel_commander"], false);
+        assert_eq!(summary_def.get("away"), Some(&serde_json::Value::Null));
+        assert!(summary_def.get("away_message").is_none());
+        assert_eq!(
+            summary_def.get("input_muted"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            summary_def.get("output_muted"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            summary_def.get("channel_commander"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
