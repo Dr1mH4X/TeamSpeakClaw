@@ -22,6 +22,7 @@ pub const COMMANDS_ACK_COOLDOWN: Duration = Duration::from_secs(5);
 pub const SELF_ANNOUNCE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 pub const MAX_COMMANDS: usize = 12;
+pub const MAX_COMMAND_PREFIX_CHARS: usize = 8;
 pub const MAX_COMMAND_NAME_CHARS: usize = 24;
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 #[cfg(test)]
@@ -56,6 +57,8 @@ pub struct BotCommandItem {
 pub struct CommandsAckPayload {
     pub v: u32,
     pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<String>,
     pub commands: Vec<BotCommandItem>,
 }
 
@@ -237,6 +240,7 @@ pub struct OpenProtocolManager {
     client: Mutex<Option<Weak<tsclient_rs::Client>>>,
     self_client_id: AtomicI32,
     capabilities: Vec<String>,
+    command_prefix: Option<String>,
     commands: Vec<BotCommandItem>,
     ack_limiter: Mutex<AckRateLimiter>,
     announce_state: Mutex<AnnounceState>,
@@ -244,13 +248,14 @@ pub struct OpenProtocolManager {
 
 impl OpenProtocolManager {
     pub fn new(config: &AppConfig) -> Self {
-        let commands = Self::build_commands(config);
+        let (command_prefix, commands) = Self::build_commands_and_prefix(config);
         let capabilities = Self::build_capabilities(!commands.is_empty());
 
         Self {
             client: Mutex::new(None),
             self_client_id: AtomicI32::new(-1),
             capabilities,
+            command_prefix,
             commands,
             ack_limiter: Mutex::new(AckRateLimiter::new(Instant::now())),
             announce_state: Mutex::new(AnnounceState::default()),
@@ -265,14 +270,18 @@ impl OpenProtocolManager {
         caps
     }
 
-    fn build_commands(config: &AppConfig) -> Vec<BotCommandItem> {
+    fn build_commands_and_prefix(config: &AppConfig) -> (Option<String>, Vec<BotCommandItem>) {
         let mut cmds = Vec::new();
+        let mut command_prefix = None;
         if !config.voice_replay.enabled {
-            return cmds;
+            return (command_prefix, cmds);
         }
 
         for raw in &config.voice_replay.direct_commands {
-            let normalized = raw.trim().trim_start_matches(['!', '/']).trim();
+            let trimmed = raw.trim();
+            let stripped = trimmed.trim_start_matches(['!', '/']);
+            let raw_prefix = trimmed[..trimmed.len() - stripped.len()].trim();
+            let normalized = stripped.trim();
             if normalized.is_empty() {
                 continue;
             }
@@ -285,6 +294,16 @@ impl OpenProtocolManager {
                 continue;
             }
 
+            let candidate_prefix = if raw_prefix.is_empty() {
+                None
+            } else {
+                Some(
+                    raw_prefix
+                        .chars()
+                        .take(MAX_COMMAND_PREFIX_CHARS)
+                        .collect::<String>(),
+                )
+            };
             let candidate = BotCommandItem {
                 name: normalized.to_string(),
                 args: Some("[秒数] [@昵称]".into()),
@@ -293,6 +312,7 @@ impl OpenProtocolManager {
             let probe = CommandsAckPayload {
                 v: PROTOCOL_VERSION,
                 action: "list_ack".into(),
+                command_prefix: candidate_prefix.clone(),
                 commands: vec![candidate.clone()],
             };
             let Ok(encoded) = serde_json::to_string(&probe) else {
@@ -308,12 +328,13 @@ impl OpenProtocolManager {
                 continue;
             }
 
+            command_prefix = candidate_prefix;
             cmds.push(candidate);
             break;
         }
 
         cmds.truncate(MAX_COMMANDS);
-        cmds
+        (command_prefix, cmds)
     }
 
     pub fn bind(&self, client: Weak<tsclient_rs::Client>, clid: i32) {
@@ -325,6 +346,11 @@ impl OpenProtocolManager {
     #[cfg(test)]
     pub fn capabilities(&self) -> &[String] {
         &self.capabilities
+    }
+
+    #[cfg(test)]
+    pub fn command_prefix(&self) -> Option<&str> {
+        self.command_prefix.as_deref()
     }
 
     #[cfg(test)]
@@ -568,6 +594,7 @@ impl OpenProtocolManager {
                 let ack = CommandsAckPayload {
                     v: PROTOCOL_VERSION,
                     action: "list_ack".into(),
+                    command_prefix: self.command_prefix.clone(),
                     commands: self.commands.clone(),
                 };
                 self.send_ack(
@@ -618,6 +645,7 @@ mod tests {
         let payload = CommandsAckPayload {
             v: 1,
             action: "list_ack".into(),
+            command_prefix: Some("!".into()),
             commands: vec![
                 BotCommandItem {
                     name: "replay".into(),
@@ -639,6 +667,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(parsed["v"], 1);
         assert_eq!(parsed["action"], "list_ack");
+        assert_eq!(parsed["command_prefix"], "!");
         assert_eq!(parsed["commands"][0]["name"], "replay");
         assert_eq!(parsed["commands"][0]["args"], "[秒数] [@昵称]");
         assert_eq!(parsed["commands"][1]["name"], "skip");
@@ -823,10 +852,12 @@ mod tests {
         let ack = CommandsAckPayload {
             v: PROTOCOL_VERSION,
             action: "list_ack".into(),
+            command_prefix: manager.command_prefix().map(str::to_string),
             commands: manager.commands().to_vec(),
         };
         let encoded = serde_json::to_string(&ack).expect("serialize ack");
         assert!(encoded.len() < MAX_PAYLOAD_BYTES);
+        assert_eq!(manager.command_prefix(), Some("!"));
     }
 
     #[test]
@@ -865,6 +896,7 @@ mod tests {
         let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
         // 仅宣称 bot 自身首个有效直呼主命令，不重复宣称别名，也不包含第三方音乐机器人或通用 LLM 技能（如 play, skip, poke）
         assert_eq!(names, vec![expected_primary]);
+        assert_eq!(manager.command_prefix(), Some("!"));
         assert!(!names.contains(&"poke"));
         assert!(!names.contains(&"play"));
         assert!(!names.contains(&"skip"));
