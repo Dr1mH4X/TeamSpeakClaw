@@ -22,7 +22,6 @@ pub const COMMANDS_ACK_COOLDOWN: Duration = Duration::from_secs(5);
 pub const SELF_ANNOUNCE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 pub const MAX_COMMANDS: usize = 12;
-pub const MAX_COMMAND_PREFIX_CHARS: usize = 8;
 pub const MAX_COMMAND_NAME_CHARS: usize = 24;
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 #[cfg(test)]
@@ -79,6 +78,20 @@ fn parse_inbound_action(data: &str) -> Option<String> {
         return None;
     }
     Some(req.action)
+}
+
+fn split_single_prefix_command(raw: &str) -> Option<(&str, &str)> {
+    let trimmed = raw.trim();
+    let first = trimmed.chars().next()?;
+    if !first.is_ascii_punctuation() {
+        return None;
+    }
+    let (prefix, name) = trimmed.split_at(first.len_utf8());
+    let first_name_char = name.chars().next()?;
+    if !first_name_char.is_alphanumeric() || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((prefix, name))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -279,12 +292,19 @@ impl OpenProtocolManager {
 
         for raw in &config.voice_replay.direct_commands {
             let trimmed = raw.trim();
-            let stripped = trimmed.trim_start_matches(['!', '/']);
-            let raw_prefix = trimmed[..trimmed.len() - stripped.len()].trim();
-            let normalized = stripped.trim();
-            if normalized.is_empty() {
+            let Some(first) = trimmed.chars().next() else {
+                continue;
+            };
+            if first.is_ascii_punctuation() && trimmed.len() == first.len_utf8() {
                 continue;
             }
+            let Some((prefix, normalized)) = split_single_prefix_command(trimmed) else {
+                warn!(
+                    command = trimmed,
+                    "Skip unsupported voice_replay direct command for open protocol"
+                );
+                continue;
+            };
             if normalized.chars().count() > MAX_COMMAND_NAME_CHARS {
                 warn!(
                     command = normalized,
@@ -294,16 +314,7 @@ impl OpenProtocolManager {
                 continue;
             }
 
-            let candidate_prefix = if raw_prefix.is_empty() {
-                None
-            } else {
-                Some(
-                    raw_prefix
-                        .chars()
-                        .take(MAX_COMMAND_PREFIX_CHARS)
-                        .collect::<String>(),
-                )
-            };
+            let candidate_prefix = Some(prefix.to_string());
             let candidate = BotCommandItem {
                 name: normalized.to_string(),
                 args: Some("[秒数] [@昵称]".into()),
@@ -502,14 +513,19 @@ impl OpenProtocolManager {
         guard.rollback(peer, action, acquired_at);
     }
 
-    async fn send_ack<T: serde::Serialize>(
+    async fn send_ack_with<T, F, Fut>(
         &self,
-        plugin: &str,
+        plugin: &'static str,
         peer: &str,
         invoker_id: i32,
         action: CooldownAction,
         payload: &T,
-    ) {
+        send: F,
+    ) where
+        T: serde::Serialize,
+        F: FnOnce(&'static str, String, i32) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         let Ok(data) = serde_json::to_string(payload) else {
             return;
         };
@@ -522,26 +538,15 @@ impl OpenProtocolManager {
             );
             return;
         }
-        let Some(client) = self.upgrade_client() else {
-            return;
-        };
         let now = Instant::now();
         if !self.try_acquire_ack(peer, action, now) {
             return;
         }
 
-        if let Err(e) = tsclient_rs::send_plugin_command(
-            &client,
-            plugin,
-            &data,
-            PluginCommandTarget::Client,
-            Some(invoker_id),
-        )
-        .await
-        {
+        if let Err(error) = send(plugin, data, invoker_id).await {
             self.rollback_ack(peer, action, now);
             debug!(
-                error = %e,
+                error = %error,
                 plugin,
                 invoker_id,
                 "Send open protocol ack failed"
@@ -549,7 +554,11 @@ impl OpenProtocolManager {
         }
     }
 
-    pub async fn handle_plugin_command(&self, event: PluginCommandEvent) {
+    async fn handle_plugin_command_with<F, Fut>(&self, event: PluginCommandEvent, send: F)
+    where
+        F: FnOnce(&'static str, String, i32) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         let self_id = self.self_client_id.load(Ordering::Relaxed);
         if self_id >= 0 && event.invoker_id == self_id {
             return;
@@ -581,7 +590,7 @@ impl OpenProtocolManager {
                     app_version: env!("CARGO_PKG_VERSION").into(),
                     capabilities: self.capabilities.clone(),
                 };
-                self.send_ack(IDENTITY_PLUGIN, peer, event.invoker_id, action, &ack)
+                self.send_ack_with(IDENTITY_PLUGIN, peer, event.invoker_id, action, &ack, send)
                     .await;
             }
             COMMANDS_PLUGIN => {
@@ -597,17 +606,39 @@ impl OpenProtocolManager {
                     command_prefix: self.command_prefix.clone(),
                     commands: self.commands.clone(),
                 };
-                self.send_ack(
+                self.send_ack_with(
                     COMMANDS_PLUGIN,
                     peer,
                     event.invoker_id,
                     CooldownAction::CommandsList,
                     &ack,
+                    send,
                 )
                 .await;
             }
             _ => {}
         }
+    }
+
+    pub async fn handle_plugin_command(&self, event: PluginCommandEvent) {
+        let Some(client) = self.upgrade_client() else {
+            return;
+        };
+        self.handle_plugin_command_with(event, |plugin, data, invoker_id| {
+            let client = Arc::clone(&client);
+            async move {
+                tsclient_rs::send_plugin_command(
+                    &client,
+                    plugin,
+                    &data,
+                    PluginCommandTarget::Client,
+                    Some(invoker_id),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        })
+        .await;
     }
 }
 
@@ -886,17 +917,17 @@ mod tests {
             .capabilities()
             .contains(&"chat:slash_commands".to_string()));
         assert!(!manager.capabilities().contains(&"audio:stereo".to_string()));
-        let expected_primary = config
+        let (expected_prefix, expected_primary) = config
             .voice_replay
             .direct_commands
             .iter()
-            .map(|raw| raw.trim().trim_start_matches(['!', '/']).trim())
-            .find(|s| !s.is_empty())
+            .filter_map(|raw| split_single_prefix_command(raw))
+            .next()
             .expect("default config has a primary direct command");
         let names: Vec<_> = manager.commands().iter().map(|c| c.name.as_str()).collect();
         // 仅宣称 bot 自身首个有效直呼主命令，不重复宣称别名，也不包含第三方音乐机器人或通用 LLM 技能（如 play, skip, poke）
         assert_eq!(names, vec![expected_primary]);
-        assert_eq!(manager.command_prefix(), Some("!"));
+        assert_eq!(manager.command_prefix(), Some(expected_prefix));
         assert!(!names.contains(&"poke"));
         assert!(!names.contains(&"play"));
         assert!(!names.contains(&"skip"));
@@ -929,6 +960,124 @@ mod tests {
         config.voice_replay.direct_commands = vec!["!".into(), "/".into()];
         let empty_manager = OpenProtocolManager::new(&config);
         assert!(empty_manager.commands().is_empty());
+        assert_eq!(empty_manager.command_prefix(), None);
         assert!(empty_manager.capabilities().is_empty());
+    }
+
+    #[test]
+    fn commands_skip_bare_multi_prefix_and_spaced_entries() {
+        let mut config = AppConfig::default();
+        config.voice_replay.enabled = true;
+        config.voice_replay.direct_commands = vec![
+            "replay".into(),
+            "! replay".into(),
+            "!!replay".into(),
+            "!!!!!!!!!replay".into(),
+            "!replay extra".into(),
+        ];
+
+        let rejected_manager = OpenProtocolManager::new(&config);
+        assert!(rejected_manager.commands().is_empty());
+        assert_eq!(rejected_manager.command_prefix(), None);
+        assert!(rejected_manager.capabilities().is_empty());
+
+        config.voice_replay.direct_commands = vec![
+            "replay".into(),
+            "! replay".into(),
+            "!!!!!!!!!replay".into(),
+            "?回放".into(),
+        ];
+        let custom_manager = OpenProtocolManager::new(&config);
+        let prefix = custom_manager
+            .command_prefix()
+            .expect("custom ASCII punctuation entry yields prefix");
+        let name = custom_manager.commands()[0].name.as_str();
+        assert_eq!(prefix, "?");
+        assert_eq!(name, "回放");
+
+        let advertised = format!("{prefix}{name}");
+        assert!(crate::tools::voice_replay::parse_direct_command(
+            &advertised,
+            &config.voice_replay.direct_commands,
+        )
+        .is_some());
+
+        config.voice_replay.direct_commands = vec!["?".into(), "/replay".into()];
+        let slash_manager = OpenProtocolManager::new(&config);
+        assert_eq!(slash_manager.command_prefix(), Some("/"));
+        assert_eq!(slash_manager.commands()[0].name, "replay");
+    }
+
+    #[tokio::test]
+    async fn handle_plugin_command_list_req_emits_configured_prefix_and_rolls_back_on_failure() {
+        let mut config = AppConfig::default();
+        config.voice_replay.enabled = true;
+        config.voice_replay.direct_commands = vec!["!replay".into()];
+        let manager = OpenProtocolManager::new(&config);
+
+        let sent = Arc::new(Mutex::new(Vec::<(&'static str, String, i32)>::new()));
+        let event = PluginCommandEvent {
+            name: COMMANDS_PLUGIN.to_string(),
+            data: r#"{"v":1,"action":"list_req"}"#.to_string(),
+            invoker_id: 42,
+            invoker_name: "Alice".to_string(),
+            invoker_uid: "uid_alice".to_string(),
+        };
+
+        // 首次发送失败会回滚对端冷却，随后重试可立即发出完整 list_ack
+        manager
+            .handle_plugin_command_with(event.clone(), |_, _, _| async {
+                Err("simulated send failure".to_string())
+            })
+            .await;
+
+        let sent_ref = Arc::clone(&sent);
+        manager
+            .handle_plugin_command_with(event, move |plugin, data, invoker_id| async move {
+                sent_ref.lock().unwrap().push((plugin, data, invoker_id));
+                Ok(())
+            })
+            .await;
+
+        {
+            let captured = sent.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, COMMANDS_PLUGIN);
+            assert_eq!(captured[0].2, 42);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&captured[0].1).expect("parse outgoing list_ack");
+            assert_eq!(parsed["v"], 1);
+            assert_eq!(parsed["action"], "list_ack");
+            assert_eq!(parsed["command_prefix"], "!");
+            assert_eq!(parsed["commands"][0]["name"], "replay");
+        }
+
+        // 禁用语音回放时省略 command_prefix 且 commands 为空数组
+        config.voice_replay.enabled = false;
+        let disabled_manager = OpenProtocolManager::new(&config);
+        let disabled_sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let disabled_sent_ref = Arc::clone(&disabled_sent);
+        disabled_manager
+            .handle_plugin_command_with(
+                PluginCommandEvent {
+                    name: COMMANDS_PLUGIN.to_string(),
+                    data: r#"{"v":1,"action":"list_req"}"#.to_string(),
+                    invoker_id: 43,
+                    invoker_name: "Bob".to_string(),
+                    invoker_uid: "uid_bob".to_string(),
+                },
+                move |_, data, _| async move {
+                    disabled_sent_ref.lock().unwrap().push(data);
+                    Ok(())
+                },
+            )
+            .await;
+
+        let disabled_captured = disabled_sent.lock().unwrap();
+        assert_eq!(disabled_captured.len(), 1);
+        let disabled_parsed: serde_json::Value =
+            serde_json::from_str(&disabled_captured[0]).expect("parse disabled list_ack");
+        assert!(disabled_parsed.get("command_prefix").is_none());
+        assert_eq!(disabled_parsed["commands"], serde_json::json!([]));
     }
 }

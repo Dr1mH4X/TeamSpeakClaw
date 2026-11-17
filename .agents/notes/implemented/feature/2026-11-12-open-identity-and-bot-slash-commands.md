@@ -13,7 +13,7 @@ TeamSpeak 服务端与客户端标准协议不区分第三方客户端实现与�
 通过 `tsclient-rs` 升级至 `0.2.7`，在 `src/adapter/headless/open_protocol.rs` 中引入两阶段 `PluginCommand` 开放协议管理模块 `OpenProtocolManager`，并在 `src/adapter/headless/event.rs` 的生命周期与事件流中接线：
 
 1. 身份互认子协议 `tsclient:identity`：仅处理 `v = 1` 报文；进入或切换频道时向当前频道（`TargetMode::CurrentChannel`）广播 `announce`；收到对端广播 `announce` 或定向探测 `query` 时，经防刷频限流后单播回执 `announce_ack`。声明客户端类型为 `"bot"`，软件名为 `"TeamSpeakClaw"`，版本号读取 `CARGO_PKG_VERSION`，并在存在可用直呼命令时上报 `"chat:slash_commands"` 能力标签（不宣称无协商必要的音频扩展能力）。
-2. 斜杠命令拉取子协议 `tsclient:commands`：仅处理 `v = 1` 的单播查询 `list_req`，单播回执 `list_ack` 与精简命令清单。命令严格限制为机器人原生直呼主命令——从 `config.voice_replay.direct_commands` 依次分离前导 `!` / `/` 前缀并跳过空命令名、超过 24 字符或序列化后达到 1024 字节的条目，选取首个有效配置项作为主命令（默认配置下为 `replay`），将其截断至 8 字符以内的前导前缀写入可选字段 `command_prefix`（为空则省略，接收方按 `"/"` 兜底），避免别名重复，也不宣称外部音乐机器人或大模型通用技能（如 `poke`、`play`、`skip`）。未开启语音回放或无合法直呼命令时清单为空，能力集动态排除 `chat:slash_commands`。单条回执上限 12 条，省略空 `args` 字段与空 `command_prefix` 字段，并强制校验出站 JSON 载荷严格小于 1024 字节。
+2. 斜杠命令拉取子协议 `tsclient:commands`：仅处理 `v = 1` 的单播查询 `list_req`，单播回执 `list_ack` 与精简命令清单。命令严格限制为机器人原生直呼主命令——从 `config.voice_replay.direct_commands` 仅提取单个前导 ASCII 标点前缀与以字母、数字或中文开头且无空白的单 token 命令名，跳过无前导标点的裸命令、多前缀、含空白字符、空命令名、超过 24 字符或序列化后达到 1024 字节的条目，选取首个有效配置项作为主命令（默认配置下为 `replay`），将其单字符前导前缀写入可选字段 `command_prefix`（缺省时接收方按 `"/"` 兜底），避免别名重复，也不宣称外部音乐机器人或大模型通用技能（如 `poke`、`play`、`skip`）。未开启语音回放或无合法直呼命令时清单为空，能力集动态排除 `chat:slash_commands`。单条回执上限 12 条，省略空 `args` 字段与空 `command_prefix` 字段，并强制校验出站 JSON 载荷严格小于 1024 字节。
 3. 防刷频与限流约束：
    - 过滤自身回显：丢弃 `invoker_id == self_id` 的插件命令广播。
    - 进房广播防抖与恢复：通过 `SELF_ANNOUNCE_DEBOUNCE`（2 秒）合并频繁切换频道时的全频道广播，若窗内再次切房则调度一次尾随广播（使用 `Weak<OpenProtocolManager>` 避免延长生命周期）；广播发送失败时回滚去抖时间戳，并针对未成功完成的初始广播调度最多一次短延迟重试。
@@ -71,6 +71,6 @@ TeamSpeakClaw 接入 FlSpeak 客户端时，在频道树成员列表中能点亮
 
 - 单测覆盖 `IdentityPayload` 与 `CommandsAckPayload` 强类型序列化结构、空字段省略及 `v = 1` 版本号校验，验证单包体积严格低于 1024 字节。
 - 单测覆盖 `OpenProtocolManager` 按 `(peer, action)` 隔离的 `announce`（10 秒）、`query`（5 秒）、`list_req`（5 秒）冷却窗口、过期记录清理、全局突发令牌上限、受限对端冷却保护以及发送失败回滚。
-- 单测覆盖进房广播去抖、窗内尾随调度与失败回滚，以及基于运行期配置动态构建能力集并跳过超长直呼命令条目。
+- 单测覆盖进房广播去抖、窗内尾随调度与失败回滚，基于运行期配置动态构建能力集并跳过超长、裸命令、多前缀与含空白 `direct_commands` 条目以保持与 `parse_direct_command` 一致，以及 `handle_plugin_command_with` 针对 `list_req` 请求实际出站 `list_ack` 的前缀序列化与失败回滚。
 - 单测覆盖 `parse_direct_command` 针对 `/replay`、`/回放` 以及带参变体的直通解析与非法子命令拒绝。
 - 单测覆盖 `format_client_summary` 与 `format_client_status_summary` 对 `Option<bool>` 三态（`null` / `"unknown"` / `"active"`）的保留，以及 `merge_client_status_from_snapshot` 对非空 UID 匹配与 `client_away_message` 剔除的约束。
