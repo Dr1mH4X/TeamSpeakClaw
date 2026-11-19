@@ -14,7 +14,7 @@ TeamSpeak 无头客户端是两族入站适配器中的 TeamSpeak 一侧：它�
 
 建连后由 `take_main_subscriptions()` 取事件与断开订阅，`actor` 任务循环负责收发；入站事件经 `event` 适配成路由层使用的事件，`types` 定义其字段。
 
-进房或移动频道触发 `open_protocol::OpenProtocolManager::announce_identity()` 广播自身客户端类型（`bot`）、软件名、版本号与能力标签；对端入站插件命令在 `open_protocol::OpenProtocolManager::handle_plugin_command()` 统一进行防刷频冷却检查后单播回复 `announce_ack` 或 `list_ack`。
+进房或移动频道时由 `open_protocol::attach_open_protocol()` 挂载的 `tsclient_rs::open_protocol::OpenProtocolHandle` 自动向当前频道广播自身客户端类型（`bot`）、软件名、版本号与能力标签（建连首次就绪额外向全服发出单次带 `noreply: true` 的单向公告，便于跨频道客户端立即识别），并在防刷频冷却与全局令牌桶检查后单播回复 `announce_ack` 或 `list_ack`。
 
 出站方向有两条：文本走 `send_text_message()`——先按字节长度分片，再逐片调用 `sendTextMessage`；音频经出站 FIFO 交给 `actor` 的 pacer，由它按连接节奏写出。`speaker_ring` 保存最近说话人的音频，`speech` 与 `audio_codec` 负责 OPUS 编解码与 STT/TTS 的音频封装。
 
@@ -24,7 +24,7 @@ TeamSpeak 无头客户端是两族入站适配器中的 TeamSpeak 一侧：它�
 - 文本发送只有一个实现：TS 文本路由、工具回复与语音桥 `send_notice` 都复用它；`send_notice` 先把目标模式归一为私聊/频道/服务器再复用，不另起发送路径。
 - 开放协议进房广播：忽略自身回显；进房或切房广播去抖 2 秒，窗内触发切房会调度尾随广播，首次发送失败时允许单次重试并回滚去抖时间戳。
 - 开放协议单播限流：仅处理 `v = 1` 报文；按 `(peer, action)` 维护独立冷却（`announce` 10 秒、`query` 与 `list_req` 各 5 秒）并清理过期记录，叠加全局出站令牌桶上限；先确认客户端存活再扣减配额，发送失败时回滚对端冷却。
-- 开放协议载荷上限：命令名称上限 24 字符且不含空白、仅提取单个 ASCII 标点作为 `command_prefix`（命令名以字母、数字或中文开头），清单从 `config.voice_replay.direct_commands` 跳过裸命令、多前缀或格式不符项后选取首个有效语音回放直呼主命令并随 `list_ack` 下发（最多 12 条），出站 JSON 载荷严格小于 1024 字节；未产出可用命令时排除 `chat:slash_commands` 能力宣称。
+- 开放协议载荷上限：命令名称上限 24 字符且不含空白、仅提取单个 ASCII 标点作为 `command_prefix`（命令名以字母、数字或中文开头），清单从 `config.voice_replay.direct_commands` 跳过裸命令、多前缀或格式不符项后选取首个有效语音回放直呼主命令并随 `list_ack` 下发，出站完整 `plugincmd` 线缆命令严格小于 1024 字节；未产出可用命令时排除 `chat:slash_commands` 能力宣称。
 - 音频只能经出站 FIFO 与 `actor` 的 pacer 进入连接，其他模块不得直写连接的音频通道，否则 pacer 的节奏失效。
 - 身份文件与等级升级由本模块独占，多处同时登录同一身份会互相挤下线。
 - 断线只上报事件、不在适配器内部自行重连：退避与重试归 `adapter/lifecycle.rs`。

@@ -144,13 +144,12 @@ impl TsAdapter {
             let (event_tx, event_rx) = broadcast::channel::<TsEvent>(256);
             let (disconnect_tx, disconnect_rx) = watch::channel(false);
             let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let open_protocol = Arc::new(super::open_protocol::OpenProtocolManager::new(&config));
+            super::open_protocol::attach_open_protocol(&client, &config);
             Self::register_event_handlers(
                 &client,
                 event_tx.clone(),
                 disconnect_tx,
                 Arc::clone(&closing),
-                open_protocol.clone(),
             );
 
             client
@@ -198,9 +197,6 @@ impl TsAdapter {
                     let bot_clid = u32::try_from(clid)
                         .map_err(|_| anyhow!("invalid TeamSpeak bot client ID: {clid}"))?;
                     let client = Arc::new(client);
-
-                    open_protocol.bind(Arc::downgrade(&client), clid);
-                    open_protocol.announce_identity().await;
 
                     let adapter = Arc::new(Self {
                         client,
@@ -251,7 +247,6 @@ impl TsAdapter {
         tx: broadcast::Sender<TsEvent>,
         disconnect_tx: watch::Sender<bool>,
         closing: Arc<std::sync::atomic::AtomicBool>,
-        open_protocol: Arc<super::open_protocol::OpenProtocolManager>,
     ) {
         {
             let tx = tx.clone();
@@ -284,30 +279,6 @@ impl TsAdapter {
                         invoker_groups: msg.invoker_groups.clone(),
                         message: msg.message.clone(),
                     }));
-                }
-            }));
-        }
-
-        {
-            let protocol = open_protocol.clone();
-            client.on_plugin_command(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::PluginCommand(ev) = event {
-                    let protocol = protocol.clone();
-                    tokio::spawn(async move {
-                        protocol.handle_plugin_command(ev).await;
-                    });
-                }
-            }));
-        }
-
-        {
-            let protocol = open_protocol;
-            client.on_client_moved(Arc::new(move |event: tsclient_rs::Event| {
-                if let tsclient_rs::Event::ClientMoved(ev) = event {
-                    let protocol = protocol.clone();
-                    tokio::spawn(async move {
-                        protocol.handle_client_moved(ev.id).await;
-                    });
                 }
             }));
         }
