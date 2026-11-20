@@ -15,7 +15,7 @@ use tokio::time::{timeout, Instant};
 use tracing::{debug, warn};
 
 use super::audio_codec::{
-    new_opus_stereo_encoder, pcm_frame_to_float, PCM_FRAME_MS, PCM_FRAME_SAMPLES_STEREO,
+    pcm_frame_to_float, OpusEncoder, MAX_VOICE_PACKET_BYTES, PCM_FRAME_MS, PCM_FRAME_SAMPLES_STEREO,
 };
 use super::speech::detect_audio_format;
 
@@ -502,9 +502,9 @@ async fn play_pcm_clip(
 ) -> Result<()> {
     let pcm_duration = pcm_payload_duration(payload)?;
     let deadline = pcm_clip_deadline(dequeue_at, pcm_duration);
-    let encoder = new_opus_stereo_encoder()?;
+    let mut encoder = OpusEncoder::new_stereo()?;
     let mut float_buf = vec![0f32; PCM_FRAME_SAMPLES_STEREO];
-    let mut opus_out = [0u8; 1275];
+    let mut opus_out = [0u8; MAX_VOICE_PACKET_BYTES];
 
     let mut offset = 0usize;
     while offset + PCM_FRAME_SAMPLES_STEREO <= payload.samples.len() {
@@ -516,9 +516,7 @@ async fn play_pcm_clip(
         }
         let frame = &payload.samples[offset..offset + PCM_FRAME_SAMPLES_STEREO];
         pcm_frame_to_float(frame, &mut float_buf);
-        let len = encoder
-            .encode_float(&float_buf, &mut opus_out)
-            .map_err(|e| anyhow!("opus encode failed: {e}"))?;
+        let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
         if ts3_audio_tx
             .send((opus_out[..len].to_vec(), 5))
             .await
@@ -745,10 +743,10 @@ async fn process_encoded_segment(
         result
     });
 
-    let encoder = new_opus_stereo_encoder()?;
+    let mut encoder = OpusEncoder::new_stereo()?;
     let mut pcm = vec![0u8; PCM_FRAME_SAMPLES_STEREO * 2];
     let mut float_buf = vec![0f32; PCM_FRAME_SAMPLES_STEREO];
-    let mut opus_out = [0u8; 1275];
+    let mut opus_out = [0u8; MAX_VOICE_PACKET_BYTES];
 
     loop {
         // 逐帧检查取消：插话不必等当前段（整句）播完
@@ -765,9 +763,7 @@ async fn process_encoded_segment(
             let hi = pcm[i * 2 + 1];
             *item = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
         }
-        let len = encoder
-            .encode_float(&float_buf, &mut opus_out)
-            .map_err(|e| anyhow!("opus encode failed: {e}"))?;
+        let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
         if ts3_audio_tx
             .send((opus_out[..len].to_vec(), 5))
             .await

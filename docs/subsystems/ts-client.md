@@ -16,7 +16,7 @@ TeamSpeak 无头客户端是两族入站适配器中的 TeamSpeak 一侧：它�
 
 进房或移动频道时由 `open_protocol::attach_open_protocol()` 挂载的 `tsclient_rs::open_protocol::OpenProtocolHandle` 自动向当前频道广播自身客户端类型（`bot`）、软件名、版本号与能力标签（建连首次就绪额外向全服发出单次带 `noreply: true` 的单向公告，便于跨频道客户端立即识别），并在防刷频冷却与全局令牌桶检查后单播回复 `announce_ack` 或 `list_ack`。
 
-出站方向有两条：文本走 `send_text_message()`——先按字节长度分片，再逐片调用 `sendTextMessage`；音频经出站 FIFO 交给 `actor` 的 pacer，由它按连接节奏写出。`speaker_ring` 保存最近说话人的音频，`speech` 与 `audio_codec` 负责 OPUS 编解码与 STT/TTS 的音频封装。
+出站方向有两条：文本走 `send_text_message()`——先按字节长度分片，再逐片调用 `sendTextMessage`；音频经出站 FIFO 交给 `actor` 的 pacer，由它按连接节奏写出。入站方向 `actor` 从 `VoiceData` 提取 `seq` 同步喂给 `speaker_ring::SpeakerRings::push_opus_frame()` 与 gRPC `AudioFrameEvent`；`audio_output`、`speaker_ring` 与 `speech` 统一经由 `audio_codec` 的纯 Rust `rusty-opus` 封装执行 48kHz 立体声编解码。
 
 ## 不变量
 
@@ -28,6 +28,7 @@ TeamSpeak 无头客户端是两族入站适配器中的 TeamSpeak 一侧：它�
 - 音频只能经出站 FIFO 与 `actor` 的 pacer 进入连接，其他模块不得直写连接的音频通道，否则 pacer 的节奏失效。
 - 身份文件与等级升级由本模块独占，多处同时登录同一身份会互相挤下线。
 - 断线只上报事件、不在适配器内部自行重连：退避与重试归 `adapter/lifecycle.rs`。
+- Opus 编解码收口于 `audio_codec`：出站编码固定 48kHz 立体声 Audio 模式、128kbps CVBR，单包上限 `MAX_VOICE_PACKET_BYTES = 484`；入站由 `OpusJitterDecoder` 按 `u16` 回绕序差对 `1 <= diff <= 3` 做轻量重排缓冲，缺包优先调用 `decode_fec` 或上限 3 帧（60ms）的 `decode_plc`（严格按单帧 20ms / 960 样本/声道解码），1 字节边界包静默跳过，0 字节尾包清空待重排缓冲并重同步，大跳变（`diff > 32`）或长静默后直接重同步。
 
 ## 相关决策
 

@@ -60,7 +60,7 @@ website/                     # Docusaurus 用户文档（排除在 Rust CI 路�
 - Format: `cargo fmt`
 - Clean: `cargo clean`
 
-构建依赖（protoc-bin-vendored、CMAKE_POLICY_VERSION_MINIMUM=3.5、Linux/macOS/Docker 依赖）见 [docs/development.md](docs/development.md)。
+构建依赖（protoc-bin-vendored 与 Docker/Linux C 工具链要求）见 [docs/development.md](docs/development.md)。
 
 ## Architecture
 

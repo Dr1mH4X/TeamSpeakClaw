@@ -10,7 +10,6 @@ on:
       - master
     paths:
       - ".github/workflows/**"
-      - ".cargo/**"
       - ".dockerignore"
       - "Dockerfile"
       - "proto/**"
@@ -28,7 +27,6 @@ on:
       - master
     paths:
       - ".github/workflows/**"
-      - ".cargo/**"
       - ".dockerignore"
       - "Dockerfile"
       - "proto/**"
@@ -64,11 +62,6 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libopus-dev
 
       - name: Check formatting
         run: cargo fmt --check

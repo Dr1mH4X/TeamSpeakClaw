@@ -69,4 +69,5 @@ message AudioFrameEvent {
   string from_client_name = 2;
   Codec codec = 3;
   bytes frame = 5;
+  uint32 seq = 6;
 }

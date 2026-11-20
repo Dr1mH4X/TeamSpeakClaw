@@ -8,8 +8,7 @@ use anyhow::{anyhow, Result};
 use tracing::warn;
 
 use super::audio_codec::{
-    new_opus_stereo_decoder, pcm_stereo_48k_duration, stereo_48k_sample_count, CHANNELS,
-    SAMPLE_RATE_HZ,
+    pcm_stereo_48k_duration, stereo_48k_sample_count, OpusJitterDecoder, CHANNELS, SAMPLE_RATE_HZ,
 };
 
 const MAX_TRACKED_SPEAKERS: usize = 6;
@@ -59,7 +58,7 @@ pub struct SpeakerTrack {
     /// 上一帧入环墙钟；驱逐不清除
     pub last_frame_at: Option<Instant>,
     pub segments: VecDeque<SpeakerSegment>,
-    pub decoder: audiopus::coder::Decoder,
+    pub decoder: OpusJitterDecoder,
 }
 
 struct Inner {
@@ -138,60 +137,57 @@ impl SpeakerRings {
         clid: u32,
         name: &str,
         codec: i32,
+        seq: u16,
         frame: &[u8],
         received_at: Instant,
     ) -> Result<()> {
-        let pcm = self.decode_opus_frame(clid, name, codec, frame, received_at)?;
-        if let Some(samples) = pcm {
-            self.append_pcm(clid, name, samples, received_at);
+        let frames = self.decode_opus_frames(clid, name, codec, seq, frame, received_at)?;
+        for samples in frames {
+            if !samples.is_empty() {
+                self.append_pcm(clid, name, samples, received_at);
+            }
         }
         Ok(())
     }
 
-    fn decode_opus_frame(
+    fn decode_opus_frames(
         &self,
         clid: u32,
         name: &str,
         codec: i32,
+        seq: u16,
         frame: &[u8],
         received_at: Instant,
-    ) -> Result<Option<Vec<i16>>> {
-        // TS 语音流 1 字节包是控制/边界标记，不入 run、不重置 last_frame_at
+    ) -> Result<Vec<Vec<i16>>> {
+        let mut inner = self.inner.lock().expect("speaker rings poisoned");
+        // TS 语音流 0/1 字节包是结束/边界标记：仅通知已有轨道处理（清空重排/跳过），不建轨也不刷新 last_frame_at
         if frame.len() <= 1 {
-            return Ok(None);
+            if let Some(track) = inner.tracks.get_mut(&clid) {
+                let _ = track.decoder.push(seq, frame, received_at)?;
+            }
+            return Ok(Vec::new());
         }
 
-        let mut inner = self.inner.lock().expect("speaker rings poisoned");
         Self::ensure_track(&mut inner, clid, name, received_at);
         let track = inner
             .tracks
             .get_mut(&clid)
             .ok_or_else(|| anyhow!("speaker track missing after ensure"))?;
 
-        let mut decoded = vec![0i16; 5760 * CHANNELS as usize];
-        let packet = match frame.try_into() {
-            Ok(packet) => packet,
+        match track.decoder.push(seq, frame, received_at) {
+            Ok(frames) => Ok(frames),
             Err(error) => {
-                warn!(clid, codec, len = frame.len(), error = %error, "speaker ring drop invalid opus packet");
-                return Ok(None);
+                warn!(
+                    clid,
+                    codec,
+                    seq,
+                    len = frame.len(),
+                    error = %error,
+                    "speaker ring drop undecodable opus frame"
+                );
+                Ok(Vec::new())
             }
-        };
-        let decoded_mut = (&mut decoded)
-            .try_into()
-            .map_err(|e: audiopus::Error| anyhow!("opus output buffer invalid: {e}"))?;
-        let samples_per_channel = match track.decoder.decode(Some(packet), decoded_mut, false) {
-            Ok(n) => n,
-            Err(error) => {
-                warn!(clid, codec, len = frame.len(), error = %error, "speaker ring drop undecodable opus frame");
-                return Ok(None);
-            }
-        };
-        if samples_per_channel == 0 {
-            return Ok(None);
         }
-        Ok(Some(
-            decoded[..samples_per_channel * CHANNELS as usize].to_vec(),
-        ))
     }
 
     /// 写入路径：建轨 / run 链式续写或断 run / 墙钟驱逐
@@ -231,7 +227,7 @@ impl SpeakerRings {
             }
         }
 
-        let decoder = new_opus_stereo_decoder().expect("opus stereo decoder init");
+        let decoder = OpusJitterDecoder::new_stereo().expect("opus jitter decoder init");
         inner.tracks.insert(
             clid,
             SpeakerTrack {
@@ -463,10 +459,10 @@ mod tests {
     fn one_byte_voice_marker_is_skipped_without_decode() {
         let rings = SpeakerRings::new(Duration::from_secs(30));
         rings
-            .push_opus_frame(1, "alice", 5, &[0x02], Instant::now())
+            .push_opus_frame(1, "alice", 5, 0, &[0x02], Instant::now())
             .unwrap();
         rings
-            .push_opus_frame(1, "alice", 5, &[0x07], Instant::now())
+            .push_opus_frame(1, "alice", 5, 1, &[0x07], Instant::now())
             .unwrap();
         assert_eq!(rings.segment_count(1), 0);
     }
@@ -477,10 +473,71 @@ mod tests {
         let t0 = Instant::now();
         rings.append_pcm(1, "alice", pcm_ms(20), t0);
         rings
-            .push_opus_frame(1, "alice", 5, &[0x02], t0 + Duration::from_millis(10))
+            .push_opus_frame(1, "alice", 5, 1, &[0x02], t0 + Duration::from_millis(10))
             .unwrap();
         rings.append_pcm(1, "alice", pcm_ms(20), t0 + Duration::from_millis(20));
         assert_eq!(rings.segment_count(1), 1);
+    }
+
+    #[test]
+    fn opus_reorder_and_eos_clear_keep_ring_clean_without_plc() {
+        use crate::adapter::headless::audio_codec::{
+            OpusEncoder, MAX_VOICE_PACKET_BYTES, PCM_FRAME_SAMPLES_STEREO,
+        };
+
+        let mut encoder = OpusEncoder::new_stereo().expect("encoder init");
+        let mut buf = [0u8; MAX_VOICE_PACKET_BYTES];
+        let frames: Vec<Vec<u8>> = (0..4)
+            .map(|i| {
+                let val = 0.25 + i as f32 * 0.05;
+                let mut pcm = Vec::with_capacity(PCM_FRAME_SAMPLES_STEREO);
+                for s in 0..PCM_FRAME_SAMPLES_STEREO / 2 {
+                    let t = (i * 960 + s) as f32 / 48_000.0;
+                    let sample = val * (2.0 * std::f32::consts::PI * 500.0 * t).sin();
+                    pcm.push(sample);
+                    pcm.push(sample);
+                }
+                let n = encoder.encode_frame(&pcm, &mut buf).expect("encode");
+                buf[..n].to_vec()
+            })
+            .collect();
+
+        let rings = SpeakerRings::new(DEFAULT_REPLAY_WINDOW);
+        let t0 = Instant::now();
+        // 回绕乱序：65534 -> 0 -> 65535
+        rings
+            .push_opus_frame(1, "alice", 5, 65534, &frames[0], t0)
+            .unwrap();
+        rings
+            .push_opus_frame(1, "alice", 5, 0, &frames[2], t0 + Duration::from_millis(20))
+            .unwrap();
+        rings
+            .push_opus_frame(
+                1,
+                "alice",
+                5,
+                65535,
+                &frames[1],
+                t0 + Duration::from_millis(40),
+            )
+            .unwrap();
+        assert_eq!(rings.segment_count(1), 1);
+
+        // 先缓未来包（seq = 2），再收 0 字节 EOS -> 清空缓冲且无 PLC
+        rings
+            .push_opus_frame(1, "alice", 5, 2, &frames[3], t0 + Duration::from_millis(60))
+            .unwrap();
+        rings
+            .push_opus_frame(1, "alice", 5, 3, &[], t0 + Duration::from_millis(80))
+            .unwrap();
+
+        let inner = rings.inner.lock().unwrap();
+        let track = &inner.tracks[&1];
+        assert_eq!(track.decoder.pending_len(), 0);
+        let stats = track.decoder.stats();
+        assert_eq!(stats.normal_frames, 3);
+        assert_eq!(stats.plc_frames, 0);
+        assert_eq!(stats.eos_resets, 1);
     }
 
     #[test]

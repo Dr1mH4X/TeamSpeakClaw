@@ -11,9 +11,9 @@
 
 ## 构建依赖
 
-`build.rs` 用 `protoc-bin-vendored` 定位 protoc 并交给 `tonic_build` 编译 `proto/voice.proto`，本机无需预装 protoc。`.cargo/config.toml` 设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`，供受此策略约束的构建脚本正常工作，勿删除该配置。
+`build.rs` 用 `protoc-bin-vendored` 定位 protoc 并交给 `tonic_build` 编译 `proto/voice.proto`，本机无需预装 protoc。Opus 编解码由纯 Rust `rusty-opus` 在 Cargo 内完成编译。
 
-各平台系统依赖：Linux 需 `cmake` 与 `libopus-dev`（运行镜像另需 opus/ffmpeg）；macOS 需 `autoconf automake libtool`；Docker 构建在 `rust:alpine` 内安装 `musl-dev cmake make gcc protoc`（显式 `ENV PROTOC=/usr/bin/protoc`），运行时镜像基于 `alpine:3.20`。具体装包步骤见 CI 各 workflow，见 [ci-cd.md](ci-cd.md)。
+系统编译器与运行时依赖：Linux/macOS 使用系统自带 `gcc`/`clang`（供 `ring` 与 `tract-linalg` 的 `cc` 构建使用）；Docker 构建在 `rust:alpine` 内安装 `musl-dev gcc protoc` 并显式设置 `ENV PROTOC=/usr/bin/protoc`，运行时镜像基于 `alpine:3.20` 并安装 `ca-certificates ffmpeg tzdata`。具体构建流程见 CI 各 workflow，见 [ci-cd.md](ci-cd.md)。
 
 ## 开发流程
 

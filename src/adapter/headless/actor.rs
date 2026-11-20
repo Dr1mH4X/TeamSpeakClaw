@@ -379,6 +379,7 @@ pub(crate) async fn ts3_actor(
                         from_client_id,
                         &from_client_name,
                         vd.codec,
+                        vd.seq,
                         &vd.data,
                         Instant::now(),
                     );
@@ -390,6 +391,7 @@ pub(crate) async fn ts3_actor(
                     from_client_name,
                     codec: vd.codec,
                     frame: vd.data.to_vec(),
+                    seq: u32::from(vd.seq),
                 })),
             });
         }

@@ -1,15 +1,14 @@
 FROM rust:alpine AS builder
-RUN apk add --no-cache musl-dev cmake make gcc protoc
+RUN apk add --no-cache musl-dev gcc protoc
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY .cargo ./.cargo
 COPY src ./src
 COPY proto ./proto
 ENV PROTOC=/usr/bin/protoc
 RUN cargo build --release
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates opus ffmpeg tzdata
+RUN apk add --no-cache ca-certificates ffmpeg tzdata
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -D -h /home/appuser -s /sbin/nologin appuser
 WORKDIR /app

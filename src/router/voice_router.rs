@@ -830,6 +830,7 @@ impl VoiceRouter {
                             from_client_name: chunk.speaker_name.clone(),
                             codec: 4,
                             frame: Vec::new(),
+                            seq: 0,
                         };
                         let verdict = router.take_wake_verdict(chunk.speaker_client_id).await;
                         if let Err(error) = audio_chunk_tx.try_send((audio, chunk, verdict)) {

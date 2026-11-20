@@ -31,11 +31,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libopus-dev
-
       - name: Check formatting
         run: cargo fmt --check
 

@@ -15,9 +15,9 @@ GitHub Actions 共 8 个 workflow，位于 `.github/workflows/`。下表为每�
 
 ## 主线流程
 
-`ci.yml` 与 `release.yml` 结构一致：`quality` 在 ubuntu 上跑 `cargo fmt --check`、`cargo test --all-targets --locked`、`cargo clippy --all-targets --locked -- -D warnings`（装 `cmake libopus-dev`）；`meta` 调 reusable-meta 解析版本与发布属性（tag `v*` 时 version 取去 `v`，否则为 `0.0.0-dev.<短sha>`）；`build` 依赖前两者调 reusable-build。
+`ci.yml` 与 `release.yml` 结构一致：`quality` 在 ubuntu 上跑 `cargo fmt --check`、`cargo test --all-targets --locked`、`cargo clippy --all-targets --locked -- -D warnings`；`meta` 调 reusable-meta 解析版本与发布属性（tag `v*` 时 version 取去 `v`，否则为 `0.0.0-dev.<短sha>`）；`build` 依赖前两者调 reusable-build。
 
-`reusable-build.yml` 矩阵三平台：windows-amd64 / linux-amd64 / macos-aarch64，各平台装对应系统依赖（macOS `brew install autoconf automake libtool`）。发版时先用 Python 校验 semver 并改写 `Cargo.toml` / `Cargo.lock` 版本，再 `cargo build --release`，把二进制、`examples/config/` 的两个模板与 `models/` 内的模型清单和下载脚本（`README.md`、`fetch-models.sh`、`fetch-models.ps1`）打进 zip 或 tar.gz 归档并上传 artifact；归档不含任何模型文件，唤醒模型与 whisper 模型由使用者按 [models/README.md](../models/README.md) 自行下载。GHCR 镜像不含模型，运行时靠 `./models:/app/models` 挂载供给。
+`reusable-build.yml` 矩阵三平台：windows-amd64 / linux-amd64 / macos-aarch64，直接使用运行器预装编译器构建。发版时先用 Python 校验 semver 并改写 `Cargo.toml` / `Cargo.lock` 版本，再 `cargo build --release`，把二进制、`examples/config/` 的两个模板与 `models/` 内的模型清单和下载脚本（`README.md`、`fetch-models.sh`、`fetch-models.ps1`）打进 zip 或 tar.gz 归档并上传 artifact；归档不含任何模型文件，唤醒模型与 whisper 模型由使用者按 [models/README.md](../models/README.md) 自行下载。GHCR 镜像不含模型，运行时靠 `./models:/app/models` 挂载供给。
 
 `release.yml` 在 `build` 之外，`docker` 调 reusable-docker 推送镜像，最终 `release` 先取 `docs/release/<tag>.md`（缺失或首行不合格式即失败），把归档挂到 `softprops/action-gh-release` 创建的 GitHub Release，正文取该文件、标题是 `Release v<版本>`，`-beta` tag 标记为 prerelease。
 
