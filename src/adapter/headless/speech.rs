@@ -268,7 +268,7 @@ impl OpusSttPipeline {
 
 // STT 输入最长 12 秒；64 KiB 已容纳远超正常转写长度的 JSON 元数据。
 const MAX_STT_RESPONSE_BYTES: usize = 64 * 1024;
-// TTS 按最多 28 字句段请求；8 MiB 可容纳约 43 秒 48 kHz 双声道 PCM WAV。
+// TTS 按最多 100 字句段请求；8 MiB 可容纳约 43 秒 48 kHz 双声道 PCM WAV。
 const MAX_TTS_AUDIO_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TTS_BASE64_BYTES: usize = MAX_TTS_AUDIO_BYTES.div_ceil(3) * 4;
 const MAX_MIMO_RESPONSE_BYTES: usize = MAX_TTS_BASE64_BYTES + 64 * 1024;
@@ -669,23 +669,335 @@ fn count_cjk_chars(input: &str) -> usize {
         .count()
 }
 
-pub fn is_speakable(text: &str) -> bool {
-    let text = text.trim();
-    if text.is_empty() {
+fn is_readable_char(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
+fn is_unreadable_emoji_or_symbol(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200D}'
+            | '\u{2022}'..='\u{2023}'
+            | '\u{2043}'
+            | '\u{20E3}'
+            | '\u{231A}'..='\u{231B}'
+            | '\u{23E9}'..='\u{23F3}'
+            | '\u{23F8}'..='\u{23FA}'
+            | '\u{2500}'..='\u{2BFF}'
+            | '\u{FE0E}'..='\u{FE0F}'
+            | '\u{1F000}'..='\u{1FAFF}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+fn strip_markdown_line_prefix(raw_line: &str) -> &str {
+    let mut line = raw_line.trim_start();
+    loop {
+        if let Some(rest) = line.strip_prefix('>') {
+            line = rest.trim_start();
+            continue;
+        }
+        let hashes = line.bytes().take_while(|b| *b == b'#').count();
+        if hashes > 0 {
+            let after_hashes = &line[hashes..];
+            if after_hashes.is_empty() || after_hashes.starts_with(char::is_whitespace) {
+                line = after_hashes.trim_start();
+                continue;
+            }
+        }
+        if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("-\t")) {
+            line = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("* ").or_else(|| line.strip_prefix("*\t")) {
+            line = rest.trim_start();
+            continue;
+        }
+        if line == "-" || line == "*" {
+            return "";
+        }
+        break;
+    }
+    line
+}
+
+fn is_link_target(target: &str) -> bool {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
         return false;
     }
-    if count_cjk_chars(text) > 0 {
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('#')
+        || lower.starts_with("mailto:")
+    {
         return true;
     }
-    let total = text.chars().count();
-    if total <= 3 {
+    if !trimmed.contains(char::is_whitespace) {
         return true;
     }
-    let garbled_chars = text
-        .chars()
-        .filter(|c| matches!(c, '+' | '/' | '='))
-        .count();
-    garbled_chars == 0 || total <= 8
+    trimmed
+        .split_once(char::is_whitespace)
+        .is_some_and(|(url_part, title)| {
+            !url_part.is_empty() && title.trim_start().starts_with('"')
+        })
+}
+
+fn strip_markdown_links(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < input.len() {
+        let rest = &input[i..];
+        let at_image = rest.starts_with("![")
+            && (i == 0
+                || input[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace));
+        let link_start = if at_image {
+            Some(i + 1)
+        } else if rest.starts_with('[') {
+            Some(i)
+        } else {
+            None
+        };
+
+        if let Some(open_bracket) = link_start {
+            let after_open = &input[open_bracket + 1..];
+            if let Some(close_rel) = after_open.find(']') {
+                let label = &after_open[..close_rel];
+                let after_bracket = open_bracket + 1 + close_rel + 1;
+                if !label.contains('\n') && input[after_bracket..].starts_with('(') {
+                    let paren_content_start = after_bracket + 1;
+                    let mut depth = 1usize;
+                    let mut close_paren = None;
+                    for (rel, ch) in input[paren_content_start..].char_indices() {
+                        if ch == '\n' {
+                            break;
+                        }
+                        if ch == '(' {
+                            depth += 1;
+                        } else if ch == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                close_paren = Some(paren_content_start + rel);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(close_idx) = close_paren {
+                        let target = &input[paren_content_start..close_idx];
+                        if is_link_target(target) {
+                            out.push_str(label);
+                            i = close_idx + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        let ch = rest.chars().next().expect("non-empty slice");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn find_bare_url_end(slice: &str, scheme_len: usize) -> usize {
+    let mut end = scheme_len;
+    let mut open_parens = 0usize;
+    for (rel, ch) in slice[scheme_len..].char_indices() {
+        if ch.is_whitespace()
+            || !ch.is_ascii()
+            || matches!(ch, '<' | '>' | '"' | '\'' | '`' | '[' | ']' | '{' | '}')
+        {
+            break;
+        }
+        if ch == '(' {
+            open_parens += 1;
+        } else if ch == ')' {
+            if open_parens == 0 {
+                break;
+            }
+            open_parens -= 1;
+        }
+        end = scheme_len + rel + ch.len_utf8();
+    }
+    while end > scheme_len
+        && matches!(
+            slice.as_bytes()[end - 1],
+            b'.' | b',' | b'!' | b'?' | b';' | b':'
+        )
+    {
+        end -= 1;
+    }
+    end
+}
+
+fn strip_bare_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < input.len() {
+        let rest = &input[i..];
+        let scheme_len = if rest
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+        {
+            Some(8)
+        } else if rest
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+        {
+            Some(7)
+        } else {
+            None
+        };
+        if let Some(slen) = scheme_len {
+            let url_end = find_bare_url_end(rest, slen);
+            let tail = &rest[url_end..];
+            let needs_space = !out.is_empty()
+                && !out.ends_with(char::is_whitespace)
+                && !tail.is_empty()
+                && !tail.starts_with(char::is_whitespace)
+                && !tail.starts_with(|c: char| {
+                    matches!(
+                        c,
+                        '.' | ','
+                            | '!'
+                            | '?'
+                            | ';'
+                            | ':'
+                            | ')'
+                            | ']'
+                            | '。'
+                            | '，'
+                            | '！'
+                            | '？'
+                            | '；'
+                            | '：'
+                            | '、'
+                            | '）'
+                            | '】'
+                    )
+                });
+            if needs_space {
+                out.push(' ');
+            }
+            i += url_end;
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty slice");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn strip_inline_modifiers_and_emoji(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < input.len() {
+        let rest = &input[i..];
+        if rest.starts_with("**") || rest.starts_with("__") || rest.starts_with("~~") {
+            i += 2;
+            continue;
+        }
+        if rest.starts_with('*') || rest.starts_with('`') {
+            i += 1;
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty slice");
+        if !is_unreadable_emoji_or_symbol(ch) && (!ch.is_control() || ch.is_whitespace()) {
+            out.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+    remove_empty_brackets(&out)
+}
+
+fn remove_empty_brackets(input: &str) -> String {
+    let mut s = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    loop {
+        let next = s
+            .replace("()", "")
+            .replace("( )", "")
+            .replace("（）", "")
+            .replace("（ )", "")
+            .replace("[]", "")
+            .replace("[ ]", "")
+            .replace("【】", "")
+            .replace("【 】", "")
+            .replace("{}", "")
+            .replace("{ }", "");
+        let collapsed = next.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed == s {
+            return collapsed;
+        }
+        s = collapsed;
+    }
+}
+
+fn filter_isolated_symbols(line: &str) -> String {
+    let kept: Vec<&str> = line
+        .split_whitespace()
+        .filter(|tok| tok.chars().any(is_readable_char) || matches!(*tok, "+" | "="))
+        .collect();
+    let joined = kept.join(" ");
+    if joined.chars().any(is_readable_char) {
+        joined
+    } else {
+        String::new()
+    }
+}
+
+/// 清洗送往 TTS 的文本：剥离 Markdown 修饰、链接目标、裸 URL、Emoji 与孤立纯符号。
+pub fn sanitize_for_tts(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut cleaned_lines = Vec::new();
+    for raw_line in normalized.split('\n') {
+        let line = strip_markdown_line_prefix(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+        let without_links = strip_markdown_links(line);
+        let without_urls = strip_bare_urls(&without_links);
+        let without_md = strip_inline_modifiers_and_emoji(&without_urls);
+        let filtered = filter_isolated_symbols(&without_md);
+        if !filtered.is_empty() {
+            cleaned_lines.push(filtered);
+        }
+    }
+    let joined = cleaned_lines.join(" ");
+    if joined.chars().any(is_readable_char) {
+        joined
+    } else {
+        String::new()
+    }
+}
+
+pub fn is_speakable(text: &str) -> bool {
+    let cleaned = sanitize_for_tts(text);
+    if cleaned.is_empty() || !cleaned.chars().any(is_readable_char) {
+        return false;
+    }
+    if count_cjk_chars(&cleaned) > 0 {
+        return true;
+    }
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let all_garbled = tokens.iter().all(|tok| {
+        tok.chars().count() > 8
+            && tok.chars().any(|c| matches!(c, '+' | '/' | '='))
+            && count_cjk_chars(tok) == 0
+    });
+    !all_garbled
 }
 
 #[cfg(test)]
@@ -1121,5 +1433,35 @@ mod tests {
         let raw = "夜".repeat(300);
         let text = preprocess_stt_text(&raw, false).expect("long text passes");
         assert_eq!(text.chars().count(), 240);
+    }
+
+    #[test]
+    fn sanitize_for_tts_strips_markdown_links_urls_emoji_and_isolated_symbols() {
+        use super::{is_speakable, sanitize_for_tts};
+
+        assert_eq!(
+            sanitize_for_tts(
+                "### 标题\n- **重点**内容\n* *斜体*与__下划线__\n> ~~删除线~~和`cargo test`"
+            ),
+            "标题 重点内容 斜体与下划线 删除线和cargo test"
+        );
+        assert_eq!(
+            sanitize_for_tts("详情见[官方文档](https://example.com/docs_(v1))，或者访问 https://example.com/a?x=1 查看。"),
+            "详情见官方文档，或者访问 查看。"
+        );
+        assert_eq!(
+            sanitize_for_tts("太棒了👍🎉！ 请看（https://example.com） --- 完毕 | OK"),
+            "太棒了！ 请看 完毕 OK"
+        );
+        assert_eq!(
+            sanitize_for_tts("[https://example.com](https://example.com)"),
+            ""
+        );
+        assert_eq!(sanitize_for_tts("--- *** ... ！？ 👍"), "");
+        assert!(!is_speakable("--- ... ！？"));
+        assert!(!is_speakable("👍🎉✨"));
+        assert!(!is_speakable("https://example.com"));
+        assert!(is_speakable("3.14"));
+        assert!(is_speakable("1 + 2 = 3"));
     }
 }

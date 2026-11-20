@@ -12,7 +12,8 @@ use tracing::{debug, error, info, warn};
 use crate::adapter::headless::audio_output::{AudioOutput, TtsSession};
 use crate::adapter::headless::speech::{
     detect_audio_format, is_speakable, pcm16_mono_to_wav_bytes, preprocess_stt_text,
-    preprocess_text_message, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk, SttFrameOutcome,
+    preprocess_text_message, sanitize_for_tts, OpenAiSpeechProvider, OpusSttPipeline, SpeechChunk,
+    SttFrameOutcome,
 };
 use crate::adapter::headless::tsbot::voice::v1 as voicev1;
 use crate::adapter::headless::wakeword::{WakeFrame, WakeVerdict, WakewordGate, WakewordModels};
@@ -635,9 +636,11 @@ async fn acquire_voice_turn_session(
 }
 
 impl VoiceRouter {
-    const STREAM_TTS_MIN_CHARS: usize = 4;
-    const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 8;
-    const STREAM_TTS_MAX_CHARS: usize = 28;
+    const STREAM_TTS_FIRST_MIN_CHARS: usize = 4;
+    const STREAM_TTS_FIRST_WEAK_PUNCT_MIN_CHARS: usize = 12;
+    const STREAM_TTS_MIN_CHARS: usize = 6;
+    const STREAM_TTS_WEAK_PUNCT_MIN_CHARS: usize = 28;
+    const STREAM_TTS_MAX_CHARS: usize = 100;
 
     pub fn new(handles: VoiceRouterHandles) -> Self {
         let VoiceRouterHandles {
@@ -1653,9 +1656,13 @@ impl VoiceRouter {
         });
 
         let chunker = Arc::new(std::sync::Mutex::new(StreamingSentenceChunker::new(
-            Self::STREAM_TTS_MIN_CHARS,
-            Self::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
-            Self::STREAM_TTS_MAX_CHARS,
+            SentenceThresholds {
+                first_min_chars: Self::STREAM_TTS_FIRST_MIN_CHARS,
+                first_weak_punct_min_chars: Self::STREAM_TTS_FIRST_WEAK_PUNCT_MIN_CHARS,
+                min_chars: Self::STREAM_TTS_MIN_CHARS,
+                weak_punct_min_chars: Self::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
+                max_chars: Self::STREAM_TTS_MAX_CHARS,
+            },
         )));
 
         let on_text_token_state = state.clone();
@@ -1834,59 +1841,380 @@ fn make_tool_callback(feedback: Arc<ToolFeedback>) -> AsyncTokenCallback {
     })
 }
 
-struct StreamingSentenceChunker {
-    buffer: String,
+#[derive(Clone, Copy)]
+struct SentenceThresholds {
+    first_min_chars: usize,
+    first_weak_punct_min_chars: usize,
     min_chars: usize,
     weak_punct_min_chars: usize,
     max_chars: usize,
 }
 
+fn is_cjk_char(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{F900}'..='\u{FAFF}').contains(&c)
+}
+
+fn is_abbreviation_before_dot(before: &str) -> bool {
+    let ascii_word_len = before
+        .bytes()
+        .rev()
+        .take_while(|b| b.is_ascii_alphanumeric())
+        .count();
+    if ascii_word_len == 0 {
+        return false;
+    }
+    let word_start = before.len() - ascii_word_len;
+    let word = &before[word_start..];
+    let char_before_word = before[..word_start].chars().next_back();
+    if char_before_word == Some('.') {
+        return true;
+    }
+    if word.len() == 1 && word.as_bytes()[0].is_ascii_uppercase() {
+        return char_before_word.is_none_or(|c| !c.is_ascii_alphanumeric());
+    }
+    const ABBREVS: &[&str] = &[
+        "dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "col", "gen", "capt", "lt", "sgt",
+        "rev", "hon", "inc", "ltd", "co", "corp", "dept", "fig", "vol", "no", "vs", "etc",
+        "approx", "min", "max", "tel", "est", "eg", "ie", "jan", "feb", "mar", "apr", "jun", "jul",
+        "aug", "sep", "sept", "oct", "nov", "dec", "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+    ];
+    char_before_word.is_none_or(|c| !c.is_ascii_alphanumeric())
+        && ABBREVS.iter().any(|abbr| word.eq_ignore_ascii_case(abbr))
+}
+
+fn inside_markdown_link_or_url(before: &str) -> bool {
+    // 检查是否处于未闭合的 [label] 或 [label](url) 内部
+    let mut bracket_depth = 0usize;
+    let mut link_paren_depth = 0usize;
+    let bytes = before.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' if link_paren_depth == 0 => bracket_depth += 1,
+            b']' if link_paren_depth == 0 && bracket_depth > 0 => {
+                bracket_depth -= 1;
+                if bytes.get(i + 1) == Some(&b'(') {
+                    link_paren_depth = 1;
+                    i += 2;
+                    continue;
+                }
+            }
+            b'(' if link_paren_depth > 0 => link_paren_depth += 1,
+            b')' if link_paren_depth > 0 => link_paren_depth -= 1,
+            b'\n' => {
+                bracket_depth = 0;
+                link_paren_depth = 0;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if bracket_depth > 0 || link_paren_depth > 0 {
+        return true;
+    }
+
+    before
+        .rsplit(char::is_whitespace)
+        .next()
+        .is_some_and(|tok| {
+            let lower = tok.to_ascii_lowercase();
+            lower.contains("http://") || lower.contains("https://")
+        })
+}
+
+fn is_protected_punct(before: &str, punct: char, next: char) -> bool {
+    if inside_markdown_link_or_url(before) {
+        return true;
+    }
+    let prev = before.chars().next_back();
+    match punct {
+        '.' => {
+            if prev == Some('.') || next == '.' {
+                return true;
+            }
+            if prev.is_some_and(|p| p.is_ascii_alphanumeric()) && next.is_ascii_alphanumeric() {
+                return true;
+            }
+            if prev.is_some_and(|p| p.is_ascii_alphanumeric())
+                && is_abbreviation_before_dot(before)
+                && !matches!(next, '。' | '！' | '？' | '\n')
+            {
+                return true;
+            }
+            matches!(next, ',' | ';')
+        }
+        ':' | '：' => {
+            if prev.is_some_and(|p| p.is_ascii_digit()) && next.is_ascii_digit() {
+                return true;
+            }
+            punct == ':' && next == '/'
+        }
+        ',' => prev.is_some_and(|p| p.is_ascii_digit()) && next.is_ascii_digit(),
+        _ => false,
+    }
+}
+
+fn is_safe_split_pos(buf: &str, pos: usize) -> bool {
+    if pos == 0 {
+        return false;
+    }
+    let before = &buf[..pos];
+    if inside_markdown_link_or_url(before) {
+        return false;
+    }
+    let Some(prev) = before.chars().next_back() else {
+        return false;
+    };
+    if pos == buf.len() {
+        return !prev.is_ascii_alphanumeric() && !matches!(prev, '.' | ',' | ':');
+    }
+    let Some(next) = buf[pos..].chars().next() else {
+        return true;
+    };
+    if prev.is_ascii_alphanumeric() && next.is_ascii_alphanumeric() {
+        return false;
+    }
+    if (matches!(prev, '.' | ',' | ':') && next.is_ascii_alphanumeric())
+        || (prev.is_ascii_alphanumeric() && matches!(next, '.' | ',' | ':'))
+    {
+        return false;
+    }
+    if prev == '.' && next == '.' {
+        return false;
+    }
+    true
+}
+
+fn find_overlength_split_byte(buf: &str, max_chars: usize) -> Option<usize> {
+    let mut positions: Vec<usize> = buf
+        .char_indices()
+        .skip(1)
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(buf.len()))
+        .collect();
+    positions.reverse();
+
+    let mut tier1_short = None;
+    let mut tier2_cjk = None;
+    let mut tier4_oversized = None;
+
+    for &pos in &positions {
+        if !is_safe_split_pos(buf, pos) {
+            continue;
+        }
+        let prefix = &buf[..pos];
+        let cleaned = sanitize_for_tts(prefix);
+        let cleaned_len = cleaned.chars().count();
+        if cleaned_len == 0 || !is_speakable(&cleaned) {
+            continue;
+        }
+        if cleaned_len > max_chars {
+            tier4_oversized = Some(pos);
+            continue;
+        }
+        let prev = prefix.chars().next_back().unwrap();
+        let next = buf[pos..].chars().next();
+        let is_tier1 = prev.is_whitespace() || matches!(prev, '、' | '，' | ',' | '：' | ':');
+        if is_tier1 {
+            if cleaned_len >= max_chars / 2 {
+                return Some(pos);
+            }
+            if tier1_short.is_none() {
+                tier1_short = Some(pos);
+            }
+        }
+        if tier2_cjk.is_none() && (is_cjk_char(prev) || next.is_some_and(is_cjk_char)) {
+            tier2_cjk = Some(pos);
+        }
+    }
+
+    tier2_cjk.or(tier1_short).or(tier4_oversized)
+}
+
+struct StreamingSentenceChunker {
+    buffer: String,
+    thresholds: SentenceThresholds,
+    emitted_count: usize,
+    in_fence: bool,
+    fence_len: usize,
+    pending_ticks: usize,
+}
+
 impl StreamingSentenceChunker {
-    fn new(min_chars: usize, weak_punct_min_chars: usize, max_chars: usize) -> Self {
+    fn new(thresholds: SentenceThresholds) -> Self {
         Self {
             buffer: String::new(),
-            min_chars,
-            weak_punct_min_chars,
-            max_chars,
+            thresholds,
+            emitted_count: 0,
+            in_fence: false,
+            fence_len: 0,
+            pending_ticks: 0,
+        }
+    }
+
+    fn current_min_chars(&self) -> usize {
+        if self.emitted_count == 0 {
+            self.thresholds.first_min_chars
+        } else {
+            self.thresholds.min_chars
+        }
+    }
+
+    fn current_weak_min_chars(&self) -> usize {
+        if self.emitted_count == 0 {
+            self.thresholds.first_weak_punct_min_chars
+        } else {
+            self.thresholds.weak_punct_min_chars
         }
     }
 
     fn push_token(&mut self, token: &str) -> Vec<String> {
         let mut out = Vec::new();
         for ch in token.chars() {
-            self.buffer.push(ch);
-            let len = self.buffer.chars().count();
-            let strong_punct = matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | ';' | '；');
-            let weak_punct = matches!(ch, '，' | ',' | '：' | ':');
-            let flush = strong_punct
-                || (weak_punct && len >= self.weak_punct_min_chars)
-                || len >= self.max_chars;
-            if flush {
-                if let Some(seg) = self.take_buffer(len >= self.min_chars || len >= self.max_chars)
-                {
-                    out.push(seg);
+            if ch == '`' {
+                self.pending_ticks += 1;
+                continue;
+            }
+            if self.pending_ticks > 0 {
+                if !self.in_fence {
+                    if self.pending_ticks >= 3 {
+                        self.in_fence = true;
+                        self.fence_len = self.pending_ticks;
+                        self.pending_ticks = 0;
+                        continue;
+                    }
+                    let ticks = self.pending_ticks;
+                    self.pending_ticks = 0;
+                    for _ in 0..ticks {
+                        self.push_normal_char('`', &mut out);
+                    }
+                } else if self.pending_ticks >= self.fence_len {
+                    self.in_fence = false;
+                    self.fence_len = 0;
+                    self.pending_ticks = 0;
+                    if !self.buffer.is_empty() && !self.buffer.ends_with(char::is_whitespace) {
+                        self.push_normal_char(' ', &mut out);
+                    }
+                } else {
+                    self.pending_ticks = 0;
+                    continue;
                 }
             }
+            if self.in_fence {
+                continue;
+            }
+            self.push_normal_char(ch, &mut out);
         }
         out
     }
 
-    fn finish(&mut self) -> Vec<String> {
-        self.take_buffer(true).into_iter().collect()
+    fn push_normal_char(&mut self, ch: char, out: &mut Vec<String>) {
+        self.buffer.push(ch);
+        let prev_end = self.buffer.len() - ch.len_utf8();
+
+        // 1 字符 lookahead：判定悬而未决的 ASCII 标点与数字后的中文冒号
+        if prev_end > 0 {
+            if let Some(punct) = self.buffer[..prev_end].chars().next_back() {
+                let needs_lookahead = matches!(punct, '.' | ':' | ',')
+                    || (punct == '：'
+                        && self.buffer[..prev_end - punct.len_utf8()]
+                            .ends_with(|c: char| c.is_ascii_digit()));
+                if needs_lookahead {
+                    let before_punct = &self.buffer[..prev_end - punct.len_utf8()];
+                    if !is_protected_punct(before_punct, punct, ch) {
+                        let threshold = if punct == '.' {
+                            self.current_min_chars()
+                        } else {
+                            self.current_weak_min_chars()
+                        };
+                        if self.try_emit_prefix(prev_end, threshold, out) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 无歧义强/弱标点即时判断
+        if !inside_markdown_link_or_url(&self.buffer[..prev_end]) {
+            let immediate_threshold = if matches!(ch, '。' | '！' | '？' | '!' | '?' | ';' | '；')
+            {
+                Some(self.current_min_chars())
+            } else if ch == '，'
+                || (ch == '：' && !self.buffer[..prev_end].ends_with(|c: char| c.is_ascii_digit()))
+            {
+                Some(self.current_weak_min_chars())
+            } else {
+                None
+            };
+            if let Some(threshold) = immediate_threshold {
+                if self.try_emit_prefix(self.buffer.len(), threshold, out) {
+                    return;
+                }
+            }
+        }
+
+        // 超长兜底切分：基于清洗后可读字符数，尊重词界
+        let sanitized_len = sanitize_for_tts(&self.buffer).chars().count();
+        if sanitized_len == 0 && self.buffer.len() > 8192 {
+            self.buffer.clear();
+            return;
+        }
+        if sanitized_len >= self.thresholds.max_chars {
+            if let Some(split_byte) =
+                find_overlength_split_byte(&self.buffer, self.thresholds.max_chars)
+            {
+                self.emit_prefix_unconditional(split_byte, out);
+            }
+        }
     }
 
-    fn take_buffer(&mut self, force: bool) -> Option<String> {
-        let text = self.buffer.trim();
-        if text.is_empty() {
-            self.buffer.clear();
-            return None;
+    fn try_emit_prefix(
+        &mut self,
+        end_byte: usize,
+        min_chars: usize,
+        out: &mut Vec<String>,
+    ) -> bool {
+        let cleaned = sanitize_for_tts(&self.buffer[..end_byte]);
+        if cleaned.chars().count() < min_chars || !is_speakable(&cleaned) {
+            return false;
         }
-        if !force && text.chars().count() < self.min_chars {
-            return None;
+        out.push(cleaned);
+        self.emitted_count += 1;
+        self.drain_prefix_trim_leading(end_byte);
+        true
+    }
+
+    fn emit_prefix_unconditional(&mut self, end_byte: usize, out: &mut Vec<String>) {
+        let cleaned = sanitize_for_tts(&self.buffer[..end_byte]);
+        if !cleaned.is_empty() && is_speakable(&cleaned) {
+            out.push(cleaned);
+            self.emitted_count += 1;
         }
-        let out = text.to_string();
-        self.buffer.clear();
-        Some(out)
+        self.drain_prefix_trim_leading(end_byte);
+    }
+
+    fn drain_prefix_trim_leading(&mut self, end_byte: usize) {
+        self.buffer.drain(..end_byte);
+        let ws_prefix = self.buffer.len() - self.buffer.trim_start().len();
+        if ws_prefix > 0 {
+            self.buffer.drain(..ws_prefix);
+        }
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        self.in_fence = false;
+        self.fence_len = 0;
+        self.pending_ticks = 0;
+        let raw = std::mem::take(&mut self.buffer);
+        self.emitted_count = 0;
+        let cleaned = sanitize_for_tts(&raw);
+        if cleaned.is_empty() || !is_speakable(&cleaned) {
+            return Vec::new();
+        }
+        vec![cleaned]
     }
 }
 
@@ -2847,5 +3175,134 @@ mod tests {
         assert!(playback_cancel.load(Ordering::SeqCst));
         assert!(state.tx.lock().expect("tts tx poisoned").is_none());
         assert!(state.tasks.lock().expect("tts tasks poisoned").is_empty());
+    }
+
+    fn test_chunker() -> StreamingSentenceChunker {
+        StreamingSentenceChunker::new(SentenceThresholds {
+            first_min_chars: VoiceRouter::STREAM_TTS_FIRST_MIN_CHARS,
+            first_weak_punct_min_chars: VoiceRouter::STREAM_TTS_FIRST_WEAK_PUNCT_MIN_CHARS,
+            min_chars: VoiceRouter::STREAM_TTS_MIN_CHARS,
+            weak_punct_min_chars: VoiceRouter::STREAM_TTS_WEAK_PUNCT_MIN_CHARS,
+            max_chars: VoiceRouter::STREAM_TTS_MAX_CHARS,
+        })
+    }
+
+    #[test]
+    fn chunker_skips_fenced_code_blocks_across_tokens_and_keeps_inline_code() {
+        let mut chunker = test_chunker();
+        let mut emitted = Vec::new();
+        for tok in [
+            "运行`cargo`，看代码：\n``",
+            "`rust\nfn main() {\n    println!(\"hi\");\n}\n``",
+            "`\n这样就可以了。",
+        ] {
+            emitted.extend(chunker.push_token(tok));
+        }
+        emitted.extend(chunker.finish());
+
+        assert_eq!(emitted, vec!["运行cargo，看代码：", "这样就可以了。"]);
+    }
+
+    #[test]
+    fn chunker_distinguishes_first_and_subsequent_thresholds() {
+        let mut chunker = test_chunker();
+
+        // 首句：强标点前导空白/Markdown 不凑字数（"   **好**！"仅 2 可读字符 < 4），不触发
+        assert!(chunker.push_token("   **好**！").is_empty());
+        // 首句：弱标点满 12 可读字符触发（先前的短弱标点不触发）
+        assert!(chunker.push_token("今天，").is_empty());
+        assert!(chunker.push_token("我想去，").is_empty());
+        let first = chunker.push_token("看看外面的风景，");
+        assert_eq!(first, vec!["好！今天，我想去，看看外面的风景，"]);
+
+        // 后续句：强标点需 >= 6 字符，弱标点需 >= 28 字符
+        assert!(chunker.push_token("好的。").is_empty());
+        assert!(chunker.push_token("这里只有几个字，").is_empty());
+        assert!(chunker.push_token("还没到二十八个字符呢，").is_empty());
+        // 累计超过 28 字符在弱标点触发（此处已达 31 字符）
+        let second = chunker.push_token("现在终于凑够了，然后收尾。");
+        assert_eq!(
+            second,
+            vec!["好的。这里只有几个字，还没到二十八个字符呢，现在终于凑够了，"]
+        );
+        // 剩余 "然后收尾。" 只有 5 字符 < 6，不立即触发，由 finish 收尾
+        assert_eq!(chunker.finish(), vec!["然后收尾。"]);
+    }
+
+    #[test]
+    fn chunker_protects_decimals_abbreviations_time_numbers_and_urls() {
+        let mut chunker = test_chunker();
+        let mut emitted = Vec::new();
+        for tok in [
+            "圆周率约3.",
+            "14，版本v1.",
+            "2.3，",
+            "时间10:",
+            "30，",
+            "预算1,",
+            "000元，",
+            "请看[https://example.",
+            "com](https://example.com)和Dr.",
+            " Smith的e.g.",
+            " 示例...以及example.",
+            "com网站。",
+        ] {
+            emitted.extend(chunker.push_token(tok));
+        }
+        emitted.extend(chunker.finish());
+
+        let joined = emitted.join(" ");
+        assert!(joined.contains("3.14"), "got {emitted:?}");
+        assert!(joined.contains("v1.2.3"), "got {emitted:?}");
+        assert!(joined.contains("10:30"), "got {emitted:?}");
+        assert!(joined.contains("1,000"), "got {emitted:?}");
+        assert!(joined.contains("Dr. Smith"), "got {emitted:?}");
+        assert!(joined.contains("e.g."), "got {emitted:?}");
+        assert!(joined.contains("example.com"), "got {emitted:?}");
+        assert!(!joined.contains("https://"), "got {emitted:?}");
+        // 不得在 3.14 / v1.2.3 / Dr. / e.g. / 10:30 / 1,000 / example.com 处切开
+        assert!(emitted
+            .iter()
+            .all(|s| !s.ends_with("Dr.") && !s.ends_with("3.") && !s.ends_with("1,")));
+    }
+
+    #[test]
+    fn chunker_splits_overlength_english_on_word_boundaries() {
+        let mut chunker = test_chunker();
+        let words = [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "internationalization",
+        ];
+        let line = format!("{} ", words.join(" ")).repeat(4);
+        let mut emitted = Vec::new();
+        for ch in line.chars() {
+            emitted.extend(chunker.push_token(&ch.to_string()));
+        }
+        emitted.extend(chunker.finish());
+
+        assert!(emitted.len() >= 2);
+        for seg in &emitted {
+            assert!(seg.chars().count() <= VoiceRouter::STREAM_TTS_MAX_CHARS + 20);
+            for w in seg.split_whitespace() {
+                assert!(
+                    words.contains(&w),
+                    "word was split mid-token: '{w}' in '{seg}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunker_finish_drops_pure_punctuation_and_symbols() {
+        let mut chunker = test_chunker();
+        assert!(chunker.push_token("... --- ！？ 👍 ").is_empty());
+        assert!(chunker.finish().is_empty());
+
+        assert!(chunker.push_token("###   \n> ").is_empty());
+        assert!(chunker.finish().is_empty());
     }
 }
