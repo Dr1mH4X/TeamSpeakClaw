@@ -238,7 +238,7 @@ pub(crate) async fn run(
     bot_clid: u32,
     voice_runtime: HeadlessVoiceRuntime,
 ) -> Result<()> {
-    let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(200);
+    let (ts3_audio_tx, ts3_audio_rx) = mpsc::channel::<audio_output::OutboundAudioPacket>(200);
 
     // 统一出站：消费者是 ts3_audio_tx 的唯一写端
     let HeadlessVoiceRuntime {
@@ -249,6 +249,7 @@ pub(crate) async fn run(
         output: audio_output,
         consumer: audio_consumer,
     } = audio;
+    let playback_epoch = audio_output.playback_epoch();
     let consumer_shutdown = shutdown.clone();
     let consumer_task = tokio::spawn(async move {
         audio_consumer.run(ts3_audio_tx).await;
@@ -285,6 +286,7 @@ pub(crate) async fn run(
         shutdown.clone(),
         actor_bridge_state,
         record_hook,
+        playback_epoch,
     ));
 
     let svc = voice_service::VoiceServiceImpl::new(

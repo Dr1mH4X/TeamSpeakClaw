@@ -330,7 +330,9 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output.clone();
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, i32)>(256);
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<
+            crate::adapter::headless::audio_output::OutboundAudioPacket,
+        >(256);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 

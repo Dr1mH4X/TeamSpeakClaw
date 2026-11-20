@@ -3,12 +3,12 @@
 //! finish 语义：段被消费者通道接收后返回（入队即返回），不等待播完；`finish_drained` 额外等待本会话 job 收尾。
 
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{io::ErrorKind, process::Stdio};
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Instant};
@@ -20,6 +20,7 @@ use super::audio_codec::{
 use super::speech::detect_audio_format;
 
 pub const JOB_QUEUE_CAPACITY: usize = 8;
+pub const CODEC_OPUS_MUSIC: i32 = 5;
 const TTS_SEGMENT_CAPACITY: usize = 8;
 const MIN_PCM_JOB_SECS: u64 = 30;
 const PCM_JOB_EXTRA_SECS: u64 = 15;
@@ -28,6 +29,17 @@ const ENCODED_FIRST_SEGMENT_TIMEOUT_SECS: u64 = 15;
 const ENCODED_INTER_SEGMENT_IDLE_SECS: u64 = 30;
 /// 外部源总时长上限（自 dequeue 起算）
 const ENCODED_EXTERNAL_MAX_JOB_SECS: u64 = 120;
+/// 相邻句段衔接：新段首帧前 3ms 线性淡入（48kHz）
+const HEAD_FADE_STEREO_FRAMES: usize = 144;
+/// 残余尾帧：尾部最后 5ms 线性淡出（48kHz）
+const TAIL_FADE_STEREO_FRAMES: usize = 240;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundAudioPacket {
+    pub data: Vec<u8>,
+    pub codec: i32,
+    pub epoch: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobSource {
@@ -78,12 +90,14 @@ enum AudioJob {
         cancel: Arc<AtomicBool>,
         done: JobDoneTx,
         cancel_id: u64,
+        epoch: u64,
     },
     EncodedStream {
         source: JobSource,
         segment_rx: mpsc::Receiver<EncodedSegment>,
         cancel: Arc<AtomicBool>,
         done: JobDoneTx,
+        epoch: u64,
     },
 }
 
@@ -94,6 +108,7 @@ struct AudioOutputStatusInner {
     last_error: Mutex<Option<String>>,
     clip_cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     next_cancel_id: AtomicU64,
+    playback_epoch: Arc<AtomicU64>,
 }
 
 impl AudioOutputStatusInner {
@@ -104,6 +119,7 @@ impl AudioOutputStatusInner {
             last_error: Mutex::new(None),
             clip_cancels: Mutex::new(HashMap::new()),
             next_cancel_id: AtomicU64::new(1),
+            playback_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -294,6 +310,10 @@ impl AudioOutput {
         self.inner.status.snapshot()
     }
 
+    pub fn playback_epoch(&self) -> Arc<AtomicU64> {
+        self.inner.status.playback_epoch.clone()
+    }
+
     pub fn enqueue_pcm_clip(&self, pcm: PcmClipPayload) -> Result<ClipHandle> {
         let cancel = Arc::new(AtomicBool::new(false));
         self.enqueue_clip_job(pcm, cancel, true)
@@ -321,6 +341,7 @@ impl AudioOutput {
         let cancel_for_job = cancel.clone();
         let (done_tx, done_rx) = oneshot::channel();
         let status = &self.inner.status;
+        let epoch = status.playback_epoch.load(Ordering::SeqCst);
         status.enqueue_job(&self.inner.job_tx, |cancel_id| {
             if tool_scoped {
                 status.register_clip_cancel(cancel_id, cancel_for_job.clone());
@@ -337,6 +358,7 @@ impl AudioOutput {
                 cancel: cancel_for_job,
                 done: done_tx,
                 cancel_id,
+                epoch,
             }
         })?;
         Ok(ClipHandle {
@@ -368,6 +390,7 @@ impl AudioOutput {
         let (segment_tx, segment_rx) = mpsc::channel(TTS_SEGMENT_CAPACITY);
         let (done_tx, done_rx) = oneshot::channel();
         let cancel_for_job = cancel.clone();
+        let epoch = self.inner.status.playback_epoch.load(Ordering::SeqCst);
         self.inner
             .status
             .enqueue_job(&self.inner.job_tx, |_| AudioJob::EncodedStream {
@@ -375,6 +398,7 @@ impl AudioOutput {
                 segment_rx,
                 cancel: cancel_for_job,
                 done: done_tx,
+                epoch,
             })?;
         Ok(TtsSession {
             segment_tx: Some(segment_tx),
@@ -431,7 +455,7 @@ impl AudioOutput {
 }
 
 impl AudioOutputConsumer {
-    pub async fn run(self, ts3_audio_tx: mpsc::Sender<(Vec<u8>, i32)>) {
+    pub async fn run(self, ts3_audio_tx: mpsc::Sender<OutboundAudioPacket>) {
         let AudioOutputConsumer { mut job_rx, status } = self;
         while let Some(job) = job_rx.recv().await {
             let dequeue_at = Instant::now();
@@ -443,9 +467,12 @@ impl AudioOutputConsumer {
                     cancel,
                     done,
                     cancel_id,
+                    epoch,
                 } => {
                     status.unregister_clip_cancel(cancel_id);
-                    if cancel.load(Ordering::SeqCst) {
+                    if cancel.load(Ordering::SeqCst)
+                        || epoch < status.playback_epoch.load(Ordering::SeqCst)
+                    {
                         let _ = done.send(Ok(()));
                         continue;
                     }
@@ -454,7 +481,15 @@ impl AudioOutputConsumer {
                         kind: JobKind::PcmClip,
                         started_at: std::time::Instant::now(),
                     });
-                    let result = play_pcm_clip(&payload, &cancel, dequeue_at, &ts3_audio_tx).await;
+                    let result = play_pcm_clip(
+                        &payload,
+                        &cancel,
+                        epoch,
+                        &status.playback_epoch,
+                        dequeue_at,
+                        &ts3_audio_tx,
+                    )
+                    .await;
                     *status.current.lock().expect("audio status poisoned") = None;
                     if let Err(error) = &result {
                         *status.last_error.lock().expect("audio status poisoned") =
@@ -468,8 +503,11 @@ impl AudioOutputConsumer {
                     segment_rx,
                     cancel,
                     done,
+                    epoch,
                 } => {
-                    if cancel.load(Ordering::SeqCst) {
+                    if cancel.load(Ordering::SeqCst)
+                        || epoch < status.playback_epoch.load(Ordering::SeqCst)
+                    {
                         let _ = done.send(Ok(()));
                         continue;
                     }
@@ -478,9 +516,16 @@ impl AudioOutputConsumer {
                         kind: JobKind::EncodedStream,
                         started_at: std::time::Instant::now(),
                     });
-                    let result =
-                        play_encoded_stream(source, segment_rx, &cancel, dequeue_at, &ts3_audio_tx)
-                            .await;
+                    let result = play_encoded_stream(
+                        source,
+                        segment_rx,
+                        &cancel,
+                        epoch,
+                        &status.playback_epoch,
+                        dequeue_at,
+                        &ts3_audio_tx,
+                    )
+                    .await;
                     *status.current.lock().expect("audio status poisoned") = None;
                     if let Err(error) = &result {
                         *status.last_error.lock().expect("audio status poisoned") =
@@ -494,11 +539,59 @@ impl AudioOutputConsumer {
     }
 }
 
+fn job_cancelled(cancel: &AtomicBool, job_epoch: u64, playback_epoch: &AtomicU64) -> bool {
+    cancel.load(Ordering::SeqCst) || job_epoch < playback_epoch.load(Ordering::SeqCst)
+}
+
+fn apply_head_fade_in(float_buf: &mut [f32], fade_stereo_frames: usize) {
+    let limit = fade_stereo_frames.min(float_buf.len() / 2);
+    for k in 0..limit {
+        let gain = k as f32 / limit as f32;
+        float_buf[k * 2] *= gain;
+        float_buf[k * 2 + 1] *= gain;
+    }
+}
+
+fn apply_tail_fade_out(
+    float_buf: &mut [f32],
+    active_stereo_frames: usize,
+    fade_stereo_frames: usize,
+) {
+    let active = active_stereo_frames.min(float_buf.len() / 2);
+    let fade = active.min(fade_stereo_frames);
+    if fade == 0 {
+        return;
+    }
+    let start = active - fade;
+    for k in 0..fade {
+        let gain = (fade - 1 - k) as f32 / fade as f32;
+        let idx = start + k;
+        float_buf[idx * 2] *= gain;
+        float_buf[idx * 2 + 1] *= gain;
+    }
+}
+
+async fn send_eos_packet(
+    ts3_audio_tx: &mpsc::Sender<OutboundAudioPacket>,
+    epoch: u64,
+) -> Result<()> {
+    ts3_audio_tx
+        .send(OutboundAudioPacket {
+            data: Vec::new(),
+            codec: CODEC_OPUS_MUSIC,
+            epoch,
+        })
+        .await
+        .map_err(|_| anyhow!("ts3 audio channel closed"))
+}
+
 async fn play_pcm_clip(
     payload: &PcmClipPayload,
     cancel: &AtomicBool,
+    job_epoch: u64,
+    playback_epoch: &AtomicU64,
     dequeue_at: Instant,
-    ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
+    ts3_audio_tx: &mpsc::Sender<OutboundAudioPacket>,
 ) -> Result<()> {
     let pcm_duration = pcm_payload_duration(payload)?;
     let deadline = pcm_clip_deadline(dequeue_at, pcm_duration);
@@ -507,8 +600,12 @@ async fn play_pcm_clip(
     let mut opus_out = [0u8; MAX_VOICE_PACKET_BYTES];
 
     let mut offset = 0usize;
+    let mut sent_any = false;
     while offset + PCM_FRAME_SAMPLES_STEREO <= payload.samples.len() {
-        if cancel.load(Ordering::SeqCst) {
+        if job_cancelled(cancel, job_epoch, playback_epoch) {
+            if sent_any {
+                let _ = send_eos_packet(ts3_audio_tx, job_epoch).await;
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -518,14 +615,57 @@ async fn play_pcm_clip(
         pcm_frame_to_float(frame, &mut float_buf);
         let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
         if ts3_audio_tx
-            .send((opus_out[..len].to_vec(), 5))
+            .send(OutboundAudioPacket {
+                data: opus_out[..len].to_vec(),
+                codec: CODEC_OPUS_MUSIC,
+                epoch: job_epoch,
+            })
             .await
             .is_err()
         {
             return Err(anyhow!("ts3 audio channel closed"));
         }
+        sent_any = true;
         offset += PCM_FRAME_SAMPLES_STEREO;
         // 单 pacer：生产者不 sleep，节奏由 actor 消费端按累计 20ms 发送；通道满则背压
+    }
+
+    if offset < payload.samples.len() {
+        if job_cancelled(cancel, job_epoch, playback_epoch) {
+            if sent_any {
+                let _ = send_eos_packet(ts3_audio_tx, job_epoch).await;
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!("pcm clip deadline exceeded after dequeue"));
+        }
+        let rem_samples = (payload.samples.len() - offset) & !1;
+        if rem_samples > 0 {
+            float_buf.fill(0.0);
+            pcm_frame_to_float(
+                &payload.samples[offset..offset + rem_samples],
+                &mut float_buf[..rem_samples],
+            );
+            apply_tail_fade_out(&mut float_buf, rem_samples / 2, TAIL_FADE_STEREO_FRAMES);
+            let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
+            if ts3_audio_tx
+                .send(OutboundAudioPacket {
+                    data: opus_out[..len].to_vec(),
+                    codec: CODEC_OPUS_MUSIC,
+                    epoch: job_epoch,
+                })
+                .await
+                .is_err()
+            {
+                return Err(anyhow!("ts3 audio channel closed"));
+            }
+            sent_any = true;
+        }
+    }
+
+    if sent_any {
+        send_eos_packet(ts3_audio_tx, job_epoch).await?;
     }
     Ok(())
 }
@@ -549,12 +689,38 @@ fn encoded_total_deadline(source: JobSource, dequeue_at: Instant) -> Option<Inst
     }
 }
 
+struct StreamOutputContext<'a> {
+    cancel: &'a AtomicBool,
+    job_epoch: u64,
+    playback_epoch: &'a AtomicU64,
+    ts3_audio_tx: &'a mpsc::Sender<OutboundAudioPacket>,
+}
+
+impl StreamOutputContext<'_> {
+    fn is_cancelled(&self) -> bool {
+        job_cancelled(self.cancel, self.job_epoch, self.playback_epoch)
+    }
+
+    async fn send_audio_frame(&self, data: Vec<u8>) -> Result<()> {
+        self.ts3_audio_tx
+            .send(OutboundAudioPacket {
+                data,
+                codec: CODEC_OPUS_MUSIC,
+                epoch: self.job_epoch,
+            })
+            .await
+            .map_err(|_| anyhow!("ts3 audio channel closed"))
+    }
+}
+
 async fn play_encoded_stream(
     source: JobSource,
     mut segment_rx: mpsc::Receiver<EncodedSegment>,
     cancel: &AtomicBool,
+    job_epoch: u64,
+    playback_epoch: &AtomicU64,
     dequeue_at: Instant,
-    ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
+    ts3_audio_tx: &mpsc::Sender<OutboundAudioPacket>,
 ) -> Result<()> {
     let first_timeout = std::time::Duration::from_secs(ENCODED_FIRST_SEGMENT_TIMEOUT_SECS);
     let idle_timeout = encoded_idle_timeout(source);
@@ -569,13 +735,25 @@ async fn play_encoded_stream(
             ))
         }
     };
-    if cancel.load(Ordering::SeqCst) {
+    let out_ctx = StreamOutputContext {
+        cancel,
+        job_epoch,
+        playback_epoch,
+        ts3_audio_tx,
+    };
+    if out_ctx.is_cancelled() {
         return Ok(());
     }
 
+    let mut encoder = OpusEncoder::new_stereo()?;
     let mut segment = first;
+    let mut segment_index = 0usize;
+    let mut sent_any = false;
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if out_ctx.is_cancelled() {
+            if sent_any {
+                let _ = send_eos_packet(ts3_audio_tx, job_epoch).await;
+            }
             return Ok(());
         }
         if let Some(total) = total_deadline {
@@ -586,7 +764,7 @@ async fn play_encoded_stream(
             }
         }
         if !segment.payload.is_empty() {
-            match total_deadline {
+            let seg_sent = match total_deadline {
                 Some(total) => {
                     let remaining = total.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
@@ -597,7 +775,13 @@ async fn play_encoded_stream(
                     // 段处理期间也强制总截止时间，避免超大 payload 拖穿 MAX_JOB_SECS
                     match timeout(
                         remaining,
-                        process_encoded_segment(&segment, cancel, ts3_audio_tx),
+                        process_encoded_segment(
+                            &segment,
+                            &mut encoder,
+                            segment_index > 0,
+                            &out_ctx,
+                            &mut sent_any,
+                        ),
                     )
                     .await
                     {
@@ -609,7 +793,19 @@ async fn play_encoded_stream(
                         }
                     }
                 }
-                None => process_encoded_segment(&segment, cancel, ts3_audio_tx).await?,
+                None => {
+                    process_encoded_segment(
+                        &segment,
+                        &mut encoder,
+                        segment_index > 0,
+                        &out_ctx,
+                        &mut sent_any,
+                    )
+                    .await?
+                }
+            };
+            if seg_sent {
+                segment_index += 1;
             }
         }
         let recv_timeout = match total_deadline {
@@ -638,6 +834,9 @@ async fn play_encoded_stream(
                 return Err(anyhow!("encoded stream segment idle timeout after dequeue"));
             }
         }
+    }
+    if sent_any {
+        send_eos_packet(ts3_audio_tx, job_epoch).await?;
     }
     Ok(())
 }
@@ -701,21 +900,104 @@ fn drain_ffmpeg_stderr(child: &mut ChildKillOnDrop) {
     }
 }
 
+async fn read_pcm_frame_or_eof<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> Result<usize> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let read = reader
+            .read(&mut buf[filled..])
+            .await
+            .map_err(|e| anyhow!("read ffmpeg pcm failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
+}
+
+async fn encode_pcm_reader_to_opus<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    encoder: &mut OpusEncoder,
+    apply_head_fade: bool,
+    out_ctx: &StreamOutputContext<'_>,
+    sent_any: &mut bool,
+) -> Result<bool> {
+    let mut pcm = vec![0u8; PCM_FRAME_SAMPLES_STEREO * 2];
+    let mut float_buf = vec![0f32; PCM_FRAME_SAMPLES_STEREO];
+    let mut opus_out = [0u8; MAX_VOICE_PACKET_BYTES];
+    let mut is_first_frame = true;
+    let mut seg_sent = false;
+
+    loop {
+        // 逐帧检查取消：插话不必等当前段（整句）播完
+        if out_ctx.is_cancelled() {
+            return Ok(seg_sent);
+        }
+        let bytes_read = read_pcm_frame_or_eof(reader, &mut pcm).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        if bytes_read < pcm.len() {
+            let valid_samples = (bytes_read / 2) & !1;
+            if valid_samples == 0 {
+                break;
+            }
+            float_buf.fill(0.0);
+            for i in 0..valid_samples {
+                let lo = pcm[i * 2];
+                let hi = pcm[i * 2 + 1];
+                float_buf[i] = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+            }
+            if apply_head_fade && is_first_frame {
+                apply_head_fade_in(&mut float_buf, HEAD_FADE_STEREO_FRAMES);
+            }
+            apply_tail_fade_out(&mut float_buf, valid_samples / 2, TAIL_FADE_STEREO_FRAMES);
+            let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
+            out_ctx.send_audio_frame(opus_out[..len].to_vec()).await?;
+            *sent_any = true;
+            seg_sent = true;
+            break;
+        }
+
+        for (i, item) in float_buf.iter_mut().enumerate() {
+            let lo = pcm[i * 2];
+            let hi = pcm[i * 2 + 1];
+            *item = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+        }
+        if apply_head_fade && is_first_frame {
+            apply_head_fade_in(&mut float_buf, HEAD_FADE_STEREO_FRAMES);
+        }
+        is_first_frame = false;
+
+        let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
+        out_ctx.send_audio_frame(opus_out[..len].to_vec()).await?;
+        *sent_any = true;
+        seg_sent = true;
+    }
+
+    Ok(seg_sent)
+}
+
 async fn process_encoded_segment(
     segment: &EncodedSegment,
-    cancel: &AtomicBool,
-    ts3_audio_tx: &mpsc::Sender<(Vec<u8>, i32)>,
-) -> Result<()> {
+    encoder: &mut OpusEncoder,
+    apply_head_fade: bool,
+    out_ctx: &StreamOutputContext<'_>,
+    sent_any: &mut bool,
+) -> Result<bool> {
     if segment.codec.starts_with("warmup-probe") {
         debug!(
             codec = %segment.codec,
             "audio output warmup probe skipped (expected)"
         );
-        return Ok(());
+        return Ok(false);
     }
     let Some(input_format) = encoded_input_format(&segment.payload, &segment.codec) else {
         warn!("unsupported encoded codec: {}, skipping", segment.codec);
-        return Ok(());
+        return Ok(false);
     };
 
     let child = ffmpeg_decode_to_s16le(input_format)
@@ -743,35 +1025,8 @@ async fn process_encoded_segment(
         result
     });
 
-    let mut encoder = OpusEncoder::new_stereo()?;
-    let mut pcm = vec![0u8; PCM_FRAME_SAMPLES_STEREO * 2];
-    let mut float_buf = vec![0f32; PCM_FRAME_SAMPLES_STEREO];
-    let mut opus_out = [0u8; MAX_VOICE_PACKET_BYTES];
-
-    loop {
-        // 逐帧检查取消：插话不必等当前段（整句）播完
-        if cancel.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        match stdout.read_exact(&mut pcm).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(anyhow!("read ffmpeg pcm failed: {e}")),
-        }
-        for (i, item) in float_buf.iter_mut().enumerate() {
-            let lo = pcm[i * 2];
-            let hi = pcm[i * 2 + 1];
-            *item = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
-        }
-        let len = encoder.encode_frame(&float_buf, &mut opus_out)?;
-        if ts3_audio_tx
-            .send((opus_out[..len].to_vec(), 5))
-            .await
-            .is_err()
-        {
-            return Err(anyhow!("ts3 audio channel closed"));
-        }
-    }
+    let seg_sent =
+        encode_pcm_reader_to_opus(&mut stdout, encoder, apply_head_fade, out_ctx, sent_any).await?;
 
     if let Some(mut c) = child.child.take() {
         let _ = c.start_kill();
@@ -782,13 +1037,13 @@ async fn process_encoded_segment(
         Ok(Err(e)) => warn!("write ffmpeg stdin failed: {e}"),
         Err(e) => warn!("ffmpeg stdin task failed: {e}"),
     }
-    Ok(())
+    Ok(seg_sent)
 }
 
 /// 编码音频整段解码为 48k 立体声 PCM，供启动期预热短反馈音频用。
 ///
 /// 播放热路径不经过这里：预热后的片段以 `PcmClipPayload` 入队，由进程内的 opus 编码器送出，
-/// 不再触发 ffmpeg 进程。整帧读取，尾部不足一帧的采样丢弃（与播放路径一致）。
+/// 不再触发 ffmpeg 进程。保留完整 48k 立体声采样，尾部不足一帧的补零与淡出由 `play_pcm_clip` 处理。
 pub async fn decode_to_pcm_48k_stereo(payload: &[u8], codec: &str) -> Result<Vec<i16>> {
     let input_format = encoded_input_format(payload, codec)
         .ok_or_else(|| anyhow!("unsupported audio codec for pcm decode: {codec}"))?;
@@ -900,7 +1155,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(4096);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(4096);
         tokio::spawn(consumer.run(audio_tx));
 
         // 前置长 clip（约 35s）占住消费者；排队 clip 的 deadline 必须自 dequeue 起算
@@ -923,7 +1178,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(4096);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(4096);
         tokio::spawn(consumer.run(audio_tx));
 
         assert!(output.status().current.is_none());
@@ -953,7 +1208,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, _audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        let (audio_tx, _audio_rx) = mpsc::channel::<OutboundAudioPacket>(8);
         // 消费者不启动，clip 停在队列
         let _consumer = consumer;
         let h1 = output.enqueue_pcm_clip(silence_clip(100)).unwrap();
@@ -969,7 +1224,7 @@ mod tests {
     async fn clip_cancel_registry_does_not_accumulate_finished_jobs() {
         let bus = AudioBus::new();
         let output = bus.output.clone();
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(256);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(256);
         tokio::spawn(bus.consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -992,7 +1247,7 @@ mod tests {
     async fn queued_jobs_counter_does_not_underflow_under_race() {
         let bus = AudioBus::new();
         let output = bus.output.clone();
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(1024);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(1024);
         tokio::spawn(bus.consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1008,7 +1263,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(64);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1024,7 +1279,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(64);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1047,7 +1302,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(4096);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(4096);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1064,7 +1319,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(64);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1086,7 +1341,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output.clone();
         let consumer = bus.consumer;
-        let (audio_tx, mut audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(64);
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(64);
         tokio::spawn(consumer.run(audio_tx));
         tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
 
@@ -1136,7 +1391,7 @@ mod tests {
         // 构造路径：unsupported warmup-probe 走 debug，不进 last_error
         let bus = AudioBus::new();
         let output = bus.output.clone();
-        let (audio_tx, _rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        let (audio_tx, _rx) = mpsc::channel::<OutboundAudioPacket>(8);
         tokio::spawn(bus.consumer.run(audio_tx));
         assert!(output
             .play_encoded_media(vec![0u8; 2], "warmup-probe")
@@ -1149,7 +1404,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, _rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        let (audio_tx, _rx) = mpsc::channel::<OutboundAudioPacket>(8);
         tokio::spawn(consumer.run(audio_tx));
         let result = output.play_encoded_media(vec![0u8; 4], "not-a-codec").await;
         assert!(result.is_ok());
@@ -1168,7 +1423,7 @@ mod tests {
             let bus = AudioBus::new();
             let output = bus.output;
             let consumer = bus.consumer;
-            let (audio_tx, _rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+            let (audio_tx, _rx) = mpsc::channel::<OutboundAudioPacket>(8);
             tokio::spawn(consumer.run(audio_tx));
             let result = output
                 .play_encoded_media_wait(vec![1, 2, 3, 4], "mp3")
@@ -1222,7 +1477,7 @@ mod tests {
         let bus = AudioBus::new();
         let output = bus.output;
         let consumer = bus.consumer;
-        let (audio_tx, _audio_rx) = mpsc::channel::<(Vec<u8>, i32)>(4096);
+        let (audio_tx, _audio_rx) = mpsc::channel::<OutboundAudioPacket>(4096);
         tokio::spawn(consumer.run(audio_tx));
 
         let playback_cancel = Arc::new(AtomicBool::new(false));
@@ -1252,5 +1507,182 @@ mod tests {
             !playback_cancel.load(Ordering::SeqCst),
             "stop_clips must not cancel the turn playback flag"
         );
+    }
+
+    fn sine_stereo_s16le_bytes(stereo_frames: usize, freq_hz: f32, amp: f32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(stereo_frames * 4);
+        for i in 0..stereo_frames {
+            let t = i as f32 / 48_000.0;
+            let sample = (amp * (2.0 * std::f32::consts::PI * freq_hz * t).sin() * 32767.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn pcm_reader_reuses_encoder_pads_tail_fades_and_emits_head_fade() {
+        let cancel = AtomicBool::new(false);
+        let epoch = AtomicU64::new(0);
+        let (tx, mut rx) = mpsc::channel::<OutboundAudioPacket>(128);
+        let ctx = StreamOutputContext {
+            cancel: &cancel,
+            job_epoch: 0,
+            playback_epoch: &epoch,
+            ts3_audio_tx: &tx,
+        };
+        let mut encoder = OpusEncoder::new_stereo().expect("encoder");
+        let mut sent_any = false;
+
+        // 第 1 段：12 帧（240ms）热身分析与状态
+        let seg1_bytes = sine_stereo_s16le_bytes(960 * 12, 440.0, 0.5);
+        let mut cursor1 = std::io::Cursor::new(seg1_bytes);
+        let seg1_sent =
+            encode_pcm_reader_to_opus(&mut cursor1, &mut encoder, false, &ctx, &mut sent_any)
+                .await
+                .expect("seg1");
+        assert!(seg1_sent);
+        for _ in 0..12 {
+            let pkt = rx.recv().await.unwrap();
+            assert!(!pkt.data.is_empty());
+        }
+
+        // 第 2 段：1 整帧 + 5ms（240 立体声帧 = 960 字节）残余尾部，启用首帧淡入并复用同一编码器
+        let seg2_bytes = sine_stereo_s16le_bytes(960 + 240, 440.0, 0.5);
+        let mut cursor2 = std::io::Cursor::new(seg2_bytes.clone());
+        let seg2_sent =
+            encode_pcm_reader_to_opus(&mut cursor2, &mut encoder, true, &ctx, &mut sent_any)
+                .await
+                .expect("seg2");
+        assert!(seg2_sent);
+
+        let seg2_pkt0 = rx.recv().await.unwrap();
+        let seg2_pkt1 = rx.recv().await.unwrap();
+        assert!(!seg2_pkt0.data.is_empty());
+        assert!(!seg2_pkt1.data.is_empty());
+        assert!(rx.try_recv().is_err());
+
+        // 对比全新编码器编码同一段第 2 段首帧：复用编码器携带有历史状态，输出应与冷启动不同
+        let mut fresh_encoder = OpusEncoder::new_stereo().expect("fresh");
+        let mut fresh_float = vec![0f32; PCM_FRAME_SAMPLES_STEREO];
+        for i in 0..PCM_FRAME_SAMPLES_STEREO {
+            fresh_float[i] =
+                i16::from_le_bytes([seg2_bytes[i * 2], seg2_bytes[i * 2 + 1]]) as f32 / 32768.0;
+        }
+        apply_head_fade_in(&mut fresh_float, HEAD_FADE_STEREO_FRAMES);
+        let mut fresh_out = [0u8; MAX_VOICE_PACKET_BYTES];
+        let fresh_len = fresh_encoder
+            .encode_frame(&fresh_float, &mut fresh_out)
+            .expect("fresh encode");
+        assert_ne!(seg2_pkt0.data, fresh_out[..fresh_len]);
+
+        // 解码残余尾帧，验证后半部分已线性淡出并补零
+        let mut decoder = crate::adapter::headless::audio_codec::OpusDecoder::new_stereo().unwrap();
+        let _ = decoder.decode_normal(&seg2_pkt0.data).unwrap();
+        let tail_pcm = decoder.decode_normal(&seg2_pkt1.data).unwrap();
+        assert_eq!(tail_pcm.len(), PCM_FRAME_SAMPLES_STEREO);
+        let tail_silent_peak = tail_pcm[300 * 2..]
+            .iter()
+            .map(|s| s.abs())
+            .max()
+            .unwrap_or(0);
+        let active_head_peak = tail_pcm[..120 * 2]
+            .iter()
+            .map(|s| s.abs())
+            .max()
+            .unwrap_or(0);
+        assert!(active_head_peak > 1000, "active tail head must carry audio");
+        assert!(
+            tail_silent_peak < active_head_peak / 4,
+            "padded tail must fade to silence: head_peak={active_head_peak}, tail_peak={tail_silent_peak}"
+        );
+    }
+
+    #[tokio::test]
+    async fn play_pcm_clip_pads_residual_tail_fades_and_emits_eos() {
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(64);
+        tokio::spawn(bus.consumer.run(audio_tx));
+
+        // 1 个整帧（1920 样本）+ 240 立体声帧（480 样本 = 5ms）恒定非零幅值
+        let samples = vec![8_000i16; PCM_FRAME_SAMPLES_STEREO + 480];
+        let handle = output
+            .enqueue_pcm_clip(PcmClipPayload {
+                samples,
+                sample_rate: 48_000,
+                channels: 2,
+            })
+            .expect("enqueue");
+        handle.wait().await.expect("clip done");
+
+        let mut packets = Vec::new();
+        while let Ok(pkt) = audio_rx.try_recv() {
+            packets.push(pkt);
+        }
+        // 2 帧音频 + 1 个 0 字节 EOS 尾包
+        assert_eq!(packets.len(), 3);
+        assert!(!packets[0].data.is_empty());
+        assert!(!packets[1].data.is_empty());
+        assert!(packets[2].data.is_empty());
+        assert_eq!(packets[2].codec, CODEC_OPUS_MUSIC);
+    }
+
+    #[tokio::test]
+    async fn encoded_stream_reuses_encoder_pads_tail_and_emits_eos() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let bus = AudioBus::new();
+        let output = bus.output;
+        let (audio_tx, mut audio_rx) = mpsc::channel::<OutboundAudioPacket>(256);
+        tokio::spawn(bus.consumer.run(audio_tx));
+
+        let sine_wav = |samples_48k: usize| -> Vec<u8> {
+            let pcm: Vec<i16> = (0..samples_48k)
+                .map(|i| {
+                    let t = i as f32 / 48_000.0;
+                    ((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 12_000.0) as i16
+                })
+                .collect();
+            crate::adapter::headless::speech::pcm16_mono_to_wav_bytes(&pcm, 48_000)
+        };
+
+        let mut session = output.open_tts_session().await.unwrap();
+        // 段 1: 240ms（12 帧），段 2: 25ms（1 整帧 + 5ms 残余尾帧）
+        session
+            .push_encoded(sine_wav(48_000 * 240 / 1000), "wav")
+            .await
+            .unwrap();
+        session
+            .push_encoded(sine_wav(48_000 * 25 / 1000), "wav")
+            .await
+            .unwrap();
+        session.finish_drained().await.expect("stream finish");
+
+        let mut packets = Vec::new();
+        while let Ok(pkt) = audio_rx.try_recv() {
+            packets.push(pkt);
+        }
+        // 段 1 (12 帧) + 段 2 (1 整帧 + 1 残余补零帧) + 1 EOS 尾包 = 15 包
+        assert_eq!(
+            packets.len(),
+            15,
+            "expected 15 packets, got {}",
+            packets.len()
+        );
+        let eos = packets.pop().expect("eos packet");
+        assert!(eos.data.is_empty(), "last packet must be 0-byte EOS");
+        assert_eq!(eos.codec, CODEC_OPUS_MUSIC);
+
+        let mut decoder = crate::adapter::headless::audio_codec::OpusDecoder::new_stereo().unwrap();
+        for pkt in &packets {
+            assert!(!pkt.data.is_empty());
+            assert_eq!(pkt.codec, CODEC_OPUS_MUSIC);
+            let pcm = decoder.decode_normal(&pkt.data).expect("decode packet");
+            assert_eq!(pcm.len(), PCM_FRAME_SAMPLES_STEREO);
+        }
     }
 }

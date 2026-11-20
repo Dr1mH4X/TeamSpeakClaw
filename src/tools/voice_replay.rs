@@ -457,7 +457,7 @@ pub fn direct_command_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::headless::audio_output::AudioBus;
+    use crate::adapter::headless::audio_output::{AudioBus, OutboundAudioPacket};
     use crate::adapter::headless::speaker_ring::SpeakerRings;
     use crate::config::{AclConfig, VoiceReplayConfig};
     use crate::permission::PermissionGate;
@@ -465,7 +465,7 @@ mod tests {
 
     fn handles_with_rings(window_secs: u32) -> VoiceAudioHandles {
         let bus = AudioBus::new();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, i32)>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<OutboundAudioPacket>(64);
         tokio::spawn(bus.consumer.run(tx));
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let handles = VoiceAudioHandles::default();

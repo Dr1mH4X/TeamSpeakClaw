@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use super::audio_output::{OutboundAudioPacket, CODEC_OPUS_MUSIC};
 use super::tsbot::voice::v1 as voicev1;
 use super::SpeakerRecordHook;
 
@@ -98,6 +99,91 @@ impl VoicePacer {
     fn advance(&mut self) {
         if let Some(next) = self.next_send_at.take() {
             self.next_send_at = Some(next + self.frame);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next_send_at = None;
+    }
+}
+
+struct OutboundAudioState {
+    out_buf: VecDeque<OutboundAudioPacket>,
+    pacer: VoicePacer,
+    sending_epoch: Option<u64>,
+    playback_epoch: Arc<AtomicU64>,
+}
+
+impl OutboundAudioState {
+    fn new(playback_epoch: Arc<AtomicU64>) -> Self {
+        Self {
+            out_buf: VecDeque::with_capacity(OUT_BUF_MAX),
+            pacer: VoicePacer::new(),
+            sending_epoch: None,
+            playback_epoch,
+        }
+    }
+
+    fn can_recv(&self) -> bool {
+        self.out_buf.len() < OUT_BUF_MAX
+    }
+
+    fn flush_expired(&mut self, send_voice: &mut impl FnMut(Vec<u8>, i32)) {
+        let current_epoch = self.playback_epoch.load(Ordering::SeqCst);
+        let mut discarded = false;
+        if self
+            .out_buf
+            .front()
+            .is_some_and(|p| p.epoch < current_epoch)
+        {
+            self.out_buf.retain(|p| p.epoch >= current_epoch);
+            discarded = true;
+        }
+        if self.sending_epoch.is_some_and(|e| e < current_epoch) {
+            send_voice(Vec::new(), CODEC_OPUS_MUSIC);
+            self.sending_epoch = None;
+            self.pacer.reset();
+        } else if discarded {
+            self.pacer.reset();
+        }
+    }
+
+    fn on_recv(&mut self, pkt: OutboundAudioPacket, send_voice: &mut impl FnMut(Vec<u8>, i32)) {
+        self.flush_expired(send_voice);
+        let current_epoch = self.playback_epoch.load(Ordering::SeqCst);
+        if pkt.epoch >= current_epoch {
+            self.out_buf.push_back(pkt);
+        }
+    }
+
+    fn on_tick(
+        &mut self,
+        now: Instant,
+        audio_rx: &mut mpsc::Receiver<OutboundAudioPacket>,
+        send_voice: &mut impl FnMut(Vec<u8>, i32),
+    ) {
+        self.flush_expired(send_voice);
+        let current_epoch = self.playback_epoch.load(Ordering::SeqCst);
+        while self.out_buf.len() < OUT_BUF_MAX {
+            match audio_rx.try_recv() {
+                Ok(pkt) => {
+                    if pkt.epoch >= current_epoch {
+                        self.out_buf.push_back(pkt);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if self.pacer.due(now, !self.out_buf.is_empty()) {
+            if let Some(pkt) = self.out_buf.pop_front() {
+                if pkt.data.is_empty() {
+                    self.sending_epoch = None;
+                } else {
+                    self.sending_epoch = Some(pkt.epoch);
+                }
+                send_voice(pkt.data, pkt.codec);
+                self.pacer.advance();
+            }
         }
     }
 }
@@ -262,14 +348,14 @@ fn spawn_directory_refresher(
 
 pub(crate) async fn ts3_actor(
     client: Arc<tsclient_rs::Client>,
-    mut audio_rx: mpsc::Receiver<(Vec<u8>, i32)>,
+    mut audio_rx: mpsc::Receiver<OutboundAudioPacket>,
     channels: ActorEventChannels,
     shutdown_token: CancellationToken,
     bridge_state: crate::adapter::lifecycle::BridgeReadiness,
     record_hook: Option<SpeakerRecordHook>,
+    playback_epoch: Arc<AtomicU64>,
 ) -> Result<()> {
-    let mut out_buf: VecDeque<(Vec<u8>, i32)> = VecDeque::with_capacity(OUT_BUF_MAX);
-    let mut pacer = VoicePacer::new();
+    let mut outbound = OutboundAudioState::new(playback_epoch);
     let mut send_interval = tokio::time::interval(Duration::from_millis(VOICE_FRAME_MS));
     send_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -408,9 +494,10 @@ pub(crate) async fn ts3_actor(
                 apply_dir_cmd(&mut state, cmd, &dir_seq);
             }
 
-            pkt = audio_rx.recv(), if out_buf.len() < OUT_BUF_MAX => {
+            pkt = audio_rx.recv(), if outbound.can_recv() => {
                 if let Some(p) = pkt {
-                    out_buf.push_back(p);
+                    let mut send = |data, codec| client.send_voice(data, codec);
+                    outbound.on_recv(p, &mut send);
                 } else {
                     break;
                 }
@@ -418,12 +505,8 @@ pub(crate) async fn ts3_actor(
 
             _ = send_interval.tick() => {
                 let now = Instant::now();
-                if pacer.due(now, !out_buf.is_empty()) {
-                    if let Some((data, codec)) = out_buf.pop_front() {
-                        client.send_voice(data, codec);
-                        pacer.advance();
-                    }
-                }
+                let mut send = |data, codec| client.send_voice(data, codec);
+                outbound.on_tick(now, &mut audio_rx, &mut send);
             }
         }
     }
@@ -640,5 +723,71 @@ mod tests {
             &seq,
         );
         assert_eq!(read_dir_name_from_state(&state, 2), "bob");
+    }
+
+    #[test]
+    fn epoch_bump_purges_expired_frames_emits_eos_and_sends_new_epoch_immediately() {
+        let playback_epoch = Arc::new(AtomicU64::new(0));
+        let mut outbound = OutboundAudioState::new(playback_epoch.clone());
+        let (tx, mut rx) = mpsc::channel::<OutboundAudioPacket>(16);
+        let mut sent = Vec::new();
+
+        let pkt = |tag: u8, epoch: u64| OutboundAudioPacket {
+            data: vec![tag, 1, 2],
+            codec: CODEC_OPUS_MUSIC,
+            epoch,
+        };
+
+        // 装入 3 帧 epoch=0
+        outbound.on_recv(pkt(10, 0), &mut |d, c| sent.push((d, c)));
+        outbound.on_recv(pkt(11, 0), &mut |d, c| sent.push((d, c)));
+        outbound.on_recv(pkt(12, 0), &mut |d, c| sent.push((d, c)));
+
+        let t0 = Instant::now();
+        outbound.on_tick(t0, &mut rx, &mut |d, c| sent.push((d, c)));
+        assert_eq!(sent, vec![(vec![10, 1, 2], CODEC_OPUS_MUSIC)]);
+        assert_eq!(outbound.out_buf.len(), 2);
+
+        // 触发 barge-in：递增 epoch，旧帧还滞留在 out_buf 和 rx，新帧 epoch=1 同时入 rx
+        playback_epoch.store(1, Ordering::SeqCst);
+        tx.try_send(pkt(13, 0)).unwrap();
+        tx.try_send(pkt(20, 1)).unwrap();
+
+        // 即使距离上一帧不足 20ms（pacer 未到期），因为 pacer 已随清理重置，新 epoch 首帧应立刻发出
+        outbound.on_tick(t0 + Duration::from_millis(5), &mut rx, &mut |d, c| {
+            sent.push((d, c))
+        });
+        assert_eq!(
+            sent,
+            vec![
+                (vec![10, 1, 2], CODEC_OPUS_MUSIC),
+                (Vec::new(), CODEC_OPUS_MUSIC),
+                (vec![20, 1, 2], CODEC_OPUS_MUSIC),
+            ]
+        );
+        assert!(outbound.out_buf.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn epoch_bump_drops_expired_queued_frames_without_eos_when_idle() {
+        let playback_epoch = Arc::new(AtomicU64::new(0));
+        let mut outbound = OutboundAudioState::new(playback_epoch.clone());
+        let (_tx, mut rx) = mpsc::channel::<OutboundAudioPacket>(16);
+        let mut sent = Vec::new();
+
+        outbound.on_recv(
+            OutboundAudioPacket {
+                data: vec![1, 2],
+                codec: CODEC_OPUS_MUSIC,
+                epoch: 0,
+            },
+            &mut |d, c| sent.push((d, c)),
+        );
+        playback_epoch.store(1, Ordering::SeqCst);
+        outbound.on_tick(Instant::now(), &mut rx, &mut |d, c| sent.push((d, c)));
+
+        assert!(sent.is_empty(), "never started sending, must not emit EOS");
+        assert!(outbound.out_buf.is_empty());
     }
 }

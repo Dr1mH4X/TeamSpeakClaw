@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
@@ -302,6 +302,9 @@ impl TtsStreamState {
     /// 保证当前流有会话与 synth 任务：首个可播句段到达时开一条流。
     /// 没有可播内容就不开会话，避免空会话在 FIFO 上白占一个 job。
     async fn ensure_stream(self: &Arc<Self>) {
+        if self.playback_cancel.load(Ordering::SeqCst) {
+            return;
+        }
         if self.tx.lock().expect("tts tx poisoned").is_some() {
             return;
         }
@@ -521,9 +524,13 @@ pub struct VoiceRouterHandles {
 }
 
 /// 取消一条回合并按身份从注册表摘除：置 LLM 取消令牌与 TTS 播放取消位，再把这一条摘出集合。
+/// 若该回合已进入产出，递增 `playback_epoch` 立即丢弃出站队列里的残留帧。
 /// 取消幂等，摘除只匹配 `Arc::ptr_eq` 的条目，同 clid 的其他回合不动。
 /// 三处取消（插话、准入顶替、确认音顶替）共用它，避免有一处漏摘让取消句柄不可达
-fn cancel_turn(turns: &TurnRegistry, turn: &Arc<ActiveTurn>) {
+fn cancel_turn(turns: &TurnRegistry, turn: &Arc<ActiveTurn>, playback_epoch: &AtomicU64) {
+    if turn.is_producing() {
+        playback_epoch.fetch_add(1, Ordering::SeqCst);
+    }
     turn.cancel.cancel();
     turn.playback_cancel().store(true, Ordering::SeqCst);
     turns.remove_turn(turn);
@@ -578,12 +585,13 @@ fn cancel_displaced_turns(
     turns: &TurnRegistry,
     displaced: Vec<Arc<ActiveTurn>>,
     barge_in_available: bool,
+    playback_epoch: &AtomicU64,
 ) {
     for displaced in displaced {
         if barge_in_available && displaced.is_producing() {
             continue;
         }
-        cancel_turn(turns, &displaced);
+        cancel_turn(turns, &displaced, playback_epoch);
     }
 }
 
@@ -598,6 +606,7 @@ fn apply_barge_in(
     barge_in_by: u32,
     targets: Vec<(u32, Arc<ActiveTurn>)>,
     speaker: &str,
+    playback_epoch: &AtomicU64,
 ) {
     for (owner_clid, target) in targets {
         info!(
@@ -608,7 +617,7 @@ fn apply_barge_in(
             turn_age_ms = target.age_ms(),
             "wakeword barge-in; cancelling a turn that owns the output"
         );
-        cancel_turn(turns, &target);
+        cancel_turn(turns, &target, playback_epoch);
     }
 }
 
@@ -1132,7 +1141,8 @@ impl VoiceRouter {
         // 产出回合可以不止一条（后准入但先入队的回合已经出声），全部取消
         let targets = self.turns.producing_turns();
         if !targets.is_empty() {
-            apply_barge_in(&self.turns, clid, targets, speaker);
+            let playback_epoch = self.audio_output.playback_epoch();
+            apply_barge_in(&self.turns, clid, targets, speaker, &playback_epoch);
         }
     }
 
@@ -1200,7 +1210,14 @@ impl VoiceRouter {
                             "wakeword barge-in without a producing target; treating as talk"
                         );
                     } else {
-                        apply_barge_in(&self.turns, clid, producing, &chunk.speaker_name);
+                        let playback_epoch = self.audio_output.playback_epoch();
+                        apply_barge_in(
+                            &self.turns,
+                            clid,
+                            producing,
+                            &chunk.speaker_name,
+                            &playback_epoch,
+                        );
                     }
                 }
             }
@@ -1247,7 +1264,8 @@ impl VoiceRouter {
                 error!("Voice turn failed: {error}");
             }
         });
-        cancel_displaced_turns(&self.turns, displaced, barge_in_available);
+        let playback_epoch = self.audio_output.playback_epoch();
+        cancel_displaced_turns(&self.turns, displaced, barge_in_available, &playback_epoch);
         Ok(())
     }
 
@@ -1268,6 +1286,11 @@ impl VoiceRouter {
             debug!(clid, "wakeword confirmation skipped: tts disabled");
             return Ok(());
         }
+        let playback_epoch = self.audio_output.playback_epoch();
+        let producing = self.turns.producing_turns();
+        if !producing.is_empty() {
+            apply_barge_in(&self.turns, clid, producing, speaker, &playback_epoch);
+        }
         let announcement = Arc::new(ActiveTurn::new());
         let playback_cancel = announcement.playback_cancel();
         // 续窗先于入队：确认即代表「我在听」，用户的接话按确认时刻重新计时
@@ -1280,7 +1303,7 @@ impl VoiceRouter {
         for displaced in self.turns.begin_turn(clid, &announcement) {
             // 同 clid 的旧条目被顶替：确认音本身就是唤醒词夺回话语权的可听结果，
             // 全部取消并摘除，不留下不可达的取消句柄
-            cancel_turn(&self.turns, &displaced);
+            cancel_turn(&self.turns, &displaced, &playback_epoch);
         }
         announcement.mark_producing();
         debug!(
@@ -2134,7 +2157,8 @@ mod tests {
         // 音频顶替：旧回合没进 mark_producing，插话路径可用也一律取消
         let audio = Arc::new(ActiveTurn::new());
         let displaced = turns.begin_turn(7, &audio);
-        cancel_displaced_turns(&turns, displaced, true);
+        let epoch = AtomicU64::new(0);
+        cancel_displaced_turns(&turns, displaced, true, &epoch);
 
         assert!(active.cancel.is_cancelled());
         // 取消同时按身份摘除，表里只留下顶替者
@@ -2340,9 +2364,13 @@ mod tests {
     }
 
     /// 造一份能开流的 TTS 运行时：消费者随测试任务活着，会话才入得了队
-    fn tts_runtime_for_test() -> (TtsTurnRuntime, mpsc::Sender<(Vec<u8>, i32)>) {
+    fn tts_runtime_for_test() -> (
+        TtsTurnRuntime,
+        mpsc::Sender<crate::adapter::headless::audio_output::OutboundAudioPacket>,
+    ) {
         let bus = crate::adapter::headless::audio_output::AudioBus::new();
-        let (sink_tx, sink_rx) = mpsc::channel::<(Vec<u8>, i32)>(8);
+        let (sink_tx, sink_rx) =
+            mpsc::channel::<crate::adapter::headless::audio_output::OutboundAudioPacket>(8);
         let keepalive_sink = sink_tx.clone();
         let consumer = bus.consumer;
         tokio::spawn(async move { consumer.run(sink_tx).await });
@@ -2486,8 +2514,10 @@ mod tests {
         second.mark_producing();
         assert_eq!(turns.producing_turns().len(), 2);
 
-        apply_barge_in(&turns, 9, turns.producing_turns(), "bob");
+        let epoch = AtomicU64::new(0);
+        apply_barge_in(&turns, 9, turns.producing_turns(), "bob", &epoch);
 
+        assert_eq!(epoch.load(Ordering::SeqCst), 2);
         assert!(first.cancel.is_cancelled());
         assert!(second.cancel.is_cancelled());
         assert!(first_playback.load(Ordering::SeqCst));
@@ -2512,8 +2542,10 @@ mod tests {
         speaker.mark_producing();
         other.mark_producing();
 
-        apply_barge_in(&turns, 2, turns.producing_turns(), "carol");
+        let epoch = AtomicU64::new(0);
+        apply_barge_in(&turns, 2, turns.producing_turns(), "carol", &epoch);
 
+        assert_eq!(epoch.load(Ordering::SeqCst), 2);
         assert!(speaker.cancel.is_cancelled());
         assert!(other.cancel.is_cancelled());
         assert!(speaker_playback.load(Ordering::SeqCst));
@@ -2532,13 +2564,15 @@ mod tests {
         turns.begin_turn(7, &first);
         first.mark_producing();
         let stale = turns.producing_turns();
-        apply_barge_in(&turns, 8, stale, "dave");
+        let epoch = AtomicU64::new(0);
+        apply_barge_in(&turns, 8, stale, "dave", &epoch);
 
         let successor = Arc::new(ActiveTurn::new());
         turns.begin_turn(7, &successor);
         successor.mark_producing();
-        apply_barge_in(&turns, 8, turns.producing_turns(), "dave");
+        apply_barge_in(&turns, 8, turns.producing_turns(), "dave", &epoch);
 
+        assert_eq!(epoch.load(Ordering::SeqCst), 2);
         assert!(successor.cancel.is_cancelled());
         assert!(successor.playback_cancel().load(Ordering::SeqCst));
         assert!(turns.active(7).is_none());
@@ -2556,8 +2590,10 @@ mod tests {
 
         let successor = Arc::new(ActiveTurn::new());
         let displaced = turns.begin_turn(5, &successor);
-        cancel_displaced_turns(&turns, displaced, true);
+        let epoch = AtomicU64::new(0);
+        cancel_displaced_turns(&turns, displaced, true, &epoch);
 
+        assert_eq!(epoch.load(Ordering::SeqCst), 0);
         assert!(!voice.cancel.is_cancelled());
         assert!(!playback.load(Ordering::SeqCst));
         let producing = turns.producing_turns();
@@ -2567,7 +2603,8 @@ mod tests {
         assert!(Arc::ptr_eq(&latest, &successor));
 
         // 留下的旧回合确实还能被插话取消
-        apply_barge_in(&turns, 6, turns.producing_turns(), "erin");
+        apply_barge_in(&turns, 6, turns.producing_turns(), "erin", &epoch);
+        assert_eq!(epoch.load(Ordering::SeqCst), 1);
         assert!(voice.cancel.is_cancelled());
         assert!(playback.load(Ordering::SeqCst));
         assert!(turns.producing_turns().is_empty());
@@ -2586,8 +2623,10 @@ mod tests {
 
         let successor = Arc::new(ActiveTurn::new());
         let displaced = turns.begin_turn(5, &successor);
-        cancel_displaced_turns(&turns, displaced, false);
+        let epoch = AtomicU64::new(0);
+        cancel_displaced_turns(&turns, displaced, false, &epoch);
 
+        assert_eq!(epoch.load(Ordering::SeqCst), 1);
         assert!(voice.cancel.is_cancelled());
         assert!(playback.load(Ordering::SeqCst));
         assert!(turns.producing_turns().is_empty());
@@ -2609,8 +2648,10 @@ mod tests {
             let successor = Arc::new(ActiveTurn::new());
 
             let displaced = turns.begin_turn(9, &successor);
-            cancel_displaced_turns(&turns, displaced, barge_in_available);
+            let epoch = AtomicU64::new(0);
+            cancel_displaced_turns(&turns, displaced, barge_in_available, &epoch);
 
+            assert_eq!(epoch.load(Ordering::SeqCst), 0);
             assert!(!pending.is_producing());
             assert!(pending.cancel.is_cancelled());
             assert!(playback.load(Ordering::SeqCst));
@@ -2656,7 +2697,9 @@ mod tests {
             "session wait must not count as production"
         );
 
-        apply_barge_in(&turns, 9, turns.producing_turns(), "other-caller");
+        let epoch = AtomicU64::new(0);
+        apply_barge_in(&turns, 9, turns.producing_turns(), "other-caller", &epoch);
+        assert_eq!(epoch.load(Ordering::SeqCst), 1);
         assert!(producer.cancel.is_cancelled());
         assert!(
             !queued.cancel.is_cancelled(),
